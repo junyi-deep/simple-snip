@@ -1,0 +1,424 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-25T08:27:48.494309+00:00",
+  "title": "Design System: Simple Snip",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Kit Default Light action",
+        "tonalRamp": [
+          "#171717",
+          "#262626",
+          "#404040",
+          "#525252",
+          "#737373",
+          "#a3a3a3",
+          "#d4d4d4",
+          "#e5e5e5"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "primary-foreground": {
+        "role": "neutral",
+        "displayName": "Kit Default Light action text",
+        "tonalRamp": [
+          "#171717",
+          "#262626",
+          "#404040",
+          "#525252",
+          "#737373",
+          "#a3a3a3",
+          "#d4d4d4",
+          "#e5e5e5"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "background": {
+        "role": "neutral",
+        "displayName": "Kit Default Light canvas",
+        "tonalRamp": [
+          "#171717",
+          "#262626",
+          "#404040",
+          "#525252",
+          "#737373",
+          "#a3a3a3",
+          "#d4d4d4",
+          "#e5e5e5"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "foreground": {
+        "role": "neutral",
+        "displayName": "Kit Default Light text",
+        "tonalRamp": [
+          "#171717",
+          "#262626",
+          "#404040",
+          "#525252",
+          "#737373",
+          "#a3a3a3",
+          "#d4d4d4",
+          "#e5e5e5"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Kit Default Light muted surface",
+        "tonalRamp": [
+          "#171717",
+          "#262626",
+          "#404040",
+          "#525252",
+          "#737373",
+          "#a3a3a3",
+          "#d4d4d4",
+          "#e5e5e5"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Kit Default Light divider",
+        "tonalRamp": [
+          "#171717",
+          "#262626",
+          "#404040",
+          "#525252",
+          "#737373",
+          "#a3a3a3",
+          "#d4d4d4",
+          "#e5e5e5"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "selection-cyan": {
+        "role": "content",
+        "displayName": "Capture cyan",
+        "tonalRamp": [
+          "oklch(15% 0.08 195)",
+          "oklch(26% 0.08 195)",
+          "oklch(38% 0.08 195)",
+          "oklch(49% 0.08 195)",
+          "oklch(61% 0.08 195)",
+          "oklch(72% 0.08 195)",
+          "oklch(84% 0.08 195)",
+          "oklch(95% 0.08 195)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "overlay-dim": {
+        "role": "neutral",
+        "displayName": "Desktop dim",
+        "tonalRamp": [
+          "oklch(15% 0.08 250)",
+          "oklch(26% 0.08 250)",
+          "oklch(38% 0.08 250)",
+          "oklch(49% 0.08 250)",
+          "oklch(61% 0.08 250)",
+          "oklch(72% 0.08 250)",
+          "oklch(84% 0.08 250)",
+          "oklch(95% 0.08 250)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "canvas-panel": {
+        "role": "neutral",
+        "displayName": "Canvas slate",
+        "tonalRamp": [
+          "oklch(15% 0.08 250)",
+          "oklch(26% 0.08 250)",
+          "oklch(38% 0.08 250)",
+          "oklch(49% 0.08 250)",
+          "oklch(61% 0.08 250)",
+          "oklch(72% 0.08 250)",
+          "oklch(84% 0.08 250)",
+          "oklch(95% 0.08 250)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "canvas-panel-foreground": {
+        "role": "neutral",
+        "displayName": "Canvas pale text",
+        "tonalRamp": [
+          "oklch(15% 0.08 230)",
+          "oklch(26% 0.08 230)",
+          "oklch(38% 0.08 230)",
+          "oklch(49% 0.08 230)",
+          "oklch(61% 0.08 230)",
+          "oklch(72% 0.08 230)",
+          "oklch(84% 0.08 230)",
+          "oklch(95% 0.08 230)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "helper": {
+        "role": "neutral",
+        "displayName": "Preferences helper",
+        "tonalRamp": [
+          "oklch(15% 0.08 240)",
+          "oklch(26% 0.08 240)",
+          "oklch(38% 0.08 240)",
+          "oklch(49% 0.08 240)",
+          "oklch(61% 0.08 240)",
+          "oklch(72% 0.08 240)",
+          "oklch(84% 0.08 240)",
+          "oklch(95% 0.08 240)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "row-border": {
+        "role": "neutral",
+        "displayName": "Preferences row divider",
+        "tonalRamp": [
+          "oklch(15% 0.08 240)",
+          "oklch(26% 0.08 240)",
+          "oklch(38% 0.08 240)",
+          "oklch(49% 0.08 240)",
+          "oklch(61% 0.08 240)",
+          "oklch(72% 0.08 240)",
+          "oklch(84% 0.08 240)",
+          "oklch(95% 0.08 240)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "annotation-red": {
+        "role": "content",
+        "displayName": "Annotation red",
+        "tonalRamp": [
+          "oklch(15% 0.08 24)",
+          "oklch(26% 0.08 24)",
+          "oklch(38% 0.08 24)",
+          "oklch(49% 0.08 24)",
+          "oklch(61% 0.08 24)",
+          "oklch(72% 0.08 24)",
+          "oklch(84% 0.08 24)",
+          "oklch(95% 0.08 24)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "annotation-yellow": {
+        "role": "content",
+        "displayName": "Annotation yellow",
+        "tonalRamp": [
+          "oklch(15% 0.08 78)",
+          "oklch(26% 0.08 78)",
+          "oklch(38% 0.08 78)",
+          "oklch(49% 0.08 78)",
+          "oklch(61% 0.08 78)",
+          "oklch(72% 0.08 78)",
+          "oklch(84% 0.08 78)",
+          "oklch(95% 0.08 78)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "annotation-green": {
+        "role": "content",
+        "displayName": "Annotation green",
+        "tonalRamp": [
+          "oklch(15% 0.08 155)",
+          "oklch(26% 0.08 155)",
+          "oklch(38% 0.08 155)",
+          "oklch(49% 0.08 155)",
+          "oklch(61% 0.08 155)",
+          "oklch(72% 0.08 155)",
+          "oklch(84% 0.08 155)",
+          "oklch(95% 0.08 155)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "annotation-blue": {
+        "role": "content",
+        "displayName": "Annotation blue",
+        "tonalRamp": [
+          "oklch(15% 0.08 250)",
+          "oklch(26% 0.08 250)",
+          "oklch(38% 0.08 250)",
+          "oklch(49% 0.08 250)",
+          "oklch(61% 0.08 250)",
+          "oklch(72% 0.08 250)",
+          "oklch(84% 0.08 250)",
+          "oklch(95% 0.08 250)"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "annotation-white": {
+        "role": "content",
+        "displayName": "Annotation white",
+        "tonalRamp": [
+          "#171717",
+          "#262626",
+          "#404040",
+          "#525252",
+          "#737373",
+          "#a3a3a3",
+          "#d4d4d4",
+          "#e5e5e5"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      },
+      "annotation-black": {
+        "role": "content",
+        "displayName": "Annotation black",
+        "tonalRamp": [
+          "#171717",
+          "#262626",
+          "#404040",
+          "#525252",
+          "#737373",
+          "#a3a3a3",
+          "#d4d4d4",
+          "#e5e5e5"
+        ],
+        "rampPurpose": "Design-panel tonal study only; not an application token scale."
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Preferences title",
+        "purpose": "Semibold section heading; source uses 1.5rem."
+      },
+      "body": {
+        "displayName": "Native body",
+        "purpose": "Preferences body copy."
+      },
+      "label": {
+        "displayName": "Helper and status",
+        "purpose": "Compact descriptions, toolbar messages, and capture hints."
+      }
+    },
+    "shadows": [
+      {
+        "name": "native-toolbar-medium",
+        "value": "GPUI shadow_md()",
+        "purpose": "Separate the popover toolbar from image content; native rasterization unverified."
+      }
+    ],
+    "motion": [],
+    "breakpoints": [],
+    "nativeTheme": {
+      "source": "gpui-kit 0.8.0 / gpui-component 0.8.0 installed dependency",
+      "bindings": [
+        "background",
+        "foreground",
+        "muted",
+        "border",
+        "popover",
+        "popover_foreground",
+        "primary",
+        "primary_foreground"
+      ],
+      "frontmatterMode": "Default Light reference; resolve native theme dynamically at runtime.",
+      "previewStatus": "HTML/CSS examples approximate native primitives for the design panel only. The toolbar preview shadow is illustrative, not an extracted native shadow value."
+    },
+    "verification": {
+      "basis": "Rust source and installed pinned Kit dependency",
+      "nativeScreenshots": "Unlocked macOS: inline number/arrow export, selection thickness, direct image text/Enter, native permission sheet and Settings navigation observed. User confirmed desktop trail is transparent; requested removing endpoint dots and shorter fade, implemented. Windows remains unverified.",
+      "pending": [
+        "Independent Windows AMD64 visual review",
+        "Final no-dot/300ms trail physical-mouse check, multi-display acceptance",
+        "Toolbar wrapping and tiny pins",
+        "Dark theme and IME combinations"
+      ]
+    },
+    "sources": [
+      "src/editor.rs",
+      "src/overlay.rs",
+      "src/pin.rs",
+      "src/settings.rs",
+      "crates/snip-core/src/geometry.rs"
+    ],
+    "feedback_0_1_1": {
+      "icon": "Blue #1769e0, white crop brackets with reduced gap",
+      "text": "Field at clicked image point; next-frame focus; Enter commits; Escape cancels",
+      "annotation": "Number markers, three arrow-width styles, selected-object wheel thickness, tool/range cursor overlays",
+      "trail": "Transparent native and Kit Root layers, cubic curves, no per-sample endpoint quads, default 300ms lifetime"
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Kit action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Illustrative Default Light proxy for a native primary action; native Kit states remain authoritative.",
+      "html": "<button class=\"ds-primary\">保存设置</button>",
+      "css": ".ds-primary{font-family:system-ui,sans-serif;font-size:14px;background:#171717;color:#fafafa;border:1px solid #171717;border-radius:6px;padding:5px 12px}.ds-primary:hover{background:#262626}.ds-primary:active{background:#0a0a0a}.ds-primary:focus-visible{outline:2px solid #a3a3a3;outline-offset:2px}"
+    },
+    {
+      "name": "Geometric tool button",
+      "kind": "button",
+      "refersTo": "button-tool",
+      "description": "Extra-small ghost tool with original SVG geometry and an accessible name.",
+      "html": "<button class=\"ds-tool\" aria-label=\"矩形\" title=\"矩形\"><svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.65' stroke-linecap='round' stroke-linejoin='round'><rect x='4' y='5' width='16' height='14' rx='1'/></svg></button>",
+      "css": ".ds-tool{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:0;background:transparent;color:#0a0a0a;border:0;border-radius:6px}.ds-tool:hover,.ds-tool:active{background:#f5f5f5}.ds-tool:focus-visible{outline:2px solid #a3a3a3;outline-offset:1px}"
+    },
+    {
+      "name": "Settings field",
+      "kind": "input",
+      "description": "Illustrative native field proxy for a keyboard shortcut.",
+      "html": "<input class=\"ds-field\" aria-label=\"区域截图快捷键\" value=\"F1\">",
+      "css": ".ds-field{font-family:system-ui,sans-serif;font-size:14px;width:168px;padding:5px 8px;border:1px solid #e5e5e5;border-radius:6px;color:#0a0a0a;background:#fff}.ds-field:hover{border-color:#a3a3a3}.ds-field:focus-visible{outline:2px solid #a3a3a3;outline-offset:1px}"
+    },
+    {
+      "name": "Preferences navigation",
+      "kind": "nav",
+      "refersTo": "settings-nav",
+      "description": "Quiet vertical preferences navigation with the active section emphasized.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"偏好设置\"><button aria-current=\"page\">通用</button><button>截图与标注</button><button>贴图</button></nav>",
+      "css": ".ds-nav{display:flex;flex-direction:column;gap:4px;width:152px;padding:12px;background:#f5f5f5}.ds-nav button{font-family:system-ui,sans-serif;font-size:14px;padding:5px 10px;border:1px solid #e5e5e5;border-radius:6px;background:#fff;color:#0a0a0a}.ds-nav button[aria-current]{background:#171717;color:#fafafa}.ds-nav button:hover{filter:brightness(.95)}.ds-nav button:focus-visible{outline:2px solid #a3a3a3;outline-offset:1px}"
+    },
+    {
+      "name": "Compact annotation toolbar",
+      "kind": "custom",
+      "refersTo": "annotation-toolbar",
+      "description": "A partial illustrative strip; the full native toolbar includes tools, actions, contextual rows, and display-aware placement.",
+      "html": "<div class=\"ds-toolbar\" role=\"toolbar\" aria-label=\"标注\"><button aria-label=\"矩形\" title=\"矩形\"><svg width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.65' stroke-linecap='round' stroke-linejoin='round'><rect x='4' y='5' width='16' height='14' rx='1'/></svg></button><button aria-label=\"复制图片\" title=\"复制图片\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.65\"><rect x=\"8\" y=\"8\" width=\"13\" height=\"13\" rx=\"1\"/><path d=\"M16 8V3H3v13h5\"/></svg></button><span>线宽</span><button>2</button><button>4</button><button>8</button></div>",
+      "css": ".ds-toolbar{display:inline-flex;align-items:center;gap:1px;padding:4px;border-radius:6px;background:#fff;color:#0a0a0a;box-shadow:0 4px 8px #0002;font-family:system-ui,sans-serif;font-size:14px;}.ds-toolbar button{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 4px;border:0;border-radius:6px;background:transparent;color:inherit}.ds-toolbar span{font-size:12px;margin:0 4px}.ds-toolbar button:hover,.ds-toolbar button:active{background:#f5f5f5}.ds-toolbar button:focus-visible{outline:2px solid #a3a3a3;outline-offset:1px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Native Workbench",
+    "overview": "Simple Snip is a compact native desktop utility. Its visual character is practical, restrained, and precise: system typography, quiet preferences, familiar GPUI Kit controls, and image-first capture and pin surfaces. Controls support the image without turning annotation into a separate application frame.\n\nThis document merges the existing design guidance with the confirmed 2026-10-25 correction and the current Rust implementation. It describes GPUI Kit (0.8.0) on Windows AMD64 and macOS ARM64. The North Star is descriptive shorthand for the incumbent system; it is not a new user-selected brand identity. After unlocking, macOS checks verified inline rectangle/arrow annotation, undo/redo, below/inside toolbar placement and finish/cancel focus recovery. Remaining tools, dark theme, small images and Windows still need acceptance. Measurements remain source-observed unless explicitly verified.",
+    "keyCharacteristics": [
+      "Native system typography and semantic Kit theme colors.",
+      "Compact independent geometric icons with names and tooltips.",
+      "Annotation in the screenshot overlay or existing selected pin.",
+      "A small toolbar tight against the image's lower-right edge.",
+      "Quiet preferences with descriptive rows and actionable recovery text."
+    ],
+    "rules": [
+      {
+        "name": "The Semantic Surface Rule",
+        "body": "Resolve application surfaces and control states through Kit's active semantic theme; fixed image overlays and annotation ink retain their content-specific colors.",
+        "section": "colors"
+      },
+      {
+        "name": "The Lower-Right Attachment Rule",
+        "body": "Align the compact toolbar with the image's lower-right edge, separated by the `image-toolbar-gap`. Place it below when the display has room; otherwise place it inside the image, above its lower border. Clamp to display bounds instead of clipping controls at the image edge.",
+        "section": "layout"
+      },
+      {
+        "name": "The One Image Surface Rule",
+        "body": "Edit in the current screenshot selection or original selected pin. A pin may open a toolbar-only native popup so even a tiny pin retains the complete controls; that popup must never duplicate the image canvas or become an editor application frame.",
+        "section": "components"
+      }
+    ],
+    "dos": [
+      "**Do** keep screenshots and pins visually dominant.",
+      "**Do** attach tools to the image's lower-right edge and move them inside above the lower border when space below is unavailable.",
+      "**Do** preserve the toolbar-only native float for pins so tiny images do not crop its controls.",
+      "**Do** use semantic Kit surface/control colors and the platform system font.",
+      "**Do** keep tooltips, accessible names, keyboard access, and actionable recovery messages.",
+      "**Do** verify final toolbar placement, wrapping, focus, and dark-theme contrast in unlocked native sessions on each supported platform."
+    ],
+    "donts": [
+      "**Don't** open a separate image editor window or duplicate a pin's image into a second editor frame.",
+      "**Don't** place a large application chrome, title bar, or settings sidebar around annotation.",
+      "**Don't** let the image's clipping bounds crop the toolbar.",
+      "**Don't** copy proprietary Snipaste icons or visual assets; retain the original crop-corner app icon and independent tool geometry.",
+      "**Don't** treat the sidecar's HTML previews as proof of native rendering or completed visual acceptance."
+    ]
+  }
+}

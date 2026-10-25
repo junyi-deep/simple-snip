@@ -1,0 +1,18 @@
+[package]
+name = "snip-core"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+serde.workspace = true
+tracing.workspace = true
+toml = "0.8"
+dirs = "6"
+tempfile = "3"
+tiny-skia = "0.11"
+gif = "0.14"
+
+fontdue = "=0.9.5"

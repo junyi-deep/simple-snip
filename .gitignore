@@ -1,0 +1,8 @@
+/target
+/dist
+/.impeccable/review
+*.log
+.DS_Store
+
+# Machine-specific logs remain local; publish reproducible test summaries.
+/docs/verification/

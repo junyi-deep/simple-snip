@@ -1,0 +1,47 @@
+[workspace]
+members = ["crates/snip-core", "crates/snip-platform", "crates/snip-update"]
+resolver = "3"
+
+[package]
+name = "simple-snip"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+description = "Offline desktop capture and independent image pins, built with GPUI Kit"
+
+[workspace.dependencies]
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+
+[dependencies]
+gpui-kit = "=0.8.0"
+gpui-tray = { version = "=0.3.0", default-features = false, features = ["gpui-kit", "menu-state"] }
+snip-core = { path = "crates/snip-core" }
+snip-platform = { path = "crates/snip-platform" }
+snip-update = { path = "crates/snip-update" }
+anyhow.workspace = true
+image.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-channel = "2"
+smol = "2"
+global-hotkey = "=0.9.0"
+raw-window-handle = "0.6"
+chrono = "0.4"
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+lto = "thin"
+strip = true
+
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+embed-resource = "3"
