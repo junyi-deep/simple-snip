@@ -20,6 +20,36 @@ pub struct Config {
     pub gif: GifConfig,
     pub trail: TrailConfig,
     pub updates: UpdateConfig,
+    pub pin: PinConfig,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PinConfig {
+    pub border_color: String,
+    pub border_width: f32,
+    pub shadow: bool,
+}
+impl Default for PinConfig {
+    fn default() -> Self {
+        Self {
+            border_color: "#1688FF".into(),
+            border_width: 1.,
+            shadow: true,
+        }
+    }
+}
+impl PinConfig {
+    pub fn color(&self) -> Result<u32> {
+        let text = self
+            .border_color
+            .strip_prefix('#')
+            .context("边框颜色须为 #RRGGBB")?;
+        ensure!(text.len() == 6, "边框颜色须为 #RRGGBB");
+        u32::from_str_radix(text, 16).context("边框颜色无效")
+    }
+    pub fn margin(&self) -> f32 {
+        if self.shadow { 12. } else { 2. }
+    }
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +122,7 @@ impl Default for Config {
             gif: GifConfig::default(),
             trail: TrailConfig::default(),
             updates: UpdateConfig::default(),
+            pin: PinConfig::default(),
         }
     }
 }
@@ -103,6 +134,11 @@ impl Config {
             .join("config.toml")
     }
     pub fn validate(&self) -> Result<()> {
+        self.pin.color()?;
+        ensure!(
+            self.pin.border_width.is_finite() && (0.0..=8.0).contains(&self.pin.border_width),
+            "贴图边框粗细应为 0–8 像素"
+        );
         ensure!(self.version == 1, "不支持此配置版本 {}", self.version);
         ensure!(
             [5, 10, 15, 20, 30].contains(&self.gif.fps),
@@ -189,6 +225,22 @@ mod tests {
         assert_eq!(c.hotkeys.len(), 2);
         assert_eq!(c.hotkeys["screenshot"], "F1");
         assert_eq!(c.hotkeys["paste_image"], "F3");
+    }
+    #[test]
+    fn pin_frame_settings_validate_and_old_config_gets_defaults() {
+        let old: Config =
+            toml::from_str("version = 1\n[hotkeys]\nscreenshot = 'F1'\npaste_image = 'F3'\n")
+                .unwrap();
+        assert_eq!(old.pin.color().unwrap(), 0x1688ff);
+        assert_eq!(old.pin.border_width, 1.);
+        let mut config = old;
+        config.pin.border_color = "#bad-color".into();
+        assert!(config.validate().is_err());
+        config.pin.border_color = "#ff8800".into();
+        config.pin.border_width = 9.;
+        assert!(config.validate().is_err());
+        config.pin.border_width = 0.;
+        assert!(config.validate().is_ok());
     }
     #[test]
     fn atomic_roundtrip_and_recovery() {

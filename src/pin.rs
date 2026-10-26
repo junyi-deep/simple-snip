@@ -35,11 +35,12 @@ impl PinView {
         let scale = (680. / image.width() as f32)
             .min(500. / image.height() as f32)
             .min(1.);
+        let margin = cx.global::<Runtime>().config.pin.margin();
         let bounds = Bounds::centered(
             None,
             size(
-                px(image.width() as f32 * scale),
-                px(image.height() as f32 * scale),
+                px(image.width() as f32 * scale + margin * 2.),
+                px(image.height() as f32 * scale + margin * 2.),
             ),
             cx,
         );
@@ -73,7 +74,13 @@ impl PinView {
                             crate::editor::identity(&image),
                             EditorHost::Pin(id),
                             image.clone(),
-                            Bounds::new(point(px(0.), px(0.)), window.viewport_size()),
+                            Bounds::new(
+                                point(px(margin), px(margin)),
+                                size(
+                                    window.viewport_size().width - px(margin * 2.),
+                                    window.viewport_size().height - px(margin * 2.),
+                                ),
+                            ),
                             window,
                             cx,
                         )
@@ -161,6 +168,14 @@ impl PinView {
         .detach();
         cx.notify();
     }
+    pub fn refresh_frame(&self, w: &mut Window, cx: &mut Context<Self>) {
+        let margin = cx.global::<Runtime>().config.pin.margin();
+        w.resize(size(
+            px(self.shown.width() as f32 * self.scale + margin * 2.),
+            px(self.shown.height() as f32 * self.scale + margin * 2.),
+        ));
+        cx.notify();
+    }
     pub fn style(&self, w: &Window) {
         app::apply_style(
             w,
@@ -187,13 +202,20 @@ impl PinView {
         let doc = self.doc.clone();
         let image = self.shown.clone();
         let id = self.id;
+        let margin = cx.global::<Runtime>().config.pin.margin();
         self.editor = Some(cx.new(|cx| {
             EditorView::new(
                 doc,
                 transform,
                 EditorHost::Pin(id),
                 image,
-                Bounds::new(point(px(0.), px(0.)), w.viewport_size()),
+                Bounds::new(
+                    point(px(margin), px(margin)),
+                    size(
+                        w.viewport_size().width - px(margin * 2.),
+                        w.viewport_size().height - px(margin * 2.),
+                    ),
+                ),
                 w,
                 cx,
             )
@@ -237,8 +259,10 @@ impl PinView {
                         v.shown = image;
                         v.texture = app::texture(&v.shown);
                         let dimensions = size(
-                            px(v.shown.width() as f32 * v.scale),
-                            px(v.shown.height() as f32 * v.scale),
+                            px(v.shown.width() as f32 * v.scale
+                                + cx.global::<Runtime>().config.pin.margin() * 2.),
+                            px(v.shown.height() as f32 * v.scale
+                                + cx.global::<Runtime>().config.pin.margin() * 2.),
                         );
                         let _ = handle.update(cx, |_, w, _| w.resize(dimensions));
                     }
@@ -251,10 +275,59 @@ impl PinView {
     }
 }
 impl Render for PinView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(editor) = &self.editor {
-            return div().size_full().child(editor.clone()).into_any_element();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let config = cx.global::<Runtime>().config.pin.clone();
+        let margin = config.margin();
+        let border = config.color().unwrap_or(0x1688ff);
+        let content = if let Some(editor) = &self.editor {
+            editor.clone().into_any_element()
+        } else {
+            img(self.texture.clone())
+                .size_full()
+                .object_fit(ObjectFit::Fill)
+                .into_any_element()
+        };
+        let frame = div()
+            .size_full()
+            .relative()
+            .when(config.shadow, |d| d.shadow_md())
+            .child(content)
+            .child(
+                canvas(
+                    move |_, _, _| (),
+                    move |bounds, _, w, _| {
+                        if config.border_width > 0. {
+                            let thickness = px(config.border_width);
+                            w.paint_quad(
+                                outline(
+                                    Bounds::new(
+                                        bounds.origin + point(thickness / 2., thickness / 2.),
+                                        size(
+                                            (bounds.size.width - thickness).max(px(0.)),
+                                            (bounds.size.height - thickness).max(px(0.)),
+                                        ),
+                                    ),
+                                    rgb(border),
+                                    BorderStyle::Solid,
+                                )
+                                .border_widths(thickness),
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            );
+        if self.editor.is_some() {
+            return div()
+                .size_full()
+                .p(px(margin))
+                .bg(transparent_black())
+                .child(frame)
+                .into_any_element();
         }
+        let _ = window;
         let notice = self.notice.clone();
         div()
             .id(("pin", self.id))
@@ -262,11 +335,8 @@ impl Render for PinView {
             .size_full()
             .relative()
             .bg(gpui_kit::transparent_black())
-            .child(
-                img(self.texture.clone())
-                    .size_full()
-                    .object_fit(ObjectFit::Fill),
-            )
+            .p(px(margin))
+            .child(frame)
             .children(notice.map(|text| {
                 div()
                     .absolute()
@@ -302,8 +372,10 @@ impl Render for PinView {
                 } else {
                     v.scale = (v.scale * (1. + delta.signum() * 0.05)).clamp(0.05, 6.);
                     w.resize(size(
-                        px(v.shown.width() as f32 * v.scale),
-                        px(v.shown.height() as f32 * v.scale),
+                        px(v.shown.width() as f32 * v.scale
+                            + cx.global::<Runtime>().config.pin.margin() * 2.),
+                        px(v.shown.height() as f32 * v.scale
+                            + cx.global::<Runtime>().config.pin.margin() * 2.),
                     ));
                 }
                 cx.notify();

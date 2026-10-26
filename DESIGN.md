@@ -183,3 +183,7 @@ The app mark uses a blue `#1769e0` tile and white crop brackets with a tighter g
 ## Public 0.0.1 settings
 
 About includes an explicit GitHub update check, download progress, verified package reveal, and system/direct/custom HTTP proxy modes. Address and optional username/password fields appear only for custom proxy. Password is masked and session-only. Trail lifetime remains numeric 100–3000ms and reapplies immediately on save; the continuous ribbon interpolates color, alpha, and width across shared edges.
+
+## 0.0.2 native refinement
+
+Pins have a default thin blue #1688FF frame. Color, 0–8px width and shadow can be changed in Pin settings. Transparent padding accommodates the shadow without changing image coordinates or exported pixels. Toolbar controls align to the actual image right edge, excluding shadow padding; natural icon widths replace the reserved empty area. Eight blue/white handles remain visible on a selected capture and preserve annotation coordinates when resized. Preferences explicitly show and rise above own pins when activated, then return to normal level on blur. Final unlocked visual acceptance is pending.

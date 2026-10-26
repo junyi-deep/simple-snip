@@ -58,3 +58,11 @@ GPUI 的 `titlebar: None` 创建的是 titled + full-size-content 窗口，macOS
 代理配置持久化模式、地址与用户名；密码为遮罩的会话字段，不序列化、不写日志。默认使用 reqwest 的系统代理（系统设置 / 环境变量；不包含自定义 PAC 脚本执行器），可直连或指定 HTTP(S) 代理并使用可选 Basic 认证。HTTP 代理可通过 CONNECT 转发 HTTPS，TLS 不降级。校验包下载完后在文件夹显示，用户退出并替换安装；没有静默覆盖正在运行的程序，正式签名更新机制仍待后续证书支持。
 
 拖尾改成贝塞尔曲线细分的共享边带状几何，相邻位置复用位置、法线、时间和宽度，两端 GPU 线性渐变同时插值颜色和透明度；不再为每段刷一个不变颜色。每曲线最多 64 段，点缓存仍为 256，避免无限增长。生命周期 100–3000ms 可设置，保存后重新应用，无需先关闭特效。
+
+## 0.0.2 窗口、热键与可调整截图
+
+重开设置先 show / orderFront 再激活；设置激活时与自有置顶贴图同层并排到前方，失焦降回普通层级。贴图框架有独立透明边距，GPUI 绘制阴影及内部边框，不改变 Document / 导出像素。创建 / 复用贴图也显式透明 Kit Root。工具条锚定图像实际逻辑 Bounds（排除阴影边距），常规宽度按 19/20 个图标控件收紧，行内容靠右。
+
+macOS 热键通过公开 Carbon RegisterEventHotKey 注册到 GetEventDispatcherTarget，使用 kEventHotKeyExclusive=1 检测冲突。回调仅转发已注册 ID 到统一命令队列；没有事件 Tap、键盘轮询或额外全局绑定，不绕过系统功能键。Windows 后端保持独立。API 类型 / 常量读取自本机 Apple SDK CarbonEvents.h / Events.h，常见字母、数字、F1–F20 与导航键明确映射，不支持的按键会报错。
+
+Overlay 独立保存正在拖动的选区；拖动缩放手柄时临时隐藏编辑器，松开后从完整冻结图像裁剪。Document.reframe 平移当前对象及 undo / redo 快照，保证原标注的桌面位置不变，超出新边界的内容在导出时裁切。重置 OCR 并在下一帧恢复画布焦点。刷新渲染任务由 GPUI background executor 调度，使生产和 headless 测试共享任务生命周期。

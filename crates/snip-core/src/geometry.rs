@@ -19,6 +19,59 @@ pub struct Rect {
     pub width: f32,
     pub height: f32,
 }
+#[derive(Clone, Copy, Debug)]
+pub enum SelectionHandle {
+    NorthWest,
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+}
+pub fn resize_selection(r: Rect, handle: SelectionHandle, p: Point, bounds: Rect) -> Rect {
+    use SelectionHandle::*;
+    let (mut left, mut top, mut right, mut bottom) = (r.x, r.y, r.right(), r.bottom());
+    if matches!(handle, NorthWest | West | SouthWest) {
+        left = p.x.clamp(bounds.x, (right - 1.).max(bounds.x));
+    }
+    if matches!(handle, NorthEast | East | SouthEast) {
+        right = p.x.clamp((left + 1.).min(bounds.right()), bounds.right());
+    }
+    if matches!(handle, NorthWest | North | NorthEast) {
+        top = p.y.clamp(bounds.y, (bottom - 1.).max(bounds.y));
+    }
+    if matches!(handle, SouthWest | South | SouthEast) {
+        bottom = p.y.clamp((top + 1.).min(bounds.bottom()), bounds.bottom());
+    }
+    Rect::new(left, top, right - left, bottom - top)
+}
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    #[test]
+    fn resize_keeps_opposite_edges_and_clamps_to_screen() {
+        let bounds = Rect::new(0., 0., 400., 300.);
+        let r = Rect::new(80., 60., 120., 100.);
+        let enlarged = resize_selection(
+            r,
+            SelectionHandle::SouthEast,
+            Point::new(450., 290.),
+            bounds,
+        );
+        assert_eq!(enlarged, Rect::new(80., 60., 320., 230.));
+        let collapsed = resize_selection(
+            r,
+            SelectionHandle::NorthWest,
+            Point::new(250., 200.),
+            bounds,
+        );
+        assert_eq!(collapsed, Rect::new(199., 159., 1., 1.));
+        let wider = resize_selection(r, SelectionHandle::West, Point::new(-20., 120.), bounds);
+        assert_eq!(wider, Rect::new(0., 60., 200., 100.));
+    }
+}
 impl Rect {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
         Self {

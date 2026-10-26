@@ -5,6 +5,10 @@
 compile_error!("Only macos-arm64 and win-amd64 are supported");
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macos_hotkeys;
+#[cfg(target_os = "macos")]
+pub use macos_hotkeys::NativeHotkeyManager;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "macos")]

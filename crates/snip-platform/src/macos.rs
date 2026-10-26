@@ -135,6 +135,9 @@ pub fn native_show(handle: RawWindowHandle, show: bool) -> Result<()> {
     }
     Ok(())
 }
+pub fn window_visible(handle: RawWindowHandle) -> Result<bool> {
+    Ok(window(handle)?.isVisible())
+}
 pub fn native_cursor() -> Result<Point> {
     let e = CGEvent::new(None).context("无法读取鼠标位置")?;
     let p = CGEvent::location(Some(&e));

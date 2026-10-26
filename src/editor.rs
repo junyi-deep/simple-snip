@@ -132,6 +132,38 @@ impl EditorView {
     pub fn focus_canvas(&self, w: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(w, cx);
     }
+    pub fn canvas_focused(&self, w: &Window) -> bool {
+        self.focus.is_focused(w) && self.text_anchor.is_none()
+    }
+    pub fn reframe_capture(
+        &mut self,
+        image: Arc<RgbaImage>,
+        dx: f32,
+        dy: f32,
+        bounds: Bounds<Pixels>,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_text(cx);
+        self.clear_ocr();
+        self.doc.reframe(image.clone(), dx, dy);
+        self.transform = identity(&image);
+        self.rendered = image.clone();
+        self.texture = app::texture(&image);
+        self.origin = bounds.origin;
+        self.view_size = bounds.size;
+        self.scale = f32::from(bounds.size.width) / image.width() as f32;
+        self.draft = None;
+        self.last = None;
+        self.selected = None;
+        self.pointer = None;
+        self.refresh(cx);
+        let editor = cx.entity().downgrade();
+        // The resize preview temporarily unmounts the editor.
+        w.on_next_frame(move |w, cx| {
+            let _ = editor.update(cx, |v, cx| v.focus_canvas(w, cx));
+        });
+    }
     fn image_point(&self, p: Point<Pixels>) -> ImagePoint {
         self.transform.inverse(ImagePoint::new(
             f32::from(p.x - self.origin.x) / self.scale,
@@ -299,8 +331,11 @@ impl EditorView {
         let generation = self.generation;
         let doc = self.doc.clone();
         let transform = self.transform;
+        let render = cx
+            .background_executor()
+            .spawn(async move { render_document(doc, transform) });
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || render_document(doc, transform)).await;
+            let result = render.await;
             let _ = this.update(cx, |v, cx| {
                 v.rendering = false;
                 if v.generation == generation {
@@ -584,6 +619,15 @@ impl EditorView {
             self.refresh(cx);
         }
     }
+    fn toolbar_width(&self) -> f32 {
+        if self.ocr.is_some() {
+            520.
+        } else if matches!(self.host, EditorHost::Capture) {
+            416.
+        } else {
+            437.
+        }
+    }
     fn toolbar_height(&self) -> f32 {
         34. + if self.tool != Tool::Select || self.selected.is_some() || self.ocr.is_some() {
             38.
@@ -610,7 +654,7 @@ impl EditorView {
             ("高斯模糊", Tool::Blur),
             ("橡皮擦", Tool::Eraser),
         ];
-        let mut strip = div().h_flex().gap(px(1.)).flex_wrap();
+        let mut strip = div().h_flex().gap(px(1.)).justify_end().flex_wrap();
         for (i, (label, tool)) in tools.into_iter().enumerate() {
             strip = strip.child(
                 Button::new(("tool", i))
@@ -680,7 +724,8 @@ impl EditorView {
                     })),
             );
         }
-        let width = 520f32
+        let width = self
+            .toolbar_width()
             .min(f32::from(w.viewport_size().width) - 16.)
             .max(260.);
         let has_options =
@@ -782,7 +827,7 @@ impl EditorView {
                         )),
                 );
         } else if has_options {
-            let mut options = div().h_flex().gap_1().items_center();
+            let mut options = div().h_flex().gap_1().items_center().justify_end();
             for (i, (label, color)) in [
                 ("红色", [240, 60, 70, 255]),
                 ("黄色", [255, 180, 30, 255]),
@@ -844,7 +889,7 @@ impl EditorView {
 
             panel = panel.child(options);
             if self.option_tool() == Tool::Arrow {
-                let mut styles = div().h_flex().gap_1();
+                let mut styles = div().h_flex().gap_1().justify_end();
                 for (i, (label, style)) in [
                     ("头尾等宽", ArrowStyle::Uniform),
                     ("头宽尾细", ArrowStyle::HeadWide),
@@ -1795,7 +1840,12 @@ impl Render for FloatingToolbar {
             return div().size_full();
         };
         let height = editor.read(cx).toolbar_height();
-        let bounds = snip_core::geometry::place_toolbar(self.anchor, self.screen, 520., height);
+        let bounds = snip_core::geometry::place_toolbar(
+            self.anchor,
+            self.screen,
+            editor.read(cx).toolbar_width(),
+            height,
+        );
         if bounds != self.last {
             self.last = bounds;
             w.resize(size(px(bounds.width), px(bounds.height)));
@@ -1822,11 +1872,12 @@ pub fn open_toolbar(
     cx: &mut App,
 ) -> anyhow::Result<AnyWindowHandle> {
     let b = pin_window.bounds();
+    let view = editor.read(cx);
     let anchor = Rect::new(
-        f32::from(b.origin.x),
-        f32::from(b.origin.y),
-        f32::from(b.size.width),
-        f32::from(b.size.height),
+        f32::from(b.origin.x + view.origin.x),
+        f32::from(b.origin.y + view.origin.y),
+        f32::from(view.view_size.width),
+        f32::from(view.view_size.height),
     );
     let screen = pin_window.display(cx).map(|d| d.bounds()).unwrap_or(b);
     let screen = Rect::new(
@@ -1835,8 +1886,12 @@ pub fn open_toolbar(
         f32::from(screen.size.width),
         f32::from(screen.size.height),
     );
-    let bounds =
-        snip_core::geometry::place_toolbar(anchor, screen, 520., editor.read(cx).toolbar_height());
+    let bounds = snip_core::geometry::place_toolbar(
+        anchor,
+        screen,
+        editor.read(cx).toolbar_width(),
+        editor.read(cx).toolbar_height(),
+    );
     if let Some((handle, view)) = cx.global::<app::Runtime>().annotation_toolbar.clone() {
         if let Some(previous) = view.read(cx).editor.as_ref()
             && let EditorHost::Pin(id) = previous.read(cx).host

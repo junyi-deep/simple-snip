@@ -335,6 +335,17 @@
       "text": "Field at clicked image point; next-frame focus; Enter commits; Escape cancels",
       "annotation": "Number markers, three arrow-width styles, selected-object wheel thickness, tool/range cursor overlays",
       "trail": "Transparent native and Kit Root layers, cubic curves, no per-sample endpoint quads, default 300ms lifetime"
+    },
+    "public_release_0_0_1": {
+      "update_surface": "About: explicit check, download progress and verified package reveal; system/direct/HTTP proxy with optional masked session password",
+      "trail": "Shared-edge ribbon with interpolated color, alpha and width; 100–3000ms saved lifetime takes effect immediately",
+      "verification": "macOS actual UI: system-proxy release check completed; custom proxy shows optional secure field, invalid URL feedback observed; remote CI in progress"
+    },
+    "public_release_0_0_2": {
+      "pin_frame": "#1688FF / 1 logical px default, configurable color/0–8px width/shadow, excluded from export",
+      "toolbar": "416 capture / 437 pin natural width, right-aligned rows, image anchor excludes frame margin",
+      "selection": "Eight resize handles and Shift+arrows; marks and undo history rebase to frozen source crop",
+      "verification": "40 macOS tests and native settings visibility probe passed; final unlocked desktop QA pending"
     }
   },
   "components": [

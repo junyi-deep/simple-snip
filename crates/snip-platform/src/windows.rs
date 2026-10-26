@@ -81,6 +81,9 @@ pub fn native_show(handle: RawWindowHandle, show: bool) -> Result<()> {
     }
     Ok(())
 }
+pub fn window_visible(handle: RawWindowHandle) -> Result<bool> {
+    Ok(unsafe { IsWindowVisible(hwnd(handle)?).as_bool() })
+}
 pub fn native_cursor() -> Result<Point> {
     let mut p = POINT::default();
     unsafe {

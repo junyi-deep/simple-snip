@@ -20,6 +20,9 @@ pub struct Settings {
     gif_width: Entity<InputState>,
     trail_width: Entity<InputState>,
     trail_life: Entity<InputState>,
+    pin_border_color: Entity<InputState>,
+    pin_border_width: Entity<InputState>,
+    pin_shadow: bool,
     proxy_mode: ProxyMode,
     proxy_url: Entity<InputState>,
     proxy_username: Entity<InputState>,
@@ -46,6 +49,7 @@ impl Settings {
             cx,
             |w, cx| {
                 app::prepare_window(w);
+                app::apply_style(w, snip_platform::WindowStyle::default());
                 w.on_window_should_close(cx, |window, _| {
                     if let Ok(raw) = app::raw(window) {
                         let _ = snip_platform::show_window(raw, false);
@@ -74,6 +78,8 @@ impl Settings {
                 let gif_width = input(config.gif.max_width.to_string());
                 let trail_width = input(config.trail.width.to_string());
                 let trail_life = input(config.trail.lifetime_ms.to_string());
+                let pin_border_color = input(config.pin.border_color.clone());
+                let pin_border_width = input(config.pin.border_width.to_string());
                 let proxy_url = input(config.updates.proxy_url.clone());
                 let proxy_username = input(config.updates.proxy_username.clone());
                 let optional = ["long_capture", "gif", "ocr", "mouse_trail", "settings"]
@@ -86,24 +92,39 @@ impl Settings {
                     })
                     .collect();
                 let proxy_password = cx.new(|cx| InputState::new(w, cx).masked(true));
-                cx.new(|_| Self {
-                    section: 0,
-                    screenshot_key,
-                    paste_key,
-                    save_path,
-                    gif_seconds,
-                    gif_width,
-                    trail_width,
-                    trail_life,
-                    proxy_mode: config.updates.proxy_mode,
-                    proxy_url,
-                    proxy_username,
-                    proxy_password,
-                    update_busy: false,
-                    update_status: "手动检查 GitHub Release；截图和识别内容不会发送。".into(),
-                    update_release: None,
-                    update_file: None,
-                    optional,
+                cx.new(|cx| {
+                    cx.observe_window_activation(w, |_, w, _| {
+                        app::apply_style(
+                            w,
+                            snip_platform::WindowStyle {
+                                topmost: w.is_window_active(),
+                                ..Default::default()
+                            },
+                        );
+                    })
+                    .detach();
+                    Self {
+                        section: 0,
+                        screenshot_key,
+                        paste_key,
+                        save_path,
+                        gif_seconds,
+                        gif_width,
+                        trail_width,
+                        trail_life,
+                        pin_border_color,
+                        pin_border_width,
+                        pin_shadow: config.pin.shadow,
+                        proxy_mode: config.updates.proxy_mode,
+                        proxy_url,
+                        proxy_username,
+                        proxy_password,
+                        update_busy: false,
+                        update_status: "手动检查 GitHub Release；截图和识别内容不会发送。".into(),
+                        update_release: None,
+                        update_file: None,
+                        optional,
+                    }
                 })
             },
         )?;
@@ -133,6 +154,9 @@ impl Settings {
             c.gif.max_width = self.gif_width.read(cx).value().parse()?;
             c.trail.width = self.trail_width.read(cx).value().parse()?;
             c.trail.lifetime_ms = self.trail_life.read(cx).value().parse()?;
+            c.pin.border_color = self.pin_border_color.read(cx).value().trim().to_string();
+            c.pin.border_width = self.pin_border_width.read(cx).value().parse()?;
+            c.pin.shadow = self.pin_shadow;
             c.updates = self.proxy_config(cx);
             snip_update::validate_proxy(&c.updates)?;
             c.validate()?;
@@ -154,6 +178,17 @@ impl Settings {
             Ok(config) => {
                 let restart_trail = !cx.global::<Runtime>().trails.is_empty();
                 cx.global_mut::<Runtime>().config = config;
+                let pins: Vec<_> = cx
+                    .global::<Runtime>()
+                    .pins
+                    .values()
+                    .map(|p| (p.handle, p.view.clone()))
+                    .collect();
+                for (handle, view) in pins {
+                    let _ = handle.update(cx, |_, w, cx| {
+                        view.update(cx, |v, cx| v.refresh_frame(w, cx))
+                    });
+                }
                 if restart_trail {
                     crate::effects::stop(cx);
                     crate::effects::start(cx);
@@ -361,10 +396,35 @@ impl Render for Settings {
                     );
             }
             1 => {
-                content=content.child("拖动创建选区，单击吸附窗口。方向键移动 1 像素，Shift + 方向键调整大小，A 选择当前屏幕，Enter 进入编辑。").child("编辑器保留原始图像与独立标注；复制和保存时合成。Esc 可取消截图。").child(Button::new("take").primary().label("开始截图").on_click(|_,_,cx|app::command(cx,Command::Capture)));
+                content=content.child("拖动创建选区，单击吸附窗口。选区生成后可拖动八个边缘手柄调整宽高；画布聚焦时 Shift + 方向键按 1 像素微调大小。A 选择当前屏幕。").child("编辑器保留原始图像与独立标注；复制和保存时合成。Esc 可取消截图。").child(Button::new("take").primary().label("开始截图").on_click(|_,_,cx|app::command(cx,Command::Capture)));
             }
             2 => {
                 content=content.child("每张图片是独立的置顶窗口。滚轮缩放；Command / Ctrl + 滚轮调整透明度；1 旋转、2 水平翻转、3 垂直翻转；空格编辑；T 切换穿透；双击隐藏；Esc 关闭。").child(div().h_flex().gap_2().child(Button::new("hide").label("隐藏全部").on_click(|_,_,cx|app::command(cx,Command::HidePins))).child(Button::new("show").label("显示全部").on_click(|_,_,cx|app::command(cx,Command::ShowPins))).child(Button::new("restore").primary().label("恢复全部交互").on_click(|_,_,cx|app::command(cx,Command::RestorePins))));
+                content = content
+                    .child(row(
+                        "边框颜色",
+                        "#RRGGBB，默认蓝色；保存后应用于全部贴图",
+                        div()
+                            .w_40()
+                            .child(Input::new(&self.pin_border_color).aria_label("贴图边框颜色")),
+                    ))
+                    .child(row(
+                        "边框粗细",
+                        "0–8 逻辑像素，0 表示隐藏边框",
+                        div()
+                            .w_24()
+                            .child(Input::new(&self.pin_border_width).aria_label("贴图边框粗细")),
+                    ))
+                    .child(row(
+                        "边框阴影",
+                        "只改变桌面外观，不写入图片",
+                        Switch::new("pin-shadow")
+                            .checked(self.pin_shadow)
+                            .on_click(cx.listener(|v, checked, _, cx| {
+                                v.pin_shadow = *checked;
+                                cx.notify();
+                            })),
+                    ));
             }
             3 => {
                 content=content.child("框选稳定的滚动内容区域，避开固定页头。采集后小幅向下滚动，再采集下一段。匹配失败时保留已有结果，可重试或直接导出。内存峰值限制为 256 MiB。").child(Button::new("long").primary().label("选择长截图区域").on_click(|_,_,cx|app::command(cx,Command::LongCapture)));

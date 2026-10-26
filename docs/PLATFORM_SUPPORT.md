@@ -10,8 +10,8 @@
 
 | 能力 | macOS ARM64 | Windows AMD64 |
 |---|---|---|
-| 原生平台模块编译 | 已通过 | MSVC target cargo check 已通过 |
-| GPUI GUI 编译 / 启动 | 已通过 | 本机完整 GUI 交叉检查在 GPUI build.rs 缺 llvm-rc 停止 |
+| 原生平台模块编译 | 已通过 | Windows 原生 CI check / Clippy 已通过 |
+| GPUI GUI 编译 / 启动 | 已通过 | Windows CI 完整编译 / Release / 打包通过；本机交叉仍缺 llvm-rc，桌面启动待验 |
 | 托盘 / 菜单栏 | 原生创建探测通过 | 代码已接入，未运行验收 |
 | F1/F3 注册 | 真实注册成功 | 代码已接入，未运行验收 |
 | F1/F3 真实物理按键 / Fn | 仍需人工确认 | 未验证 |
@@ -30,6 +30,8 @@ macOS 屏幕录制采用 CGPreflightScreenCaptureAccess 快速预检，未确认
 
 Windows 使用 OS 剪贴板、窗口样式与消息 / 原生截图；不绕过受保护窗口或 UIPI。OCR 需要系统对应语言支持，不可用时提示安装语言包。macOS Spaces / 全屏置顶行为受系统限制，不能保证覆盖安全屏幕。
 
-CI 仅配置 windows-2022 AMD64 和 macos-15 ARM64，并在任务中断言真实 CPU 架构。当前仓库无 Git remote，因此未触发或伪称远程 CI 已通过。
+CI 仅配置 windows-2022 AMD64 和 macos-15 ARM64，并在任务中断言真实 CPU 架构。公开仓库已创建；v0.0.1 的 Windows AMD64 / macOS ARM64 原生 CI 编译、Clippy、单元测试、Release 和打包已通过，不能替代真实桌面交互。
 
 0.1.1 桌面实测：当前应用包能抓取全屏并进入原位标注；系统设置的 Simple Snip 录屏开关为 on（只读取，未修改）。通过诊断事件实际显示原生权限消息框，点击后打开正确的「录屏与系统录音」设置页。没有撤销用户权限来模拟真实拒绝；SCK 回退是否触发应以调试日志区分。编号、头宽尾细箭头、选择框 / 滚轮、图片内中文输入与提交已在 macOS 桌面观察。Windows 仍仅平台模块类型检查，未运行 GUI。
+
+0.0.2 macOS 更换为 Carbon dispatcher 独占热键注册；注册与原生设置可见性探测通过。F1 / Fn 实际按键和新框架视觉因锁屏待验，未假称完成。

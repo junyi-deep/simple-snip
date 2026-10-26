@@ -105,3 +105,13 @@ cargo test -p snip-platform --test native native_region_retina_odd_pixel_bounds 
 实际运行新增 4 项 updater 测试，涵盖 SemVer 新旧 / 预发布过滤、默认系统 / 直连 / 自定义代理构造、真实 loopback HTTP CONNECT 和 Proxy-Authorization（虚构测试凭据、不发往源站）、校验清单 / 平台资产 / 初始下载地址限制。workspace 总计 35 项通过。Clippy -D warnings 通过。连续带几何测试验证点上限、端点、单位法线和时间单调；新增字段兼容既有配置。
 
 原始机器日志不提交到公开仓库，仅保留本地；此文档提供可复现步骤。正式签名与系统全交互矩阵仍不宣称完成。版本检查只有用户主动触发才联网，代理密码不写配置。
+
+本机 0.0.1 `.app` 实际打开更新页面，系统代理检查返回当前无新版本；HTTP 模式显示可选用户名和 secure text field，空代理地址点击检查显示格式错误；恢复系统代理后可重新检查。35 项测试通过，macOS ARM64 Release 构建通过。连续渐变仍需用户物理鼠标目视确认。
+
+## 0.0.2 实际回归（2026-10-26）
+
+40 项本机测试通过（macOS 条件键映射测试 1 项，Windows 对应不执行；其余平台无关 39 项）；fmt / workspace check / Clippy 通过。新增选区反向边界 / 最小 1px、保留撤销坐标、旧配置默认蓝边 / 错误颜色和宽度验证、真实 GPUI 鼠标按下 / 移动 / 松开拖动手柄和 Shift+Right 调宽。Native smoke 实际执行三次「有置顶贴图 → 隐藏设置 → 重开设置」，断言设置窗口可见，其他透明 / 穿透 / 窗口复用断言通过。热键成功注册，但物理 F1 / Fn 仍待解锁桌面人工验证。
+
+首次公开 CI：macOS ARM64 和 Windows AMD64 均完成 check / Clippy / test / Release；Windows 许可证输出 cp1252 错误已修复为 UTF-8，后续 v0.0.1 标签流水线成功发布。编译运行测试和实际桌面交互仍分开记录。
+
+人工补充：创建贴图并关闭设置，从托盘重新打开，确认设置位于贴图前方；切到其他应用按真实 F1 / 必要时 Fn+F1，检查日志 global hotkey received 和 Overlay。配置不同颜色 / 粗细 / 阴影保存，现有贴图立即变化，复制内容不含外框。截图绘制后拖动角和边改变宽高，确认标注保持位置、撤销正常，工具条末尾紧靠图片右边。

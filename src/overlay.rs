@@ -4,7 +4,7 @@ use gpui_kit::{
     component::{button::*, *},
     *,
 };
-use snip_core::geometry::{Point as ImagePoint, Rect, snap_at};
+use snip_core::geometry::{Point as ImagePoint, Rect, SelectionHandle, resize_selection, snap_at};
 use snip_platform::CapturedDisplay;
 #[derive(Clone, Copy, Debug)]
 pub enum CaptureMode {
@@ -22,6 +22,8 @@ pub struct Overlay {
     hover: ImagePoint,
     focus: FocusHandle,
     editor: Option<Entity<crate::editor::EditorView>>,
+    resizing: Option<(SelectionHandle, Rect)>,
+    editing_rect: Option<Rect>,
 }
 impl Overlay {
     pub fn open(
@@ -71,6 +73,8 @@ impl Overlay {
                     hover: ImagePoint::default(),
                     focus,
                     editor: None,
+                    resizing: None,
+                    editing_rect: None,
                 })
             },
         )?;
@@ -82,6 +86,7 @@ impl Overlay {
         }
         let r = self.selection.unwrap_or_else(|| self.candidate());
         self.selection = Some(r);
+        self.editing_rect = Some(r);
         let (x, y, width, height) =
             r.pixel_bounds(self.display.image.width(), self.display.image.height());
         if width == 0 || height == 0 {
@@ -116,6 +121,120 @@ impl Overlay {
             )
         }));
         cx.notify();
+    }
+    fn apply_resized_selection(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.selection else {
+            return;
+        };
+        let (x, y, width, height) =
+            r.pixel_bounds(self.display.image.width(), self.display.image.height());
+        if width == 0 || height == 0 {
+            return;
+        }
+        let r = Rect::new(x as f32, y as f32, width as f32, height as f32);
+        self.selection = Some(r);
+        if let Some(editor) = &self.editor {
+            let old = self.editing_rect.unwrap_or(r);
+            let (old_x, old_y, _, _) =
+                old.pixel_bounds(self.display.image.width(), self.display.image.height());
+            let image = std::sync::Arc::new(
+                image::imageops::crop_imm(&*self.display.image, x, y, width, height).to_image(),
+            );
+            let sx = f32::from(w.viewport_size().width) / self.display.image.width() as f32;
+            let sy = f32::from(w.viewport_size().height) / self.display.image.height() as f32;
+            let bounds = Bounds::new(
+                point(px(r.x * sx), px(r.y * sy)),
+                size(px(r.width * sx), px(r.height * sy)),
+            );
+            editor.update(cx, |v, cx| {
+                v.reframe_capture(
+                    image,
+                    old_x as f32 - x as f32,
+                    old_y as f32 - y as f32,
+                    bounds,
+                    w,
+                    cx,
+                )
+            });
+            self.editing_rect = Some(r);
+        }
+        cx.notify();
+    }
+    fn resize_handles(&self, ui: Rect, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use SelectionHandle::*;
+        [
+            (NorthWest, ui.x, ui.y, CursorStyle::ResizeUpLeftDownRight),
+            (North, ui.x + ui.width / 2., ui.y, CursorStyle::ResizeUpDown),
+            (
+                NorthEast,
+                ui.right(),
+                ui.y,
+                CursorStyle::ResizeUpRightDownLeft,
+            ),
+            (
+                East,
+                ui.right(),
+                ui.y + ui.height / 2.,
+                CursorStyle::ResizeLeftRight,
+            ),
+            (
+                SouthEast,
+                ui.right(),
+                ui.bottom(),
+                CursorStyle::ResizeUpLeftDownRight,
+            ),
+            (
+                South,
+                ui.x + ui.width / 2.,
+                ui.bottom(),
+                CursorStyle::ResizeUpDown,
+            ),
+            (
+                SouthWest,
+                ui.x,
+                ui.bottom(),
+                CursorStyle::ResizeUpRightDownLeft,
+            ),
+            (
+                West,
+                ui.x,
+                ui.y + ui.height / 2.,
+                CursorStyle::ResizeLeftRight,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (handle, x, y, cursor))| {
+            div()
+                .id(("selection-resize", i))
+                .absolute()
+                .left(px(x - 5.))
+                .top(px(y - 5.))
+                .size(px(10.))
+                .cursor(cursor)
+                .child(
+                    div()
+                        .absolute()
+                        .inset(px(2.))
+                        .bg(rgb(0xffffff))
+                        .border_1()
+                        .border_color(rgb(0x1688ff)),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| {
+                        if let Some(r) = v.selection {
+                            v.resizing = Some((handle, r));
+                            v.anchor = None;
+                            v.moving = None;
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                    }),
+                )
+                .into_any_element()
+        })
+        .collect()
     }
     fn image_point(&self, p: Point<Pixels>, window: &Window) -> ImagePoint {
         let s = window.viewport_size();
@@ -229,10 +348,25 @@ impl Render for Overlay {
                 }),
             )
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
+                let p = this.image_point(e.position, w);
+                if let Some((handle, r)) = this.resizing {
+                    this.selection = Some(resize_selection(
+                        r,
+                        handle,
+                        p,
+                        Rect::new(
+                            0.,
+                            0.,
+                            this.display.image.width() as f32,
+                            this.display.image.height() as f32,
+                        ),
+                    ));
+                    cx.notify();
+                    return;
+                }
                 if this.editor.is_some() {
                     return;
                 }
-                let p = this.image_point(e.position, w);
                 this.hover = p;
                 if e.dragging() {
                     if let Some((a, r)) = this.moving {
@@ -255,6 +389,10 @@ impl Render for Overlay {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, w, cx| {
+                    if this.resizing.take().is_some() {
+                        this.apply_resized_selection(w, cx);
+                        return;
+                    }
                     if this.editor.is_some() {
                         return;
                     }
@@ -271,6 +409,36 @@ impl Render for Overlay {
             )
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, w, cx| {
                 if this.editor.is_some() {
+                    if e.keystroke.modifiers.shift
+                        && this
+                            .editor
+                            .as_ref()
+                            .is_some_and(|v| v.read(cx).canvas_focused(w))
+                        && let Some(r) = this.selection
+                    {
+                        let p = match e.keystroke.key.as_str() {
+                            "left" => Some(ImagePoint::new(r.right() - 1., r.bottom())),
+                            "right" => Some(ImagePoint::new(r.right() + 1., r.bottom())),
+                            "up" => Some(ImagePoint::new(r.right(), r.bottom() - 1.)),
+                            "down" => Some(ImagePoint::new(r.right(), r.bottom() + 1.)),
+                            _ => None,
+                        };
+                        if let Some(p) = p {
+                            this.selection = Some(resize_selection(
+                                r,
+                                SelectionHandle::SouthEast,
+                                p,
+                                Rect::new(
+                                    0.,
+                                    0.,
+                                    this.display.image.width() as f32,
+                                    this.display.image.height() as f32,
+                                ),
+                            ));
+                            this.apply_resized_selection(w, cx);
+                            cx.stop_propagation();
+                        }
+                    }
                     return;
                 }
                 match e.keystroke.key.as_str() {
@@ -339,7 +507,7 @@ impl Render for Overlay {
                     .text_color(rgb(0xf5fafc))
                     .rounded_md()
                     .p_2()
-                    .child(div().text_xs().child(guide))
+                    .child(div().text_xs().child(guide.clone()))
                     .child(
                         div()
                             .h_flex()
@@ -375,16 +543,34 @@ impl Render for Overlay {
                     ),
             );
         }
-        if let Some(editor) = &self.editor {
-            return root.child(
+        if self.editor.is_some() || self.resizing.is_some() {
+            if self.resizing.is_none()
+                && let Some(editor) = &self.editor
+            {
+                root = root.child(
+                    div()
+                        .absolute()
+                        .left(px(ui.x))
+                        .top(px(ui.y))
+                        .w(px(ui.width))
+                        .h(px(ui.height))
+                        .child(editor.clone()),
+                );
+            }
+            return root.children(self.resize_handles(ui, cx)).child(
                 div()
                     .absolute()
                     .left(px(ui.x))
-                    .top(px(ui.y))
-                    .w(px(ui.width))
-                    .h(px(ui.height))
-                    .child(editor.clone()),
+                    .top(px((ui.y - 22.).max(0.)))
+                    .text_xs()
+                    .bg(rgb(0x15212d))
+                    .text_color(rgb(0xffffff))
+                    .px_1()
+                    .child(guide),
             );
+        }
+        if self.selection.is_some() && self.anchor.is_none() {
+            root = root.children(self.resize_handles(ui, cx));
         }
         let x = (self.hover.x.max(0.) as u32).min(self.display.image.width() - 1);
         let y = (self.hover.y.max(0.) as u32).min(self.display.image.height() - 1);
@@ -415,5 +601,121 @@ impl Render for Overlay {
                 .child(img(app::texture(&zoom)).w(px(104.)).h(px(104.)))
                 .child(div().text_xs().child("C 复制 HEX")),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CaptureMode, Overlay};
+    use gpui_kit::{
+        AppContext, Bounds, MouseButton, TestAppContext, VisualTestContext, WindowBounds,
+        WindowOptions, point, px, size,
+    };
+    use snip_core::geometry::{DisplayMap, Rect};
+    #[gpui_kit::test]
+    fn selected_capture_resizes_through_real_handle_events(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(px(800.), px(600.)),
+                    ))),
+                    ..Default::default()
+                },
+                cx,
+                |w, cx| {
+                    let image = std::sync::Arc::new(image::RgbaImage::new(1600, 1200));
+                    let view = cx.new(|cx| Overlay {
+                        display: snip_platform::CapturedDisplay {
+                            id: 0,
+                            map: DisplayMap {
+                                desktop: Rect::new(0., 0., 800., 600.),
+                                pixel_width: 1600,
+                                pixel_height: 1200,
+                            },
+                            image: image.clone(),
+                            windows: vec![],
+                        },
+                        texture: crate::app::texture(&image),
+                        mode: CaptureMode::Screenshot,
+                        anchor: None,
+                        moving: None,
+                        selection: Some(Rect::new(100., 100., 400., 300.)),
+                        hover: Default::default(),
+                        focus: cx.focus_handle(),
+                        editor: None,
+                        resizing: None,
+                        editing_rect: None,
+                    });
+                    view.update(cx, |v, cx| v.begin_edit(w, cx));
+                    view
+                },
+            )
+            .unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        visual.simulate_mouse_down(
+            point(px(250.), px(200.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).resizing.is_some(),
+                "bottom-right handle must win over annotation canvas"
+            )
+        });
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        visual.simulate_mouse_move(
+            point(px(300.), px(250.)),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+        visual.simulate_mouse_up(
+            point(px(300.), px(250.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|cx| {
+            let v = view.read(cx);
+            assert!(v.resizing.is_none());
+            assert_eq!(v.selection, Some(Rect::new(100., 100., 500., 400.)));
+            assert_eq!(
+                v.editor
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .doc
+                    .original
+                    .dimensions(),
+                (500, 400)
+            );
+        });
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+            w.simulate_next_frame(cx);
+            let _ = w.draw(cx);
+        });
+        cx.simulate_keystrokes(window, "shift-right");
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx)
+                    .editor
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .doc
+                    .original
+                    .dimensions(),
+                (501, 400)
+            )
+        });
     }
 }

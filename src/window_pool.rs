@@ -50,7 +50,7 @@ pub fn open<V: Render>(
                 view = Some(content.clone());
                 gpui_kit::base::Root::new(content, w, cx)
             });
-            if role == Role::Trail {
+            if matches!(role, Role::Trail | Role::Pin) {
                 transparent_root(w, cx);
             }
             if let Ok(raw) = crate::app::raw(w) {
@@ -82,7 +82,7 @@ pub fn open<V: Render>(
             }
         })?;
     }
-    if role == Role::Trail {
+    if matches!(role, Role::Trail | Role::Pin) {
         result.0.update(cx, |_, w, cx| transparent_root(w, cx))?;
     }
     Ok(result)

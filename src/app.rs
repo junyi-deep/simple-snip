@@ -379,6 +379,7 @@ fn handle(event: Event, cx: &mut App) {
             }
         },
         Event::Hotkey(id) => {
+            tracing::info!(id, "global hotkey received");
             if let Some(cmd) = cx
                 .global::<Runtime>()
                 .hotkeys
@@ -523,8 +524,16 @@ pub fn set_trails_visible(cx: &mut App, show: bool) {
     }
 }
 pub fn open_settings(cx: &mut App) {
+    cx.activate(true);
     if let Some(h) = cx.global::<Runtime>().settings
-        && h.update(cx, |_, w, _| w.activate_window()).is_ok()
+        && h.update(cx, |_, w, _| {
+            if let Ok(raw) = raw(w) {
+                let _ = snip_platform::style_window(raw, WindowStyle::default());
+                let _ = snip_platform::show_window(raw, true);
+            }
+            w.activate_window();
+        })
+        .is_ok()
     {
         return;
     }
@@ -596,6 +605,12 @@ pub fn smoke_test(cx: &mut App) {
                     anyhow::ensure!(cx.global::<Runtime>().tray.is_some(), "native tray missing");
                     let image = Arc::new(image::RgbaImage::from_fn(360, 220, |x, y| image::Rgba([(x % 255) as u8, (y % 255) as u8, 100, 255])));
                     let (handle, view) = PinView::open(999 + cycle, image, false, cx)?;
+                    open_settings(cx);
+                    if let Some(settings)=cx.global::<Runtime>().settings {
+                        settings.update(cx,|_,w,_| {snip_platform::show_window(raw(w)?,false)})??;
+                        open_settings(cx);
+                        settings.update(cx,|_,w,_| -> anyhow::Result<()> {anyhow::ensure!(snip_platform::window_visible(raw(w)?)?,"hidden settings did not reappear with a pin present");Ok(())})??;
+                    }
                     handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
                         let h = raw(window)?;
                         let (top, through, _) = snip_platform::inspect_window(h)?;

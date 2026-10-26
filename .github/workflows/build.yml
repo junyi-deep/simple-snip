@@ -1,7 +1,6 @@
 name: Supported desktop builds
 on:
   push:
-    branches: [main, "codex/**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -47,6 +46,8 @@ jobs:
             [[ "$(rustc -vV)" == *'host: x86_64-pc-windows-msvc'* ]]
           fi
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --workspace --target ${{ matrix.target }}
       - run: cargo clippy --locked --workspace --all-targets --target ${{ matrix.target }} -- -D warnings

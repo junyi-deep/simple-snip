@@ -149,6 +149,19 @@ impl Document {
         self.checkpoint();
         self.objects.push(a);
     }
+    /// Rebase source pixels and every history snapshot after resizing a screen
+    /// selection. Marks retain their physical desktop position; export clips.
+    pub fn reframe(&mut self, image: Arc<RgbaImage>, dx: f32, dy: f32) {
+        self.original = image;
+        for object in &mut self.objects {
+            object.translate(dx, dy);
+        }
+        for snapshot in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            for object in snapshot {
+                object.translate(dx, dy);
+            }
+        }
+    }
     pub fn undo(&mut self) {
         if let Some(v) = self.undo.pop() {
             self.redo.push(std::mem::replace(&mut self.objects, v));
@@ -305,6 +318,32 @@ impl Document {
             }
         }
         output
+    }
+}
+#[cfg(test)]
+mod reframe_tests {
+    use super::*;
+    #[test]
+    fn crop_rebase_preserves_desktop_marks_and_undo_coordinates() {
+        let mut doc = Document::new(Arc::new(RgbaImage::new(100, 100)));
+        doc.add(Annotation {
+            tool: Tool::Rectangle,
+            points: vec![Point::new(20., 30.), Point::new(40., 50.)],
+            color: [20, 20, 200, 255],
+            width: 2.,
+            text: String::new(),
+            arrow_style: ArrowStyle::default(),
+        });
+        doc.checkpoint();
+        doc.objects[0].translate(10., 0.);
+        doc.reframe(Arc::new(RgbaImage::new(150, 120)), -15., -5.);
+        assert_eq!(doc.objects[0].points[0], Point::new(15., 25.));
+        assert_eq!(doc.flatten().dimensions(), (150, 120));
+        doc.undo();
+        assert_eq!(doc.objects[0].points[0], Point::new(5., 25.));
+        doc.redo();
+        assert_eq!(doc.objects[0].points[0], Point::new(15., 25.));
+        assert!(doc.original.pixels().all(|p| p.0 == [0, 0, 0, 0]));
     }
 }
 fn draw_text(image: &mut RgbaImage, font: &fontdue::Font, a: &Annotation) {
