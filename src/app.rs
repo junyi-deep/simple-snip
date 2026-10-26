@@ -45,6 +45,7 @@ pub enum Event {
         snip_core::ocr::Cancellation,
     ),
     ClosePinEditor(u64),
+    ClosePin(u64),
     FocusPinToolbar(u64),
     FocusPinCanvas(u64),
     PinNotice(u64, String),
@@ -93,6 +94,7 @@ gpui_kit::actions!(
         RecordingCancel,
         FocusAnnotationTools,
         CancelAnnotation,
+        CloseSelectedPin,
         Quit
     ]
 );
@@ -127,12 +129,25 @@ pub fn texture(image: &image::RgbaImage) -> Arc<RenderImage> {
     }
     Arc::new(RenderImage::new(vec![image::Frame::new(bgra)]))
 }
-pub fn start(cx: &mut App) {
-    crate::window_pool::init(cx);
+pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", FocusAnnotationTools, Some("ImageAnnotation")),
         KeyBinding::new("escape", CancelAnnotation, Some("AnnotationTools")),
     ]);
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        KeyBinding::new("cmd-w", CloseSelectedPin, Some("PinWindow")),
+        KeyBinding::new("cmd-w", CloseSelectedPin, Some("AnnotationTools")),
+    ]);
+    #[cfg(target_os = "windows")]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-w", CloseSelectedPin, Some("PinWindow")),
+        KeyBinding::new("ctrl-w", CloseSelectedPin, Some("AnnotationTools")),
+    ]);
+}
+pub fn start(cx: &mut App) {
+    crate::window_pool::init(cx);
+    bind_keys(cx);
     let (config, warning) = Config::load(&Config::path());
     let (tx, rx) = async_channel::bounded(64);
     let mut hotkeys = HotkeyManager::new(tx.clone()).map_err(|e| e.to_string());
@@ -444,6 +459,7 @@ fn handle(event: Event, cx: &mut App) {
                 Err(e) => status(cx, e.to_string()),
             }
         }
+        Event::ClosePin(id) => close_pin(id, cx),
         Event::ApplyPin(id, doc, image, cancel) => {
             if cancel.cancelled() {
                 return;
@@ -523,6 +539,16 @@ pub fn set_trails_visible(cx: &mut App, show: bool) {
         });
     }
 }
+pub(crate) fn close_pin(id: u64, cx: &mut App) {
+    if let Some(pin) = cx.global_mut::<Runtime>().pins.remove(&id) {
+        crate::editor::hide_toolbar(id, cx);
+        let _ = pin.handle.update(cx, |_, w, cx| {
+            crate::window_pool::park(crate::window_pool::Role::Pin, w, cx);
+        });
+        tracing::debug!(pin = id, "pin closed and native window released or pooled");
+    }
+}
+
 pub fn open_settings(cx: &mut App) {
     cx.activate(true);
     if let Some(h) = cx.global::<Runtime>().settings

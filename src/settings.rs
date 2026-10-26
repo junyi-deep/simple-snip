@@ -399,18 +399,18 @@ impl Render for Settings {
                 content=content.child("拖动创建选区，单击吸附窗口。选区生成后可拖动八个边缘手柄调整宽高；画布聚焦时 Shift + 方向键按 1 像素微调大小。A 选择当前屏幕。").child("编辑器保留原始图像与独立标注；复制和保存时合成。Esc 可取消截图。").child(Button::new("take").primary().label("开始截图").on_click(|_,_,cx|app::command(cx,Command::Capture)));
             }
             2 => {
-                content=content.child("每张图片是独立的置顶窗口。滚轮缩放；Command / Ctrl + 滚轮调整透明度；1 旋转、2 水平翻转、3 垂直翻转；空格编辑；T 切换穿透；双击隐藏；Esc 关闭。").child(div().h_flex().gap_2().child(Button::new("hide").label("隐藏全部").on_click(|_,_,cx|app::command(cx,Command::HidePins))).child(Button::new("show").label("显示全部").on_click(|_,_,cx|app::command(cx,Command::ShowPins))).child(Button::new("restore").primary().label("恢复全部交互").on_click(|_,_,cx|app::command(cx,Command::RestorePins))));
+                content=content.child("单击贴图选中并显示边框，失焦后隐藏边框。滚轮缩放；Command / Ctrl + 滚轮调整透明度；1 旋转、2 水平翻转、3 垂直翻转；空格编辑；T 切换穿透；双击隐藏；选中后 Esc 关闭（编辑时取消标注）。也可用 Command+W / Ctrl+W，或右键「关闭贴图」。这些操作仅在贴图内生效。").child(div().h_flex().gap_2().child(Button::new("hide").label("隐藏全部").on_click(|_,_,cx|app::command(cx,Command::HidePins))).child(Button::new("show").label("显示全部").on_click(|_,_,cx|app::command(cx,Command::ShowPins))).child(Button::new("restore").primary().label("恢复全部交互").on_click(|_,_,cx|app::command(cx,Command::RestorePins))));
                 content = content
                     .child(row(
-                        "边框颜色",
-                        "#RRGGBB，默认蓝色；保存后应用于全部贴图",
+                        "选中边框颜色",
+                        "#RRGGBB，默认蓝色；未选中时不显示",
                         div()
                             .w_40()
                             .child(Input::new(&self.pin_border_color).aria_label("贴图边框颜色")),
                     ))
                     .child(row(
-                        "边框粗细",
-                        "0–8 逻辑像素，0 表示隐藏边框",
+                        "选中边框粗细",
+                        "0–8 逻辑像素，0 表示隐藏选中边框",
                         div()
                             .w_24()
                             .child(Input::new(&self.pin_border_width).aria_label("贴图边框粗细")),

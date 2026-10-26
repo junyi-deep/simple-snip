@@ -2,7 +2,7 @@ use crate::{
     app::{self, Event, Runtime},
     editor::{EditorHost, EditorView},
 };
-use gpui_kit::{prelude::*, *};
+use gpui_kit::{component::menu::*, prelude::*, *};
 use image::RgbaImage;
 use snip_core::{annotation::Document, geometry::ImageTransform};
 use std::sync::Arc;
@@ -60,10 +60,8 @@ impl PinView {
                 let focus = cx.focus_handle();
                 focus.focus(window, cx);
                 app::apply_style(window, snip_platform::WindowStyle::default());
-                window.on_window_should_close(cx, move |w, cx| {
-                    crate::editor::hide_toolbar(id, cx);
-                    cx.global_mut::<Runtime>().pins.remove(&id);
-                    crate::window_pool::park(crate::window_pool::Role::Pin, w, cx);
+                window.on_window_should_close(cx, move |_, cx| {
+                    app::send(cx, Event::ClosePin(id));
                     false
                 });
                 let doc = Document::new(image.clone());
@@ -88,24 +86,33 @@ impl PinView {
                 } else {
                     None
                 };
-                cx.new(|_| Self {
-                    id,
-                    doc,
-                    shown: image.clone(),
-                    texture: app::texture(&image),
-                    scale,
-                    rotation: 0,
-                    flip_x: false,
-                    flip_y: false,
-                    opacity: 1.,
-                    click_through: false,
-                    focus,
-                    editor,
-                    toolbar: None,
-                    handle: window.window_handle(),
-                    generation: 0,
-                    notice: None,
-                    notice_id: 0,
+                cx.new(|cx| {
+                    cx.observe_window_activation(window, |v: &mut Self, w, cx| {
+                        if w.is_window_active() && v.editor.is_none() {
+                            v.focus.focus(w, cx);
+                        }
+                        cx.notify();
+                    })
+                    .detach();
+                    Self {
+                        id,
+                        doc,
+                        shown: image.clone(),
+                        texture: app::texture(&image),
+                        scale,
+                        rotation: 0,
+                        flip_x: false,
+                        flip_y: false,
+                        opacity: 1.,
+                        click_through: false,
+                        focus,
+                        editor,
+                        toolbar: None,
+                        handle: window.window_handle(),
+                        generation: 0,
+                        notice: None,
+                        notice_id: 0,
+                    }
                 })
             },
         )?;
@@ -123,6 +130,10 @@ impl PinView {
                 Err(e) => app::status(cx, e.to_string()),
             }
         }
+    }
+    fn is_selected(&self, w: &Window, cx: &App) -> bool {
+        !self.click_through
+            && (w.is_window_active() || self.toolbar.is_some_and(|h| Some(h) == cx.active_window()))
     }
     fn remove_toolbar(&mut self, cx: &mut App) -> bool {
         self.toolbar = None;
@@ -279,6 +290,8 @@ impl Render for PinView {
         let config = cx.global::<Runtime>().config.pin.clone();
         let margin = config.margin();
         let border = config.color().unwrap_or(0x1688ff);
+        let selected = self.is_selected(window, cx);
+        let pin_id = self.id;
         let content = if let Some(editor) = &self.editor {
             editor.clone().into_any_element()
         } else {
@@ -296,7 +309,7 @@ impl Render for PinView {
                 canvas(
                     move |_, _, _| (),
                     move |bounds, _, w, _| {
-                        if config.border_width > 0. {
+                        if selected && config.border_width > 0. {
                             let thickness = px(config.border_width);
                             w.paint_quad(
                                 outline(
@@ -321,17 +334,29 @@ impl Render for PinView {
             );
         if self.editor.is_some() {
             return div()
+                .id(("pin-editor", self.id))
+                .key_context("PinWindow")
+                .track_focus(&self.focus)
                 .size_full()
                 .p(px(margin))
                 .bg(transparent_black())
                 .child(frame)
+                .on_action(cx.listener(|v, _: &app::CloseSelectedPin, _, cx| {
+                    app::send(cx, Event::ClosePin(v.id));
+                    cx.stop_propagation();
+                }))
+                .context_menu(move |menu, _, _| {
+                    menu.item(PopupMenuItem::new("关闭贴图").on_click(move |_, _, cx| {
+                        app::send(cx, Event::ClosePin(pin_id));
+                    }))
+                })
                 .into_any_element();
         }
-        let _ = window;
         let notice = self.notice.clone();
         div()
             .id(("pin", self.id))
             .track_focus(&self.focus)
+            .key_context("PinWindow")
             .size_full()
             .relative()
             .bg(gpui_kit::transparent_black())
@@ -354,16 +379,34 @@ impl Render for PinView {
                 MouseButton::Left,
                 cx.listener(|v, e: &MouseDownEvent, w, cx| {
                     tracing::debug!(pin = v.id, "pin received mouse down");
+                    cx.activate(true);
+                    w.activate_window();
                     v.focus.focus(w, cx);
+                    cx.notify();
                     if e.click_count == 2 {
                         if let Ok(raw) = app::raw(w) {
                             let _ = snip_platform::show_window(raw, false);
                         }
-                    } else {
+                    } else if app::raw(w).is_ok() {
+                        // Moving needs a native surface; GPUI's headless TestWindow
+                        // deliberately has no implementation for this operation.
                         w.start_window_move();
                     }
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|v, _, w, cx| {
+                    cx.activate(true);
+                    w.activate_window();
+                    v.focus.focus(w, cx);
+                    cx.notify();
+                }),
+            )
+            .on_action(cx.listener(|v, _: &app::CloseSelectedPin, _, cx| {
+                app::send(cx, Event::ClosePin(v.id));
+                cx.stop_propagation();
+            }))
             .on_scroll_wheel(cx.listener(|v, e: &ScrollWheelEvent, w, cx| {
                 let delta = f32::from(e.delta.pixel_delta(px(20.)).y);
                 if e.modifiers.control || e.modifiers.platform {
@@ -395,9 +438,7 @@ impl Render for PinView {
                 };
                 match e.keystroke.key.as_str() {
                     "escape" => {
-                        cx.global_mut::<Runtime>().pins.remove(&v.id);
-                        crate::editor::hide_toolbar(v.id, cx);
-                        crate::window_pool::park(crate::window_pool::Role::Pin, w, cx);
+                        app::send(cx, Event::ClosePin(v.id));
                     }
                     "space" => v.edit(w, cx),
                     "1" => {
@@ -440,6 +481,147 @@ impl Render for PinView {
                 }
                 cx.notify();
             }))
+            .context_menu(move |menu, _, _| {
+                menu.item(PopupMenuItem::new("关闭贴图").on_click(move |_, _, cx| {
+                    app::send(cx, Event::ClosePin(pin_id));
+                }))
+            })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arc, Event, PinView, RgbaImage, Runtime, app};
+    use gpui_kit::{
+        AnyWindowHandle, Entity, MouseButton, TestAppContext, VisualTestContext, point, px,
+    };
+
+    fn setup(cx: &mut TestAppContext) -> async_channel::Receiver<Event> {
+        let (tx, rx) = async_channel::bounded(16);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::window_pool::init(cx);
+            app::bind_keys(cx);
+            cx.set_global(Runtime {
+                recordings: vec![],
+                config: Default::default(),
+                status: String::new(),
+                tx,
+                pins: Default::default(),
+                next_pin: 3,
+                overlays: vec![],
+                capture_busy: false,
+                permission_prompt: false,
+                settings: None,
+                hotkeys: None,
+                tray: None,
+                trails: vec![],
+                annotation_toolbar: None,
+            });
+        });
+        rx
+    }
+
+    fn pin(cx: &mut TestAppContext, id: u64, edit: bool) -> (AnyWindowHandle, Entity<PinView>) {
+        cx.update(|cx| {
+            let (handle, view) =
+                PinView::open(id, Arc::new(RgbaImage::new(240, 160)), edit, cx).unwrap();
+            cx.global_mut::<Runtime>().pins.insert(
+                id,
+                app::PinRecord {
+                    handle,
+                    view: view.clone(),
+                },
+            );
+            (handle, view)
+        })
+    }
+
+    #[gpui_kit::test]
+    fn clicking_inactive_pin_selects_it_and_escape_closes_only_that_pin(cx: &mut TestAppContext) {
+        let rx = setup(cx);
+        let (first, view) = pin(cx, 1, false);
+        let (second, second_view) = pin(cx, 2, false);
+        let mut visual = VisualTestContext::from_window(first, cx);
+        cx.update(|cx| {
+            second.update(cx, |_, w, _| w.activate_window()).unwrap();
+            first
+                .update(cx, |_, w, cx| assert!(!view.read(cx).is_selected(w, cx)))
+                .unwrap();
+        });
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        visual.simulate_mouse_down(
+            point(px(80.), px(80.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        visual.simulate_mouse_up(
+            point(px(80.), px(80.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        visual.update(|w, cx| {
+            assert!(view.read(cx).is_selected(w, cx));
+            assert!(view.read(cx).focus.is_focused(w));
+        });
+        cx.update(|cx| {
+            second
+                .update(cx, |_, w, cx| {
+                    assert!(!second_view.read(cx).is_selected(w, cx))
+                })
+                .unwrap();
+        });
+        let weak = view.downgrade();
+        cx.simulate_keystrokes(first, "escape");
+        assert!(matches!(rx.try_recv(), Ok(Event::ClosePin(1))));
+        cx.update(|cx| app::close_pin(1, cx));
+        drop(view);
+        cx.update(|cx| {
+            assert!(
+                weak.upgrade().is_none(),
+                "closed pin must release its image entity"
+            );
+            assert!(cx.global::<Runtime>().pins.contains_key(&2));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn close_window_shortcut_works_from_pin_editor_and_toolbar(cx: &mut TestAppContext) {
+        let rx = setup(cx);
+        let (window, view) = pin(cx, 1, true);
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        #[cfg(target_os = "macos")]
+        let shortcut = "cmd-w";
+        #[cfg(target_os = "windows")]
+        let shortcut = "ctrl-w";
+        cx.simulate_keystrokes(window, shortcut);
+        assert!(matches!(rx.try_recv(), Ok(Event::ClosePin(1))));
+        // Moving focus into the independent toolbar must retain selection and
+        // route the same local action to its owning pin, never another image.
+        cx.update(|cx| view.update(cx, |v, cx| v.focus_toolbar(cx)));
+        let toolbar = cx.update(|cx| {
+            cx.global::<Runtime>()
+                .annotation_toolbar
+                .as_ref()
+                .unwrap()
+                .0
+        });
+        let mut tools = VisualTestContext::from_window(toolbar, cx);
+        tools.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        visual.update(|w, cx| assert!(view.read(cx).is_selected(w, cx)));
+        cx.simulate_keystrokes(toolbar, shortcut);
+        assert!(matches!(rx.try_recv(), Ok(Event::ClosePin(1))));
+        cx.update(|cx| app::close_pin(1, cx));
+        cx.update(|cx| {
+            assert!(cx.global::<Runtime>().pins.is_empty());
+        });
     }
 }

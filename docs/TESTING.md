@@ -1,5 +1,17 @@
 # 实际测试记录
 
+## 2026-10-27：贴图选中与关闭回归（主分支，尚未发布）
+
+用户已实际确认 v0.0.2 中「有贴图时菜单栏打开偏好设置」和 F1 截图正常；这两项不再标为待反馈。Shift+Esc 的外部冲突来源未确认，不增加全局拦截或绑定。
+
+- 修复贴图点击时只设置画布焦点的问题：显式激活应用 / 窗口，监听激活恢复浏览焦点并更新选中外框。默认未选中时不画边框，选中显示配置的蓝边，编辑工具条聚焦时保留所属贴图高亮。
+- GPUI 输入测试实际执行：从第二张贴图切到第一张、判断第一张选中 / 第二张失焦、Esc 事件只关闭第一张、释放文档实体且保留第二张；编辑画布与独立工具条的 Command+W / Ctrl+W 均分发到所属贴图。
+- `cargo fmt --all -- --check`、workspace Clippy `-D warnings` 通过；workspace 共 42 项通过（11 GUI / macOS 键映射、27 core、4 updater）；3 项原生桌面测试仍 ignored。ARM64 Release 构建成功，原生 smoke 再次通过。
+- 独立本地测试包 `dist/pin-focus-preview/Simple Snip.app`：目视选中蓝边；右键菜单实际出现「关闭贴图」并成功关闭；点击聚焦后分别以 Esc、Command+W 实际关闭。跨应用真实失焦的最终目视仍需人工确认，定向窗口事件不能证明系统焦点切换。Windows Ctrl+W 的真实桌面行为未验收。
+- 重启前通过原应用的保存操作保留了两张测试贴图，位于本机 Pictures/Simple Snip；未提交图像或屏幕内容。v0.0.2 应用包、标签与发布资产均未覆盖。
+
+日志：`/tmp/simple-snip-pin-focus-{tests,workspace,clippy,build,smoke,ui}.log`。本地包是未发布、ad-hoc 测试版，不代表新的正式 Release。
+
 ## 2026-10-26：v0.0.2 解锁后桌面补验
 
 使用现有 `dist/Simple Snip.app`（0.0.2）测试，未重建或重新签名。

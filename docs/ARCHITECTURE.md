@@ -61,7 +61,7 @@ GPUI 的 `titlebar: None` 创建的是 titled + full-size-content 窗口，macOS
 
 ## 0.0.2 窗口、热键与可调整截图
 
-重开设置先 show / orderFront 再激活；设置激活时与自有置顶贴图同层并排到前方，失焦降回普通层级。贴图框架有独立透明边距，GPUI 绘制阴影及内部边框，不改变 Document / 导出像素。创建 / 复用贴图也显式透明 Kit Root。工具条锚定图像实际逻辑 Bounds（排除阴影边距），常规宽度按 19/20 个图标控件收紧，行内容靠右。
+重开设置先 show / orderFront 再激活；设置激活时与自有置顶贴图同层并排到前方，失焦降回普通层级。贴图框架有独立透明边距，GPUI 绘制阴影及选中边框，不改变 Document / 导出像素。未选中时不画边框；点击显式激活应用及贴图原生窗口，窗口激活回调恢复画布焦点。自己的工具浮窗获得焦点时仍保留选中外框；切到别的贴图或应用后取消高亮。关闭由 ClosePin(id) 事件在当前输入回调结束后统一移除管理记录、清空工具条和回收窗口。Command+W / Ctrl+W 仅绑定 PinWindow / AnnotationTools 上下文，右键菜单提供同一关闭入口，不注册其他系统全局热键。创建 / 复用贴图也显式透明 Kit Root。工具条锚定图像实际逻辑 Bounds（排除阴影边距），常规宽度按 19/20 个图标控件收紧，行内容靠右。
 
 macOS 热键通过公开 Carbon RegisterEventHotKey 注册到 GetEventDispatcherTarget，使用 kEventHotKeyExclusive=1 检测冲突。回调仅转发已注册 ID 到统一命令队列；没有事件 Tap、键盘轮询或额外全局绑定，不绕过系统功能键。Windows 后端保持独立。API 类型 / 常量读取自本机 Apple SDK CarbonEvents.h / Events.h，常见字母、数字、F1–F20 与导航键明确映射，不支持的按键会报错。
 

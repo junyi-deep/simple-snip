@@ -123,6 +123,8 @@ Exact native shadow rendering and compositor behavior have not been visually mea
 
 ## Shapes
 
+Pins show no outline while inactive. Selecting a pin reveals its configurable blue outline (default #1688FF, 1 logical pixel); focusing that pin's annotation toolbar retains the outline. The selection frame is interface state and is never baked into exported pixels. This supersedes the always-visible border in the v0.0.2 release.
+
 Use modest rounded native controls, rectangular image bounds, and precise geometric annotation icons. The annotation toolbar uses GPUI's medium rounded style (6px at the default rem basis); Kit buttons retain theme-controlled corner radii. The image itself receives no decorative card frame.
 
 Icons are original inline SVG geometry on a (24 × 24) viewBox, nominally (20 × 20), with a (1.65) stroke, rounded caps, and rounded joins. Keep one consistent stroke language across selection, shapes, text, OCR, save, copy, pin, and dismissal. Color choices are small circular swatches with a subtle stroke.

@@ -1864,6 +1864,14 @@ impl Render for FloatingToolbar {
                     editor.update(cx, |editor, cx| editor.cancel(cx));
                 }
             }))
+            .on_action(cx.listener(|v, _: &app::CloseSelectedPin, _, cx| {
+                if let Some(editor) = &v.editor
+                    && let EditorHost::Pin(id) = editor.read(cx).host
+                {
+                    app::send(cx, Event::ClosePin(id));
+                    cx.stop_propagation();
+                }
+            }))
     }
 }
 pub fn open_toolbar(
@@ -1936,6 +1944,8 @@ pub fn open_toolbar(
             app::apply_style(w, snip_platform::WindowStyle::default());
             cx.new(|cx| {
                 let subscription = cx.observe(&editor, |_, _, cx| cx.notify());
+                cx.observe_window_activation(w, |_, _, cx| cx.refresh_windows())
+                    .detach();
                 FloatingToolbar {
                     focus: cx.focus_handle(),
                     editor: Some(editor),
