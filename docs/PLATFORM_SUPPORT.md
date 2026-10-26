@@ -35,3 +35,7 @@ CI 仅配置 windows-2022 AMD64 和 macos-15 ARM64，并在任务中断言真实
 0.1.1 桌面实测：当前应用包能抓取全屏并进入原位标注；系统设置的 Simple Snip 录屏开关为 on（只读取，未修改）。通过诊断事件实际显示原生权限消息框，点击后打开正确的「录屏与系统录音」设置页。没有撤销用户权限来模拟真实拒绝；SCK 回退是否触发应以调试日志区分。编号、头宽尾细箭头、选择框 / 滚轮、图片内中文输入与提交已在 macOS 桌面观察。Windows 仍仅平台模块类型检查，未运行 GUI。
 
 0.0.2 macOS 更换为 Carbon dispatcher 独占热键注册；注册与原生设置可见性探测通过。F1 / Fn 实际按键和新框架视觉因锁屏待验，未假称完成。
+
+## 已发布制品的运行依赖
+
+Windows ZIP 中的程序实际导入 VCRUNTIME140.dll；首次运行前需安装微软官方 x64 Visual C++ v14 运行库（https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist ）。当前 ZIP 不捆绑该运行库。另导入系统 icuuc.dll，Windows 10 早于 1703 不满足这一依赖；该下界来自 DLL/API，不能替代完整最低系统真机验收。

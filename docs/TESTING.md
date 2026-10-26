@@ -115,3 +115,5 @@ cargo test -p snip-platform --test native native_region_retina_odd_pixel_bounds 
 首次公开 CI：macOS ARM64 和 Windows AMD64 均完成 check / Clippy / test / Release；Windows 许可证输出 cp1252 错误已修复为 UTF-8，后续 v0.0.1 标签流水线成功发布。编译运行测试和实际桌面交互仍分开记录。
 
 人工补充：创建贴图并关闭设置，从托盘重新打开，确认设置位于贴图前方；切到其他应用按真实 F1 / 必要时 Fn+F1，检查日志 global hotkey received 和 Overlay。配置不同颜色 / 粗细 / 阴影保存，现有贴图立即变化，复制内容不含外框。截图绘制后拖动角和边改变宽高，确认标注保持位置、撤销正常，工具条末尾紧靠图片右边。
+
+0.0.2 最终发布确认：GitHub Actions 40251248659 的 macOS ARM64、Windows AMD64 和 Release job 全部成功。远程日志实际为 macOS 9 GUI/键映射 + 27 core + 4 updater = 40；Windows 8 GUI + 27 core + 4 updater = 39，均 0 失败；3 项依赖桌面的 native 测试仍 ignored。三份制品的 GitHub digest 与 SHA256SUMS 一致。实际下载 Windows ZIP 并校验哈希，读取 PE 确认为 AMD64 / GUI subsystem；依赖 VCRUNTIME140.dll，运行库要求已补充到文档和发布说明。更新模块实际读取最新 v0.0.2、下载 DMG 并通过 SHA256。最终本地 `.app` 严格签名检查、Info.plist、DMG 校验及原生 smoke 均通过。桌面仍锁屏，未将 F1/Fn 真实输入和最终目视操作标记通过。

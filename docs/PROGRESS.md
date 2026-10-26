@@ -56,3 +56,5 @@
 本机 40 项测试通过（9 GUI / macOS 键映射、27 core、4 updater），Clippy 通过；原生 smoke 在贴图存在时三次隐藏 / 重开设置的可见性断言通过，F1/F3 原生注册成功。测试发现外部 smol unblock 不适合 GPUI 确定性调度，图像刷新改为 GPUI background executor，未屏蔽测试。当前桌面锁屏，F1 物理按键、最终边框 / 工具条目视验收等待解锁；不将注册成功等同于实际触发。
 
 首轮 Windows CI 的编译、Clippy、测试和 Release 均成功，许可证生成因 cp1252 编码失败；显式 UTF-8 修复后 v0.0.1 双平台流水线及 Release 成功。v0.0.2 将继续由标签流水线构建，不用本机 macOS 类型检查冒充 Windows 运行。
+
+0.0.2 已成功自动发布，两平台 CI 和 Release 见 https://github.com/junyi-deep/simple-snip/actions/runs/40251248659 。更新下载 v0.0.2 的网络 / SHA256 链路通过，Windows ZIP 的 AMD64 / GUI PE 检查与哈希通过。物理功能键、边框和工具条的最终桌面目视验收仍待解锁，Windows 系统交互也仍待真机。

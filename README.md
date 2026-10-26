@@ -42,3 +42,5 @@ cargo run -- --smoke-test
 [架构](docs/ARCHITECTURE.md) · [测试](docs/TESTING.md) · [平台支持](docs/PLATFORM_SUPPORT.md) · [已知问题](docs/KNOWN_ISSUES.md) · [构建](docs/BUILD.md)
 
 推送与 Cargo / Info.plist 版本一致的 `vMAJOR.MINOR.PATCH` 标签后，双平台 GitHub Actions 自动构建并创建 Release。制品明确标记 unsigned；签名 / 公证和完整桌面验收状态见文档。
+
+Windows 下载运行需要 [微软官方 x64 Visual C++ v14 运行库](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)。便携 ZIP 不含该运行库；开发构建工具要求与运行要求不同。
