@@ -1,5 +1,11 @@
 # 实际测试记录
 
+## 2026-10-27：v0.0.4 发布复核
+
+v0.0.4 标签为 a91da91f502e99a73765f3ea5785649831bb201c。[流水线 40528736685](https://github.com/junyi-deep/simple-snip/actions/runs/40528736685) 原生 Windows AMD64、macOS ARM64 与自动 Release job 全部成功，实际日志为 macOS 15 + 29 + 1 + 4 = 49 项、Windows 14 + 29 + 0 + 4 = 47 项，均另有 3 项系统桌面测试 ignored。fmt / check / Clippy `-D warnings` / Release / 打包与资产上传全部成功。
+
+[Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.4) 于北京时间 2026-10-27 23:18:23 发布，非草稿、非预发布。已实际下载公开的 macOS ARM64 DMG / ZIP、Windows AMD64 ZIP 与 SHA256SUMS，全部哈希同时匹配校验文件和 GitHub 资产 digest；两个 ZIP 完整性、Windows AMD64 / PE32+ / GUI subsystem、macOS ARM64 Mach-O / Info.plist 双版本 0.0.4 和 DMG `hdiutil verify` 均通过。没有执行下载的发布二进制；下面的桌面验收使用本地修复测试包，签名 / 版本身份可能不同。
+
 ## 2026-10-27：v0.0.4 修复与桌面补验
 
 用户解锁后继续桌面验证，并要求截图固定不改变位置和尺寸。实际定位到截图导出事件只传图像、PinView 总是居中并适配至 680×500 的问题；改为传递可选桌面逻辑 Bounds，截图使用当前选区，剪贴板 / 历史仍走自动放置。

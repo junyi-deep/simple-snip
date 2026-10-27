@@ -107,7 +107,7 @@ Keep tool names in accessibility labels and tooltips, even when the visible cont
 
 Preferences open at (900 × 660 logical pixels), with a minimum size of (760 × 540). A 200px scrollable sidebar sits beside a scrolling content column. Preserve the established spacing rhythm: an 8px unit, 24px content inset, 12px row padding, and 4px local gaps. Rows place a title and helper description on the left and a control on the right. The status/save strip remains below the content.
 
-The screenshot overlay occupies one display. The selected image stays in its original selection, with annotation embedded there. Pins are independent image windows; initial fit is bounded by (680 × 500) without enlarging smaller images. Preserve image aspect and source-pixel coordinate mapping when scaled or transformed.
+The screenshot overlay occupies one display. The selected image stays in its original selection, with annotation embedded there. Pinning a capture retains its current desktop content bounds and logical size, including Retina scale and resized selections; transparent frame padding sits outside that rectangle. Clipboard and history pins have no source desktop position, so their initial fit stays bounded by (680 × 500) without enlarging smaller images. Preserve image aspect and source-pixel coordinate mapping when scaled or transformed.
 
 **The Lower-Right Attachment Rule.** Align the compact toolbar with the image's lower-right edge, separated by the `image-toolbar-gap`. Place it below when the display has room; otherwise place it inside the image, above its lower border. Clamp to display bounds instead of clipping controls at the image edge.
 
