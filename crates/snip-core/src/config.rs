@@ -97,7 +97,7 @@ pub struct TrailConfig {
 impl Default for TrailConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             width: 9.,
             lifetime_ms: 300,
             fps: 60,
@@ -222,6 +222,10 @@ mod tests {
     #[test]
     fn defaults_only_two_global_keys() {
         let c = Config::default();
+        assert!(
+            c.trail.enabled,
+            "new configurations start with rainbow trail enabled"
+        );
         assert_eq!(c.hotkeys.len(), 2);
         assert_eq!(c.hotkeys["screenshot"], "F1");
         assert_eq!(c.hotkeys["paste_image"], "F3");
@@ -246,8 +250,15 @@ mod tests {
     fn atomic_roundtrip_and_recovery() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("config.toml");
-        Config::default().save(&p).unwrap();
-        assert!(Config::load(&p).1.is_none());
+        let mut config = Config::default();
+        config.trail.enabled = false;
+        config.save(&p).unwrap();
+        let (loaded, warning) = Config::load(&p);
+        assert!(warning.is_none());
+        assert!(
+            !loaded.trail.enabled,
+            "an explicit saved opt-out must survive the new default"
+        );
         fs::write(&p, "bad [").unwrap();
         assert!(Config::load(&p).1.is_some());
         assert_eq!(fs::read_to_string(&p).unwrap(), "bad [");
