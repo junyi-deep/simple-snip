@@ -1,5 +1,17 @@
 # 实际测试记录
 
+## 2026-10-27：v0.0.3 标签发布与制品复核
+
+用户要求先发布、后补桌面验证。v0.0.3 标签指向 6b4ef06ff5a6d4a2d61b9b108781ed30829f8c8e；[标签流水线 40449003057](https://github.com/junyi-deep/simple-snip/actions/runs/40449003057) 的两个原生平台和 Release job 全部成功，均完成 fmt / check / Clippy / tests / Release / 打包。公开 [Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.3) 于 04:23:33 UTC 发布，非草稿，GitHub latest API 已返回 v0.0.3。
+
+实际下载公开资产到本机临时目录后验证：
+
+- macOS ARM64 DMG、ZIP 与 Windows AMD64 ZIP 的 SHA256 均匹配 SHA256SUMS 和 GitHub 返回的资产 digest。
+- 两个 ZIP 的完整性检查通过；Windows 可执行文件为 AMD64 / PE32+ / GUI subsystem；macOS Info.plist 为 0.0.3，主程序为原生 ARM64 Mach-O。
+- `hdiutil verify` 确认下载的 DMG 校验有效。没有运行下载的二进制，也没有将包结构检查当成桌面交互验收。
+
+macOS 仍为 ad-hoc，未完成 Developer ID 签名 / 公证。新图标外观、长截图 / GIF 控制栏的实际交互和采集排除、最小设置窗口目视继续待验收。下面发布前记录保留为历史，不再阻止本次发布。
+
 ## 2026-10-27：v0.0.3 发布前检查
 
 发布安排已按用户最新要求调整为先发布、后补桌面验证。下列待验收项目仍保持未验证状态；发布不代表这些项目已通过。
