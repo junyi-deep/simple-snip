@@ -10,6 +10,8 @@
 
 预检工作流 [40427251004](https://github.com/junyi-deep/simple-snip/actions/runs/40427251004) 对 a0ed074 的两个目标均完成完整编译、Clippy、测试、Release 与打包，Release job 因不是标签而跳过。随后补充的自动滚动重置、回访时不误判到底、完成等待当前帧、内存预留与特效协作改动已再次通过本机 47 项测试和 Clippy；最终标签流水线仍需在桌面验收后运行。
 
+最终源码 893d573 的预检工作流 [40429397908](https://github.com/junyi-deep/simple-snip/actions/runs/40429397908) 两个平台全部成功。实际日志为 macOS 13 + 29 + 1 + 4 = 47 项，Windows 12 + 29 + 0 + 4 = 45 项；均另有 3 项 native 桌面测试 ignored。完整 check / Clippy / Release / 包生成及上传成功，Release job 仍按条件跳过。再次调用桌面工具仍明确返回 Mac 锁屏，因此尚未创建 v0.0.3 标签或 Release；新控制栏的实际采集 / 排除和最小设置窗口目视仍待解锁。
+
 Mac 再次锁屏，已请求用户解锁。新图标的菜单栏外观、长截图 / GIF 的控制栏点击及采集排除、设置说明在最小窗口的目视尚未通过。准备了完全离线的 `tests/fixtures/scroll-grid.html` 双轴滚动页；浏览器插件不可连接本机 Chrome，IAB 无法连接本机 localhost，拟在解锁后用原生浏览器操作。不得将这些尝试当成已完成桌面验收。
 
 ## 2026-10-27：贴图选中与关闭回归（主分支，尚未发布）
