@@ -699,6 +699,28 @@ pub fn smoke_test(cx: &mut App) {
                 cx.update(|_| -> anyhow::Result<()> { anyhow::ensure!(weak.upgrade().is_none(), "closed pin retained its document"); Ok(()) })?;
             }
             let _ = previous;
+            #[cfg(target_os = "macos")]
+            for _ in 0..2 {
+                let (pin, expected) = cx.update(|cx| -> anyhow::Result<_> {
+                    let image = Arc::new(image::RgbaImage::new(1600, 1000));
+                    let selected = Bounds::new(point(px(100.), px(140.)), size(px(800.), px(500.)));
+                    let margin = cx.global::<Runtime>().config.pin.margin();
+                    let (pin, _) = PinView::open_at(1004, image, false, Some(selected), cx)?;
+                    Ok((pin, Rect::new(100. - margin, 140. - margin, 800. + margin * 2., 500. + margin * 2.)))
+                })?;
+                smol::Timer::after(std::time::Duration::from_millis(150)).await;
+                cx.update(|cx| -> anyhow::Result<()> {
+                    pin.update(cx, |_, w, cx| -> anyhow::Result<()> {
+                        let actual = snip_platform::inspect_window_rect(raw(w)?)?;
+                        anyhow::ensure!((actual.x - expected.x).abs() < 1. && (actual.y - expected.y).abs() < 1.
+                            && (actual.width - expected.width).abs() < 1. && (actual.height - expected.height).abs() < 1.,
+                            "native capture pin moved or resized: {actual:?}, expected {expected:?}");
+                        crate::window_pool::park(crate::window_pool::Role::Pin, w, cx);
+                        Ok(())
+                    })??;
+                    Ok(())
+                })?;
+            }
             cx.update(|cx| -> anyhow::Result<()> {
                 let image = Arc::new(image::RgbaImage::new(360, 220));
                 let (editor, view) = PinView::open(1003, image.clone(), true, cx)?;

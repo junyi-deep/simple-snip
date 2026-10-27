@@ -419,6 +419,21 @@ pub fn inspect_window(handle: RawWindowHandle) -> Result<(bool, bool, f32)> {
     Ok((w.level() > 0, w.ignoresMouseEvents(), w.alphaValue() as f32))
 }
 
+/// Native frame in top-left desktop points, for geometry regression probes.
+pub fn inspect_window_rect(handle: RawWindowHandle) -> Result<Rect> {
+    let mtm = MainThreadMarker::new().context("窗口检查必须在主线程")?;
+    let primary = objc2_app_kit::NSScreen::screens(mtm)
+        .firstObject()
+        .context("没有可用显示器")?;
+    let frame = window(handle)?.frame();
+    Ok(Rect::new(
+        frame.origin.x as f32,
+        (primary.frame().size.height - frame.origin.y - frame.size.height) as f32,
+        frame.size.width as f32,
+        frame.size.height as f32,
+    ))
+}
+
 /// Give AppKit a stable Touch Bar provider instead of relying on discovery down
 /// GPUI's changing responder tree. Public NSResponder API; no method swizzling.
 /// Workaround candidate for gpui-kit#3192, covered by repeated native UI probes.
