@@ -46,6 +46,7 @@ pub enum Event {
     ),
     ClosePinEditor(u64),
     ClosePin(u64),
+    CloseTask(AnyWindowHandle),
     FocusPinToolbar(u64),
     FocusPinCanvas(u64),
     PinNotice(u64, String),
@@ -72,6 +73,7 @@ pub struct Runtime {
     pub tray: Option<gpui_tray::Tray>,
     pub trails: Vec<AnyWindowHandle>,
     pub annotation_toolbar: Option<(AnyWindowHandle, Entity<crate::editor::FloatingToolbar>)>,
+    pub capture_task: Option<AnyWindowHandle>,
 }
 impl Global for Runtime {}
 gpui_kit::actions!(
@@ -174,6 +176,7 @@ pub fn start(cx: &mut App) {
         tray: None,
         trails: vec![],
         annotation_toolbar: None,
+        capture_task: None,
     });
     cx.set_activation_policy(ActivationPolicy::Accessory);
     cx.on_app_quit(|cx| {
@@ -253,13 +256,22 @@ pub fn start(cx: &mut App) {
     }
 }
 fn tray_icon() -> gpui_tray::Icon {
-    let image = image::load_from_memory(include_bytes!("../assets/icons/app.png"))
+    #[cfg(target_os = "macos")]
+    let source = include_bytes!("../assets/icons/tray.png").as_slice();
+    #[cfg(target_os = "windows")]
+    let source = include_bytes!("../assets/icons/app.png").as_slice();
+    let image = image::load_from_memory(source)
         .expect("valid built-in icon")
         .into_rgba8();
-    let image = image::imageops::resize(&image, 32, 32, image::imageops::FilterType::Lanczos3);
-    gpui_tray::Icon::from_rgba(image.into_raw(), 32, 32)
-        .build()
-        .expect("valid built-in icon")
+    #[cfg(target_os = "macos")]
+    let size = 36;
+    #[cfg(target_os = "windows")]
+    let size = 32;
+    let image = image::imageops::resize(&image, size, size, image::imageops::FilterType::Lanczos3);
+    let builder = gpui_tray::Icon::from_rgba(image.into_raw(), size, size);
+    #[cfg(target_os = "macos")]
+    let builder = builder.scale_factor(2.).template(true);
+    builder.build().expect("valid built-in icon")
 }
 fn menu(cx: &mut App) -> Vec<MenuItem> {
     let active = cx
@@ -460,6 +472,15 @@ fn handle(event: Event, cx: &mut App) {
             }
         }
         Event::ClosePin(id) => close_pin(id, cx),
+        Event::CloseTask(handle) => {
+            if cx.global::<Runtime>().capture_task == Some(handle) {
+                cx.global_mut::<Runtime>().capture_task = None;
+            }
+            let _ = handle.update(cx, |_, w, cx| {
+                crate::window_pool::park(crate::window_pool::Role::Task, w, cx)
+            });
+            crate::task_toolbar::closed(cx);
+        }
         Event::ApplyPin(id, doc, image, cancel) => {
             if cancel.cancelled() {
                 return;
@@ -498,6 +519,15 @@ fn handle(event: Event, cx: &mut App) {
     }
 }
 fn start_capture(mode: CaptureMode, cx: &mut App) {
+    if let Some(task) = cx.global::<Runtime>().capture_task {
+        let _ = task.update(cx, |_, w, _| {
+            if let Ok(raw) = raw(w) {
+                let _ = snip_platform::show_window(raw, true);
+            }
+        });
+        status(cx, "请先在当前控制栏完成或关闭采集，再开始新的截图");
+        return;
+    }
     if cx.global::<Runtime>().capture_busy || !cx.global::<Runtime>().overlays.is_empty() {
         return;
     }
@@ -526,7 +556,15 @@ pub fn close_overlays(cx: &mut App) {
                 tracing::warn!("关闭截图窗口失败: {error}");
             }
         }
-        set_trails_visible(cx, true);
+        if cx.global::<Runtime>().capture_task.is_none()
+            && !cx
+                .global::<Runtime>()
+                .recordings
+                .iter()
+                .any(|c| !c.done.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            set_trails_visible(cx, true);
+        }
     });
 }
 pub fn set_trails_visible(cx: &mut App, show: bool) {
@@ -676,12 +714,20 @@ pub fn smoke_test(cx: &mut App) {
                     overlay.update(cx, |_, w, cx| crate::window_pool::park(crate::window_pool::Role::Capture, w, cx))?;
                 }
                 let _ = previous_overlay;
+                let controls = crate::task_toolbar::open(display, Rect::new(0., 0., 300., 160.), true, cx)?;
+                controls.update(cx, |_, w, _| -> anyhow::Result<()> {
+                    let (top, through, _) = snip_platform::inspect_window(raw(w)?)?;
+                    anyhow::ensure!(top && !through, "capture toolbar must be topmost and interactive");
+                    Ok(())
+                })??;
+                handle(Event::CloseTask(controls), cx);
+                anyhow::ensure!(cx.global::<Runtime>().capture_task.is_none(), "closed toolbar retained capture session");
                 Ok(())
             })?;
             anyhow::Ok(())
         }.await;
         match result {
-            Ok(()) => tracing::info!("SMOKE PASS: tray, transparent/topmost pin, opacity, click-through recovery, three pin and capture lifecycle cycles, native window reuse and pin document release"),
+            Ok(()) => tracing::info!("SMOKE PASS: tray, transparent/topmost pin, opacity, click-through recovery, three pin and capture lifecycle cycles, native window reuse, pin document release and capture toolbar lifecycle"),
             Err(e) => tracing::error!("SMOKE FAILED: {e:#}"),
         }
         cx.update(|cx| command(cx, Command::Quit));

@@ -66,3 +66,13 @@ GPUI 的 `titlebar: None` 创建的是 titled + full-size-content 窗口，macOS
 macOS 热键通过公开 Carbon RegisterEventHotKey 注册到 GetEventDispatcherTarget，使用 kEventHotKeyExclusive=1 检测冲突。回调仅转发已注册 ID 到统一命令队列；没有事件 Tap、键盘轮询或额外全局绑定，不绕过系统功能键。Windows 后端保持独立。API 类型 / 常量读取自本机 Apple SDK CarbonEvents.h / Events.h，常见字母、数字、F1–F20 与导航键明确映射，不支持的按键会报错。
 
 Overlay 独立保存正在拖动的选区；拖动缩放手柄时临时隐藏编辑器，松开后从完整冻结图像裁剪。Document.reframe 平移当前对象及 undo / redo 快照，保证原标注的桌面位置不变，超出新边界的内容在导出时裁切。重置 OCR 并在下一帧恢复画布焦点。刷新渲染任务由 GPUI background executor 调度，使生产和 headless 测试共享任务生命周期。
+
+## v0.0.3 活动采集控制栏
+
+`task_toolbar` 从图像编辑器拆出，使用单一无标题 GPUI 小浮窗，按选区右下边沿定位，空间不足时置于选区内侧；不移动图片到额外编辑框。Runtime 记录当前采集控制栏，活动任务结束前不叠加新采集，以避免递归采集。截图 Overlay 关闭后，只有没有活动采集任务时才恢复鼠标特效。
+
+长截图默认在后台每 450ms 采集稳定区域；图像注册与分配在 GPUI background executor 执行，UI 仅持有结果。以最后一个视口为匹配基准，搜索水平 / 垂直位移，维护视口在合成画布中的位置；向任意一端扩张，反向回访更新坐标而不重复追加。换轴产生的未访问区域保留透明。模糊 / 周期性匹配拒绝猜测；手动监测可等待用户回滚重试，内存 / 权限错误停止。每会话以 generation 阻止重复轮询，最多 5 分钟 / 600 段，峰值预算包含旧 / 新画布与前后视口，限制 256 MiB。
+
+macOS 区域采集使用 `SCShareableContent` + `SCContentFilter(display:excludingWindows:)` + `SCScreenshotManager`；裁剪矩形从源像素换算为显示器逻辑点，输出尺寸仍为源像素。只将拥有的 RGBA 数据从系统回调传回后台线程，不对 Objective-C 对象添加未经验证的 Send 实现。CoreGraphics RGBA 转换有颜色通道 / 行序自动测试。Windows 对自己的控制栏设置 `WDA_EXCLUDEFROMCAPTURE`，像素采集继续复用原后端。控制栏不能安全排除且必须放入选区时，停止开始操作并要求用户留出空间。
+
+GIF 控制栏保持显示，由原有有界生产 / 编码线程更新实际时长与暂停状态。当前是逐帧截图，不宣称已完成 SCStream / WGC 连续视频管线或帧率性能验收。关闭任务统一通过命令队列回收窗口，取消后台工作；不增加系统全局快捷键。

@@ -135,6 +135,152 @@ pub fn native_show(handle: RawWindowHandle, show: bool) -> Result<()> {
     }
     Ok(())
 }
+/// An owned top-level NSWindow id, used only to exclude our capture controls.
+pub fn exclude_capture_controls(handle: RawWindowHandle) -> Result<u32> {
+    Ok(u32::try_from(window(handle)?.windowNumber())?)
+}
+
+/// ScreenCaptureKit filters remove the toolbar even when placement must fall
+/// inside a full-screen selection. Objective-C objects stay in their callbacks;
+/// only owned RGBA bytes cross the channel back to the capture worker.
+pub fn capture_region_excluding(display_id: u32, rect: Rect, excluded: u32) -> Result<RgbaImage> {
+    use objc2_screen_capture_kit::{
+        SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
+    };
+    let monitor = xcap::Monitor::all()?
+        .into_iter()
+        .find(|m| m.id().ok() == Some(display_id))
+        .context("目标显示器已断开")?;
+    let scale = crate::capture_unit_scale(&monitor)? as f64;
+    let (x, y, width, height) = rect.pixel_bounds(
+        (monitor.width()? as f64 * scale).round() as u32,
+        (monitor.height()? as f64 * scale).round() as u32,
+    );
+    ensure!(
+        width > 0 && height > 0 && width as u64 * height as u64 * 4 <= 128 * 1024 * 1024,
+        "采集区域为空或超过单帧内存上限"
+    );
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let callback = block2::RcBlock::new(
+        move |content: *mut SCShareableContent, error: *mut objc2_foundation::NSError| {
+            let result = (|| -> Result<()> {
+                if let Some(error) = unsafe { error.as_ref() } {
+                    if error.code() == -3801 {
+                        return Err(crate::ScreenPermissionDenied.into());
+                    }
+                    anyhow::bail!(
+                        "屏幕采集服务失败 ({}): {}",
+                        error.code(),
+                        error.localizedDescription()
+                    );
+                }
+                let content = unsafe { content.as_ref() }.context("系统未返回可捕获内容")?;
+                let display = unsafe { content.displays() }
+                    .iter()
+                    .find(|d| unsafe { d.displayID() == display_id })
+                    .context("目标显示器已断开")?;
+                let windows: Vec<_> = unsafe { content.windows() }
+                    .iter()
+                    .filter(|w| unsafe { w.windowID() == excluded })
+                    .collect();
+                let filter = unsafe {
+                    SCContentFilter::initWithDisplay_excludingWindows(
+                        SCContentFilter::alloc(),
+                        &display,
+                        &NSArray::from_retained_slice(&windows),
+                    )
+                };
+                let config = unsafe { SCStreamConfiguration::new() };
+                unsafe {
+                    config.setWidth(width as usize);
+                    config.setHeight(height as usize);
+                    config.setSourceRect(objc2_core_foundation::CGRect::new(
+                        objc2_core_foundation::CGPoint::new(x as f64 / scale, y as f64 / scale),
+                        objc2_core_foundation::CGSize::new(
+                            width as f64 / scale,
+                            height as f64 / scale,
+                        ),
+                    ));
+                    config.setShowsCursor(false);
+                    config.setScalesToFit(false);
+                }
+                let tx_image = tx.clone();
+                let image_callback = block2::RcBlock::new(
+                    move |image: *mut objc2_core_graphics::CGImage,
+                          error: *mut objc2_foundation::NSError| {
+                        let result = (|| -> Result<RgbaImage> {
+                            if let Some(error) = unsafe { error.as_ref() } {
+                                if error.code() == -3801 {
+                                    return Err(crate::ScreenPermissionDenied.into());
+                                }
+                                anyhow::bail!(
+                                    "屏幕采集失败 ({}): {}",
+                                    error.code(),
+                                    error.localizedDescription()
+                                );
+                            }
+                            let image = unsafe { image.as_ref() }.context("系统未返回屏幕图像")?;
+                            rgba_from_cgimage(image, width, height)
+                        })();
+                        let _ = tx_image.try_send(result);
+                    },
+                );
+                unsafe {
+                    SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                        &filter,
+                        &config,
+                        Some(&image_callback),
+                    );
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let _ = tx.try_send(Err(error));
+            }
+        },
+    );
+    unsafe {
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(false, true, &callback);
+    }
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .context("等待屏幕采集超时")?
+}
+
+fn rgba_from_cgimage(
+    image: &objc2_core_graphics::CGImage,
+    width: u32,
+    height: u32,
+) -> Result<RgbaImage> {
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
+    };
+    let mut pixels = RgbaImage::new(width, height);
+    let space = CGColorSpace::new_device_rgb().context("无法创建屏幕色彩空间")?;
+    // SAFETY: pixels owns a width*height*4 allocation until after context drops;
+    // the requested 8-bit RGBA context uses exactly width*4 bytes per row.
+    let context = unsafe {
+        CGBitmapContextCreate(
+            pixels.as_mut_ptr().cast(),
+            width as usize,
+            height as usize,
+            8,
+            width as usize * 4,
+            Some(&space),
+            CGImageByteOrderInfo::Order32Big.0 | CGImageAlphaInfo::PremultipliedLast.0,
+        )
+    }
+    .context("无法创建屏幕像素缓冲区")?;
+    CGContext::draw_image(
+        Some(&context),
+        objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0., 0.),
+            objc2_core_foundation::CGSize::new(width as f64, height as f64),
+        ),
+        Some(image),
+    );
+    drop(context);
+    Ok(pixels)
+}
 pub fn window_visible(handle: RawWindowHandle) -> Result<bool> {
     Ok(window(handle)?.isVisible())
 }
@@ -310,4 +456,35 @@ pub fn move_window(handle: RawWindowHandle, x: f32, y: f32, _scale: f32) -> Resu
 
 pub fn screen_permission_settings_url() -> Option<&'static str> {
     Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+}
+
+#[cfg(test)]
+mod capture_tests {
+    #[test]
+    fn core_graphics_rgba_conversion_preserves_channels_and_row_order() {
+        use objc2_core_graphics::{
+            CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
+            CGImageByteOrderInfo,
+        };
+        let mut source = image::RgbaImage::from_fn(5, 3, |x, y| {
+            image::Rgba([(x * 40) as u8, (y * 70) as u8, 140, 255])
+        });
+        let space = CGColorSpace::new_device_rgb().unwrap();
+        // SAFETY: the owned test buffer outlives the context and image snapshot.
+        let context = unsafe {
+            CGBitmapContextCreate(
+                source.as_mut_ptr().cast(),
+                5,
+                3,
+                8,
+                20,
+                Some(&space),
+                CGImageByteOrderInfo::Order32Big.0 | CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        }
+        .unwrap();
+        let image = CGBitmapContextCreateImage(Some(&context)).unwrap();
+        let actual = super::rgba_from_cgimage(&image, 5, 3).unwrap();
+        assert_eq!(actual, source);
+    }
 }

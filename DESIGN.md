@@ -51,7 +51,7 @@ components:
     padding: "{spacing.compact}"
   settings-nav:
     backgroundColor: "{colors.muted}"
-    width: "176px"
+    width: "200px"
 ---
 
 # Design System: Simple Snip
@@ -105,7 +105,7 @@ Keep tool names in accessibility labels and tooltips, even when the visible cont
 
 ## Layout
 
-Preferences open at (900 × 660 logical pixels), with a minimum size of (760 × 540). A fixed narrow sidebar (176px) sits beside a scrolling content column. Preserve the established spacing rhythm: an 8px unit, 24px content inset, 12px row padding, and 4px local gaps. Rows place a title and helper description on the left and a control on the right. The status/save strip remains below the content.
+Preferences open at (900 × 660 logical pixels), with a minimum size of (760 × 540). A 200px scrollable sidebar sits beside a scrolling content column. Preserve the established spacing rhythm: an 8px unit, 24px content inset, 12px row padding, and 4px local gaps. Rows place a title and helper description on the left and a control on the right. The status/save strip remains below the content.
 
 The screenshot overlay occupies one display. The selected image stays in its original selection, with annotation embedded there. Pins are independent image windows; initial fit is bounded by (680 × 500) without enlarging smaller images. Preserve image aspect and source-pixel coordinate mapping when scaled or transformed.
 
@@ -189,3 +189,9 @@ About includes an explicit GitHub update check, download progress, verified pack
 ## 0.0.2 native refinement
 
 Pins have a default thin blue #1688FF frame. Color, 0–8px width and shadow can be changed in Pin settings. Transparent padding accommodates the shadow without changing image coordinates or exported pixels. Toolbar controls align to the actual image right edge, excluding shadow padding; natural icon widths replace the reserved empty area. Eight blue/white handles remain visible on a selected capture and preserve annotation coordinates when resized. Preferences explicitly show and rise above own pins when activated, then return to normal level on blur. Final unlocked visual acceptance is pending.
+
+## Live capture controls (v0.0.3)
+
+Long capture and GIF use a compact borderless control strip attached to the selected region’s lower-right edge, with the same below/inside placement rule as annotation. Status and controls wrap; long messages scroll within the strip. A live capture keeps its controls usable. Settings descriptions wrap inside a flexible min-width-zero text column; fixed-size controls retain their width. Both navigation and main content can scroll at the minimum window size.
+
+The original crop mark now uses circular corner arcs and round caps. The app surface follows the supplied reference #2563EB blue, 48px outer inset and 208px outer radius on a 1024px canvas. macOS uses an independent black-alpha menu-bar template at 18 logical pixels; Windows retains a colored app icon for taskbar contrast.

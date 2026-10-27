@@ -11,6 +11,7 @@ mod hotkeys;
 mod overlay;
 mod pin;
 mod settings;
+mod task_toolbar;
 mod window_pool;
 fn main() {
     tracing_subscriber::fmt()

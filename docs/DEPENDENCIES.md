@@ -9,6 +9,7 @@
 - dispatch2 0.3.1（Zlib / Apache-2.0 / MIT 可选许可）：读取 registry 实际 DispatchQueue / MainThreadBound API，用于异步原生窗口移动。测试仅启用 Kit 对应的 gpui-pre 0.3.9 test-support。
 - [objc2](https://github.com/madsmtm/objc2)：0.6 系列与 0.3.2 Apple Framework bindings；公开 NSWindow、NSResponder、CoreGraphics、Vision API。
 - [windows-rs](https://github.com/microsoft/windows-rs)：0.62；原生窗口属性、消息、WinRT SoftwareBitmap / Windows.Media.Ocr。
+- v0.0.3 读取实际 objc2 绑定的 SCContentFilter / SCScreenshotManager / sourceRect（逻辑点）和 CoreGraphics bitmap API；[Apple 过滤器说明](https://developer.apple.com/documentation/screencapturekit/sccontentfilter)。Windows [WDA_EXCLUDEFROMCAPTURE](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity) 的下界为 Windows 10 2004。横 / 纵滚动交互参考 [Snagit 公开说明](https://www.techsmith.com/snagit/features/screenshot-website/)，独立实现图像注册，未复用其代码或资源。
 - 图像 / 编码：image 0.25、tiny-skia 0.11、fontdue 0.9.5、gif 0.14；配置 serde / TOML；日志 tracing；具体解析版本和许可正文收录在打包生成的 `THIRD_PARTY_NOTICES.txt`。
 - [GitHub runner 官方表](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)：macos-15 对应 ARM64，任务中另行断言 uname / Rust host，避免误用 Intel runner。
 

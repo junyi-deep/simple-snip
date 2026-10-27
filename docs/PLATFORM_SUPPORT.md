@@ -5,6 +5,7 @@
 ## 最低系统与实际设备
 
 - GPUI Kit 0.8 官方安装文档要求 macOS 15+、Windows 10+。本项目据此将 Info.plist 最低系统设为 macOS 15.0；Windows 面向 10/11 AMD64。**最低版本兼容尚需真机验证。**
+- v0.0.3 将 Windows 支持下界设为 Windows 10 2004 / Windows 11，因为控制栏排除使用 [WDA_EXCLUDEFROMCAPTURE](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity)，该值在更早版本可能仅生成黑色区域。最低系统真机与 Windows 桌面交互仍待验收。
 - 当前实测设备：macOS 27.0.1 / Apple Silicon；Rust 1.99.0，Xcode 27.0。
 - Windows 安装了 Rust MSVC target，只完成平台模块交叉类型检查；本机无 Windows GUI / SDK 测试环境。
 

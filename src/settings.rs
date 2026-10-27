@@ -292,6 +292,8 @@ fn row(title: &str, description: &str, control: impl IntoElement) -> Div {
                 .v_flex()
                 .gap_1()
                 .flex_1()
+                .min_w_0()
+                .whitespace_normal()
                 .child(title.to_string())
                 .child(
                     div()
@@ -300,7 +302,7 @@ fn row(title: &str, description: &str, control: impl IntoElement) -> Div {
                         .child(description.to_string()),
                 ),
         )
-        .child(control)
+        .child(div().flex_shrink_0().child(control))
 }
 impl Render for Settings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -319,9 +321,12 @@ impl Render for Settings {
             "关于、更新与权限",
         ];
         let mut nav = div()
+            .id("settings-navigation")
             .v_flex()
-            .w(px(176.))
+            .w(px(200.))
             .flex_shrink_0()
+            .min_h_0()
+            .overflow_y_scroll()
             .bg(cx.theme().muted)
             .p_3()
             .gap_1()
@@ -349,6 +354,9 @@ impl Render for Settings {
             .v_flex()
             .gap_3()
             .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .whitespace_normal()
             .overflow_y_scroll()
             .p_6()
             .child(
@@ -691,6 +699,7 @@ impl Render for Settings {
                     .h_flex()
                     .items_stretch()
                     .flex_1()
+                    .min_h_0()
                     .overflow_hidden()
                     .child(nav)
                     .child(content),
@@ -708,6 +717,8 @@ impl Render for Settings {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
                             .text_xs()
                             .child(cx.global::<Runtime>().status.clone()),
                     )

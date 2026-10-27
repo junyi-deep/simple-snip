@@ -50,7 +50,7 @@ pub fn open<V: Render>(
                 view = Some(content.clone());
                 gpui_kit::base::Root::new(content, w, cx)
             });
-            if matches!(role, Role::Trail | Role::Pin) {
+            if matches!(role, Role::Trail | Role::Pin | Role::Task) {
                 transparent_root(w, cx);
             }
             if let Ok(raw) = crate::app::raw(w) {
@@ -68,7 +68,7 @@ pub fn open<V: Render>(
     let bounds = options.window_bounds;
     let result = gpui_kit::open_window(options, cx, build)?;
     #[cfg(target_os = "macos")]
-    if matches!(role, Role::Capture | Role::Trail)
+    if matches!(role, Role::Capture | Role::Trail | Role::Task)
         && let Some(WindowBounds::Windowed(bounds)) = bounds
     {
         result.0.update(cx, |_, w, _| {
@@ -82,7 +82,7 @@ pub fn open<V: Render>(
             }
         })?;
     }
-    if matches!(role, Role::Trail | Role::Pin) {
+    if matches!(role, Role::Trail | Role::Pin | Role::Task) {
         result.0.update(cx, |_, w, cx| transparent_root(w, cx))?;
     }
     Ok(result)

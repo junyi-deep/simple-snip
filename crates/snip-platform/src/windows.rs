@@ -23,6 +23,17 @@ pub fn screen_permission() -> bool {
 pub fn request_screen_permission() -> bool {
     true
 }
+pub fn exclude_capture_controls(handle: RawWindowHandle) -> Result<u32> {
+    // Windows 10 2004+: the controls remain visible to the user but are omitted
+    // from desktop capture. Older Windows may treat this as WDA_MONITOR.
+    unsafe {
+        SetWindowDisplayAffinity(hwnd(handle)?, WDA_EXCLUDEFROMCAPTURE)?;
+    }
+    Ok(0)
+}
+pub fn capture_region_excluding(display: u32, rect: Rect, _: u32) -> Result<RgbaImage> {
+    crate::capture_region(display, rect)
+}
 fn hwnd(handle: RawWindowHandle) -> Result<HWND> {
     let RawWindowHandle::Win32(h) = handle else {
         anyhow::bail!("非 Win32 窗口")

@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><title>Simple Snip · Local scroll fixture</title>
+<style>html,body{margin:0;background:#fafafa}canvas{display:block;width:2800px;height:3200px}</style>
+<canvas width="2800" height="3200" aria-label="Local two-axis scroll test grid"></canvas>
+<script>
+// Deterministic local content: no network, timers, animation or fixed headers.
+const ctx=document.querySelector('canvas').getContext('2d');
+for(let y=0;y<3200;y+=40)for(let x=0;x<2800;x+=80){
+  const n=((Math.imul(x+13,73856093)^Math.imul(y+17,19349663))>>>0);
+  ctx.fillStyle=`rgb(${180+n%70},${180+(n>>>8)%70},${180+(n>>>16)%70})`;
+  ctx.fillRect(x,y,80,40);ctx.fillStyle='#162c42';ctx.font='13px monospace';
+  ctx.fillText(`${x/80},${y/40}`,x+6,y+23);
+  ctx.fillStyle=`rgb(${n%160},${(n>>>8)%160},${(n>>>16)%160})`;
+  ctx.fillRect(x+54,y+5,12,11);
+}
+</script>

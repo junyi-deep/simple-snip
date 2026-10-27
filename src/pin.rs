@@ -518,6 +518,7 @@ mod tests {
                 tray: None,
                 trails: vec![],
                 annotation_toolbar: None,
+                capture_task: None,
             });
         });
         rx
