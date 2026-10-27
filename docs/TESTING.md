@@ -2,6 +2,8 @@
 
 ## 2026-10-27：v0.0.3 发布前检查
 
+发布安排已按用户最新要求调整为先发布、后补桌面验证。下列待验收项目仍保持未验证状态；发布不代表这些项目已通过。
+
 用户已确认新贴图在其他应用与贴图间切换后能正常选中并关闭。此前修复的双平台工作流 [40355265508](https://github.com/junyi-deep/simple-snip/actions/runs/40355265508) 已成功完成完整编译、Clippy、测试和打包；那次运行对应 4652e57，不能代替本次新增功能的 CI。
 
 本次代码的本机结果：fmt / Clippy `-D warnings` 通过，47 项自动测试通过（13 GUI / macOS 键映射、29 core、1 CoreGraphics 像素转换、4 updater），3 项 native 测试仍 ignored；Windows 平台模块 MSVC target 类型检查通过。新增四方向 / 回滚 / 换轴透明区域、周期性纹理拒绝、失败 / 内存上限保留已有结果测试，以及控制栏右侧 / 底部避让、窄屏几何测试。CoreGraphics 纯内存原生转换实际执行，确认 RGBA 通道和行序。ARM64 Release 与 ad-hoc 打包已成功，后续窗口生命周期变动仍需最终重建。
