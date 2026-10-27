@@ -45,6 +45,7 @@ pub struct EditorView {
     scale: f32,
     origin: Point<Pixels>,
     view_size: gpui_kit::Size<Pixels>,
+    desktop_origin: Point<Pixels>,
     focus: FocusHandle,
     text: Entity<InputState>,
     message: String,
@@ -111,6 +112,10 @@ impl EditorView {
             scale: f32::from(view_bounds.size.width) / initial.width() as f32,
             origin: view_bounds.origin,
             view_size: view_bounds.size,
+            desktop_origin: w
+                .display(cx)
+                .map(|d| d.bounds().origin)
+                .unwrap_or(w.bounds().origin),
             focus,
             text,
             message: String::new(),
@@ -361,6 +366,7 @@ impl EditorView {
         let doc = self.doc.clone();
         let transform = self.transform;
         let host = self.host;
+        let placement = self.pin_placement();
         let cancel = self.session_cancel.clone();
         let tx = cx.global::<Runtime>().tx.clone();
         self.message = "正在合成…".into();
@@ -405,7 +411,7 @@ impl EditorView {
                     if matches!(host, EditorHost::Capture) {
                         cx.update(app::close_overlays);
                     }
-                    let _ = tx.send(Event::Pin(image)).await;
+                    let _ = tx.send(Event::Pin(image, placement)).await;
                 }
                 _ => match host {
                     EditorHost::Pin(id) => {
@@ -417,6 +423,10 @@ impl EditorView {
         })
         .detach();
         cx.notify();
+    }
+    fn pin_placement(&self) -> Option<Bounds<Pixels>> {
+        matches!(self.host, EditorHost::Capture)
+            .then(|| Bounds::new(self.desktop_origin + self.origin, self.view_size))
     }
     fn cancel(&self, cx: &mut App) {
         self.cancel.cancel();
@@ -1561,6 +1571,48 @@ mod tests {
             session.cancelled(),
             "closed editors must reject late results"
         );
+    }
+
+    #[gpui_kit::test]
+    fn capture_pin_retains_latest_selection_on_negative_origin_display(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        assert!(
+                            v.pin_placement().is_none(),
+                            "clipboard pins keep automatic placement"
+                        );
+                        v.host = EditorHost::Capture;
+                        v.desktop_origin = point(px(-1440.), px(-900.));
+                        assert_eq!(
+                            v.pin_placement(),
+                            Some(Bounds::new(
+                                point(px(-990.), px(-250.)),
+                                size(px(620.), px(215.))
+                            ))
+                        );
+                        v.reframe_capture(
+                            Arc::new(RgbaImage::new(1600, 600)),
+                            0.,
+                            0.,
+                            Bounds::new(point(px(300.), px(200.)), size(px(800.), px(300.))),
+                            w,
+                            cx,
+                        );
+                        assert_eq!(
+                            v.pin_placement(),
+                            Some(Bounds::new(
+                                point(px(-1140.), px(-700.)),
+                                size(px(800.), px(300.))
+                            )),
+                            "pinning must use the resized selection and Retina logical size"
+                        );
+                    });
+                })
+                .unwrap();
+        });
     }
 
     #[gpui_kit::test]

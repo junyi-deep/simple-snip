@@ -32,6 +32,15 @@ impl PinView {
         edit: bool,
         cx: &mut App,
     ) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
+        Self::open_at(id, image, edit, None, cx)
+    }
+    pub fn open_at(
+        id: u64,
+        image: Arc<RgbaImage>,
+        edit: bool,
+        placement: Option<Bounds<Pixels>>,
+        cx: &mut App,
+    ) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
         let scale = (680. / image.width() as f32)
             .min(500. / image.height() as f32)
             .min(1.);
@@ -44,6 +53,22 @@ impl PinView {
             ),
             cx,
         );
+        // A captured region is already sized in logical display coordinates.
+        // Preserve its content rect, with transparent frame padding outside it.
+        let (bounds, scale) = if let Some(content) = placement {
+            (
+                Bounds::new(
+                    content.origin - point(px(margin), px(margin)),
+                    size(
+                        content.size.width + px(margin * 2.),
+                        content.size.height + px(margin * 2.),
+                    ),
+                ),
+                f32::from(content.size.width) / image.width() as f32,
+            )
+        } else {
+            (bounds, scale)
+        };
         let (handle, view) = crate::window_pool::open(
             crate::window_pool::Role::Pin,
             WindowOptions {
@@ -537,6 +562,47 @@ mod tests {
             );
             (handle, view)
         })
+    }
+
+    #[gpui_kit::test]
+    fn capture_pin_preserves_content_rect_instead_of_centering_or_fitting(cx: &mut TestAppContext) {
+        setup(cx);
+        cx.update(|cx| {
+            let margin = cx.global::<Runtime>().config.pin.margin();
+            let selected = gpui_kit::Bounds::new(
+                point(px(160.), px(100.)),
+                gpui_kit::size(px(1000.), px(600.)),
+            );
+            let (handle, view) = PinView::open_at(
+                1,
+                Arc::new(RgbaImage::new(2000, 1200)),
+                false,
+                Some(selected),
+                cx,
+            )
+            .unwrap();
+            handle
+                .update(cx, |_, w, cx| {
+                    assert_eq!(
+                        w.bounds().origin + point(px(margin), px(margin)),
+                        selected.origin
+                    );
+                    assert_eq!(
+                        w.viewport_size().width - px(margin * 2.),
+                        selected.size.width
+                    );
+                    assert_eq!(
+                        w.viewport_size().height - px(margin * 2.),
+                        selected.size.height
+                    );
+                    assert_eq!(
+                        view.read(cx).scale,
+                        0.5,
+                        "retain Retina display scale above the old fit limit"
+                    );
+                })
+                .unwrap();
+        });
     }
 
     #[gpui_kit::test]

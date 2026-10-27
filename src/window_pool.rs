@@ -68,7 +68,7 @@ pub fn open<V: Render>(
     let bounds = options.window_bounds;
     let result = gpui_kit::open_window(options, cx, build)?;
     #[cfg(target_os = "macos")]
-    if matches!(role, Role::Capture | Role::Trail | Role::Task)
+    if matches!(role, Role::Capture | Role::Trail | Role::Task | Role::Pin)
         && let Some(WindowBounds::Windowed(bounds)) = bounds
     {
         result.0.update(cx, |_, w, _| {

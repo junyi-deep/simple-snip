@@ -1,5 +1,13 @@
 # 实际测试记录
 
+## 2026-10-27：截图原位固定修复（v0.0.3 后，未发布）
+
+用户解锁后继续桌面验证，并要求截图固定不改变位置和尺寸。实际定位到截图导出事件只传图像、PinView 总是居中并适配至 680×500 的问题；改为传递可选桌面逻辑 Bounds，截图使用当前选区，剪贴板 / 历史仍走自动放置。
+
+`cargo test --locked --workspace` 49 项通过（15 GUI、29 core、1 原生内存像素、4 updater），另 3 项桌面测试 ignored。新增测试覆盖负原点显示器、Retina 物理 / 逻辑比例、调整后的选区及超过旧适配上限的内容尺寸，验证阴影留白在选区外侧。workspace Clippy `-D warnings` 和 ARM64 Release 构建通过。
+
+已实际打开现有 v0.0.3 的截图 Overlay 与设置页；900×660 设置窗口的长截图说明完整换行。桌面工具对 Overlay 拖拽返回 windowNotFoundAtPosition，且不能定位未激活的 GIF 浮动控制栏，已请用户协助框选 / 激活。不能将这两项自动化尝试或模型测试算作真实长图 / GIF / 原位固定验收。最小窗口拖拽未成功改变窗口尺寸，仍不标记最小尺寸目视通过。
+
 ## 2026-10-27：v0.0.3 标签发布与制品复核
 
 用户要求先发布、后补桌面验证。v0.0.3 标签指向 6b4ef06ff5a6d4a2d61b9b108781ed30829f8c8e；[标签流水线 40449003057](https://github.com/junyi-deep/simple-snip/actions/runs/40449003057) 的两个原生平台和 Release job 全部成功，均完成 fmt / check / Clippy / tests / Release / 打包。公开 [Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.3) 于 04:23:33 UTC 发布，非草稿，GitHub latest API 已返回 v0.0.3。

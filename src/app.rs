@@ -36,7 +36,7 @@ pub enum Event {
     Hotkey(u32),
     Captured(anyhow::Result<Vec<CapturedDisplay>>, CaptureMode),
     Selection(CapturedDisplay, Rect, CaptureMode),
-    Pin(Arc<image::RgbaImage>),
+    Pin(Arc<image::RgbaImage>, Option<Bounds<Pixels>>),
     Edit(Arc<image::RgbaImage>),
     ApplyPin(
         u64,
@@ -312,7 +312,7 @@ fn handle(event: Event, cx: &mut App) {
                 std::thread::spawn(move || match NativeClipboard.read_image() {
                     Ok(image) => {
                         let _ = tx.send_blocking(if matches!(cmd, Command::Paste) {
-                            Event::Pin(image)
+                            Event::Pin(image, None)
                         } else {
                             Event::Edit(image)
                         });
@@ -454,11 +454,11 @@ fn handle(event: Event, cx: &mut App) {
                 CaptureMode::Long => crate::editor::open_long_capture(display, rect, cx),
             }
         }
-        Event::Pin(image) => {
+        Event::Pin(image, placement) => {
             cx.activate(true);
             let id = cx.global::<Runtime>().next_pin;
             cx.global_mut::<Runtime>().next_pin += 1;
-            match PinView::open(id, image, false, cx) {
+            match PinView::open_at(id, image, false, placement, cx) {
                 Ok((handle, view)) => {
                     cx.global_mut::<Runtime>()
                         .pins

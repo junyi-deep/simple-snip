@@ -567,9 +567,10 @@ impl Render for Settings {
                                 let tx = cx.global::<Runtime>().tx.clone();
                                 std::thread::spawn(move || {
                                     let event = match image::open(path) {
-                                        Ok(i) => {
-                                            app::Event::Pin(std::sync::Arc::new(i.into_rgba8()))
-                                        }
+                                        Ok(i) => app::Event::Pin(
+                                            std::sync::Arc::new(i.into_rgba8()),
+                                            None,
+                                        ),
                                         Err(e) => app::Event::Status(e.to_string()),
                                     };
                                     let _ = tx.send_blocking(event);
