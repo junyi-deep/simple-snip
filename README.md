@@ -1,12 +1,12 @@
 # Simple Snip
 
 Rust + GPUI Kit 的离线桌面截图工具，仅面向 **Windows AMD64** 和 **macOS ARM64**。
-当前版本为 **0.0.2**（首个公开版本为 0.0.1）：[GitHub](https://github.com/junyi-deep/simple-snip) · [下载](https://github.com/junyi-deep/simple-snip/releases/latest)。
+当前开发版本为 **0.0.3**（待桌面验收后发布；最新公开版本为 0.0.2）：[GitHub](https://github.com/junyi-deep/simple-snip) · [下载](https://github.com/junyi-deep/simple-snip/releases/latest)。
 当前是开发版本，完整产品验收状态见 [进度](docs/PROGRESS.md)，不应视为已经完成全部需求的正式发行版。
 
 ## 运行
 
-需要 Rust 1.99+。macOS 15+、Apple Silicon 与 Xcode；Windows 10/11 AMD64、VS 2022 C++ Build Tools、Windows SDK 和 CMake。
+需要 Rust 1.99+。macOS 15+、Apple Silicon 与 Xcode；Windows 10 2004+ / Windows 11 AMD64、VS 2022 C++ Build Tools、Windows SDK 和 CMake。
 
 ```sh
 cargo run

@@ -91,6 +91,12 @@ pub fn start(cx: &mut App) {
         }
     }
     cx.global_mut::<Runtime>().trails = handles;
+    if cx.global::<Runtime>().capture_task.is_some()
+        || cx.global::<Runtime>().capture_busy
+        || !cx.global::<Runtime>().overlays.is_empty()
+    {
+        app::set_trails_visible(cx, false);
+    }
 }
 pub fn stop(cx: &mut App) {
     for h in std::mem::take(&mut cx.global_mut::<Runtime>().trails) {

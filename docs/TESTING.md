@@ -6,6 +6,10 @@
 
 本次代码的本机结果：fmt / Clippy `-D warnings` 通过，47 项自动测试通过（13 GUI / macOS 键映射、29 core、1 CoreGraphics 像素转换、4 updater），3 项 native 测试仍 ignored；Windows 平台模块 MSVC target 类型检查通过。新增四方向 / 回滚 / 换轴透明区域、周期性纹理拒绝、失败 / 内存上限保留已有结果测试，以及控制栏右侧 / 底部避让、窄屏几何测试。CoreGraphics 纯内存原生转换实际执行，确认 RGBA 通道和行序。ARM64 Release 与 ad-hoc 打包已成功，后续窗口生命周期变动仍需最终重建。
 
+最终本机重建与 ad-hoc 签名验证已成功。原生 smoke 实际通过，新增控制栏的置顶 / 可交互属性与关闭后清除活动会话断言，未出现 RefCell / panic / ERROR。DMG 以只读、不打开 Finder 的方式挂载，确认根目录为完整 Simple Snip.app 后卸载。以上是窗口属性与包结构检查，不代表锁屏期间完成了视觉或视频采集。
+
+预检工作流 [40427251004](https://github.com/junyi-deep/simple-snip/actions/runs/40427251004) 对 a0ed074 的两个目标均完成完整编译、Clippy、测试、Release 与打包，Release job 因不是标签而跳过。随后补充的自动滚动重置、回访时不误判到底、完成等待当前帧、内存预留与特效协作改动已再次通过本机 47 项测试和 Clippy；最终标签流水线仍需在桌面验收后运行。
+
 Mac 再次锁屏，已请求用户解锁。新图标的菜单栏外观、长截图 / GIF 的控制栏点击及采集排除、设置说明在最小窗口的目视尚未通过。准备了完全离线的 `tests/fixtures/scroll-grid.html` 双轴滚动页；浏览器插件不可连接本机 Chrome，IAB 无法连接本机 localhost，拟在解锁后用原生浏览器操作。不得将这些尝试当成已完成桌面验收。
 
 ## 2026-10-27：贴图选中与关闭回归（主分支，尚未发布）

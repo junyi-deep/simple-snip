@@ -10,7 +10,7 @@ python3 scripts/notices.py --target aarch64-apple-darwin
 bash packaging/macos/bundle.sh release
 ```
 
-生成 `dist/Simple Snip.app`、`SimpleSnip_0.0.2_macos-arm64_unsigned.zip` 和同名 DMG。脚本断言 ARM64，嵌入原创图标和 Info.plist，校验 ad-hoc 签名；这是本地测试签名，**未公证**。原始 `assets/icons/app.svg` 与 `scripts/make-icons.py` 独立设计，无专有图片资源。
+生成 `dist/Simple Snip.app`、`SimpleSnip_0.0.3_macos-arm64_unsigned.zip` 和同名 DMG。脚本断言 ARM64，嵌入原创图标和 Info.plist，校验 ad-hoc 签名；这是本地测试签名，**未公证**。原始 `assets/icons/app.svg` 与 `scripts/make-icons.py` 独立设计，无专有图片资源。
 
 本地包重建会改变 ad-hoc 代码身份，已有 TCC 录屏条目可能仍绑定旧程序；请移除旧条目并重新添加当前 `.app`。本机 `security find-identity -v -p codesigning` 返回 0 个有效身份，不能交付持久的正式签名。脚本支持通过 `SIMPLE_SNIP_SIGN_IDENTITY` 指定已有有效身份（hardened runtime / timestamp），不会生成证书或降低系统权限要求。
 
@@ -18,7 +18,7 @@ bash packaging/macos/bundle.sh release
 
 ## Windows AMD64
 
-Windows 10/11、VS 2022 C++ Build Tools、Windows SDK、CMake、Rust MSVC。
+Windows 10 2004+ / Windows 11、VS 2022 C++ Build Tools、Windows SDK、CMake、Rust MSVC。
 
 ```powershell
 cargo build --locked --release --target x86_64-pc-windows-msvc

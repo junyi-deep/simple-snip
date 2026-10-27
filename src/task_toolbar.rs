@@ -85,6 +85,8 @@ pub fn open(
                 .into(),
                 path: None,
                 stitch: None,
+                summary: None,
+                finish_requested: false,
                 busy: false,
                 auto: false,
                 watch: false,
@@ -147,6 +149,8 @@ struct TaskToolbar {
     message: String,
     path: Option<PathBuf>,
     stitch: Option<Stitcher>,
+    summary: Option<(u32, u32, usize)>,
+    finish_requested: bool,
     busy: bool,
     auto: bool,
     watch: bool,
@@ -174,6 +178,19 @@ fn restore_trails(cx: &mut App) {
     }
 }
 impl TaskToolbar {
+    fn finish_long_capture(&mut self, cx: &mut Context<Self>) {
+        self.watch = false;
+        self.auto = false;
+        self.generation += 1;
+        if self.busy {
+            self.finish_requested = true;
+            self.message = "正在完成当前帧…".into();
+        } else if let Some(stitch) = self.stitch.take() {
+            app::send(cx, Event::Edit(Arc::new(stitch.image)));
+            self.close(cx);
+        }
+        cx.notify();
+    }
     fn close(&mut self, cx: &mut Context<Self>) {
         self.control.cancel();
         self.cancel.cancel();
@@ -325,14 +342,22 @@ impl TaskToolbar {
             let _ = this.update(cx, |v, cx| {
                 v.busy = false;
                 v.stitch = stitch;
+                v.summary = v
+                    .stitch
+                    .as_ref()
+                    .map(|s| (s.image.width(), s.image.height(), s.frames));
                 match result {
                     Ok(changed) => {
-                        v.empty_frames = if changed { 0 } else { v.empty_frames + 1 };
                         let motion = v
                             .stitch
                             .as_ref()
                             .and_then(|s| s.last_motion)
                             .unwrap_or((0, 0));
+                        v.empty_frames = if changed || motion != (0, 0) {
+                            0
+                        } else {
+                            v.empty_frames + 1
+                        };
                         let direction = match motion {
                             (x, _) if x > 0 => "向右",
                             (x, _) if x < 0 => "向左",
@@ -365,6 +390,10 @@ impl TaskToolbar {
                         v.message = e.to_string();
                     }
                 }
+                if v.finish_requested {
+                    v.finish_requested = false;
+                    v.finish_long_capture(cx);
+                }
                 cx.notify();
             });
         })
@@ -386,6 +415,7 @@ impl TaskToolbar {
         } else {
             self.watch = true;
         }
+        self.empty_frames = 0;
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let started = Instant::now();
@@ -471,16 +501,18 @@ impl Render for TaskToolbar {
                 self.rect.height as u32,
                 self.control.elapsed_ms.load(Ordering::Relaxed) as f64 / 1000.
             )
-        } else if let Some(s) = &self.stitch {
+        } else if let Some((width, height, frames)) = self.summary {
             format!(
                 "长截图 · {} × {} · {} 段{}",
-                s.image.width(),
-                s.image.height(),
-                s.frames,
+                width,
+                height,
+                frames,
                 if self.busy { " · 采集中" } else { "" }
             )
-        } else {
+        } else if self.busy {
             "长截图 · 正在采集首帧".into()
+        } else {
+            "长截图 · 等待采集".into()
         };
         let mut controls = div().h_flex().gap_1().flex_wrap();
         if self.gif {
@@ -563,16 +595,14 @@ impl Render for TaskToolbar {
                 .child(
                     Button::new("scroll-finish")
                         .small()
-                        .label("完成 / 编辑")
-                        .disabled(self.stitch.is_none() || self.busy)
+                        .label(if self.finish_requested {
+                            "完成中…"
+                        } else {
+                            "完成 / 编辑"
+                        })
+                        .disabled(self.summary.is_none() || self.finish_requested)
                         .on_click(cx.listener(|v, _, _, cx| {
-                            v.watch = false;
-                            v.auto = false;
-                            v.generation += 1;
-                            if let Some(stitch) = v.stitch.take() {
-                                app::send(cx, Event::Edit(Arc::new(stitch.image)));
-                            }
-                            v.close(cx);
+                            v.finish_long_capture(cx);
                         })),
                 );
         }

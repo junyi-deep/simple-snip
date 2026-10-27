@@ -31,7 +31,7 @@ impl Stitcher {
     pub fn new(image: RgbaImage, max_bytes: usize) -> Result<Self> {
         ensure!(image.width() > 0 && image.height() > 0, "截图区域为空");
         ensure!(
-            image.as_raw().len().saturating_mul(2) <= max_bytes,
+            image.as_raw().len().saturating_mul(3) <= max_bytes,
             "首帧超过长截图内存上限"
         );
         Ok(Self {
@@ -240,7 +240,7 @@ mod tests {
     fn rejects_blank_diagonal_and_budget_overflow_without_losing_result() {
         let page = page();
         let a = imageops::crop_imm(&page, 0, 0, 160, 180).to_image();
-        let mut s = Stitcher::new(a.clone(), 240_000).unwrap();
+        let mut s = Stitcher::new(a.clone(), 400_000).unwrap();
         assert!(
             s.append(&imageops::crop_imm(&page, 60, 50, 160, 180).to_image())
                 .is_err()

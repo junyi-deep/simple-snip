@@ -254,6 +254,11 @@ fn rgba_from_cgimage(
     use objc2_core_graphics::{
         CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
     };
+    ensure!(
+        objc2_core_graphics::CGImage::width(Some(image)) == width as usize
+            && objc2_core_graphics::CGImage::height(Some(image)) == height as usize,
+        "系统返回的采集尺寸与所选区域不一致，请重新选择区域"
+    );
     let mut pixels = RgbaImage::new(width, height);
     let space = CGColorSpace::new_device_rgb().context("无法创建屏幕色彩空间")?;
     // SAFETY: pixels owns a width*height*4 allocation until after context drops;

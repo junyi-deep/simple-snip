@@ -435,9 +435,10 @@ impl Render for Settings {
                     ));
             }
             3 => {
-                content=content.child("框选稳定的滚动内容区域，避开固定页头。采集后小幅向下滚动，再采集下一段。匹配失败时保留已有结果，可重试或直接导出。内存峰值限制为 256 MiB。").child(Button::new("long").primary().label("选择长截图区域").on_click(|_,_,cx|app::command(cx,Command::LongCapture)));
+                content=content.child("框选稳定内容，避开固定页头。选择后自动检测左右或上下滚动，请缓慢、小幅滚动；在区域右下控制栏暂停、继续、自动向下滚动或完成编辑。匹配异常会保留已有结果，可回滚重试。内存预算 256 MiB。").child(Button::new("long").primary().label("选择长截图区域").on_click(|_,_,cx|app::command(cx,Command::LongCapture)));
             }
             4 => {
+                content = content.child("框选后使用区域右下控制栏开始、暂停 / 继续、停止保存或取消。控制栏保持可用，并从录制画面中排除。");
                 let mut rates = div().h_flex().gap_2();
                 for fps in [5, 10, 15, 20, 30] {
                     rates = rates.child(
