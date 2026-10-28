@@ -8,7 +8,7 @@ use snip_core::{
 use std::time::{Duration, Instant};
 pub struct TrailView {
     trail: Trail,
-    origin: ImagePoint,
+    visible: bool,
     start: Instant,
     width: f32,
 }
@@ -20,7 +20,6 @@ pub fn start(cx: &mut App) {
     let mut handles = vec![];
     for display in cx.displays() {
         let bounds = display.bounds();
-        let origin = ImagePoint::new(f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         let result = crate::window_pool::open(
             crate::window_pool::Role::Trail,
             WindowOptions {
@@ -46,34 +45,44 @@ pub fn start(cx: &mut App) {
                         ..Default::default()
                     },
                 );
+                #[cfg(target_os = "windows")]
+                if let Ok(raw) = app::raw(window)
+                    && let Err(error) = snip_platform::exclude_capture_controls(raw)
+                {
+                    tracing::warn!("无法从采集中排除拖尾窗口: {error}");
+                }
                 let view = cx.new(|_| TrailView {
                     trail: Trail::new(config.lifetime_ms as f64 / 1000.),
-                    origin,
+                    visible: true,
                     start: Instant::now(),
                     width: config.width,
                 });
                 let weak = view.downgrade();
                 let fps = config.fps;
+                let handle = window.window_handle();
                 cx.spawn(async move |cx| {
                     loop {
+                        let visible = weak.read_with(cx, |v, _| v.visible).unwrap_or(false);
+                        let position =
+                            visible.then(|| handle.update(cx, |_, w, _| cursor_in_window(w)));
                         let active = weak.update(cx, |v, cx| {
+                            if !v.visible {
+                                return false;
+                            }
                             let had_points = !v.trail.points.is_empty();
-                            if let Ok(p) = snip_platform::cursor_position() {
-                                v.trail.update(
-                                    ImagePoint::new(p.x - v.origin.x, p.y - v.origin.y),
-                                    v.start.elapsed().as_secs_f64(),
-                                );
+                            if let Some(Ok(Ok(p))) = position {
+                                v.trail.update(p, v.start.elapsed().as_secs_f64());
                             }
                             let active = v.trail.points.len() > 1;
-                            if had_points || !v.trail.points.is_empty() {
+                            if had_points || active {
                                 cx.notify();
                             }
                             active
                         });
-                        let Ok(active) = active else {
+                        if active.is_err() {
                             break;
-                        };
-                        smol::Timer::after(Duration::from_millis(if active {
+                        }
+                        smol::Timer::after(Duration::from_millis(if visible {
                             1000 / fps as u64
                         } else {
                             80
@@ -86,7 +95,7 @@ pub fn start(cx: &mut App) {
             },
         );
         match result {
-            Ok((h, _)) => handles.push(h),
+            Ok((h, view)) => handles.push((h, view)),
             Err(e) => app::status(cx, format!("鼠标拖尾窗口创建失败: {e}")),
         }
     }
@@ -98,11 +107,59 @@ pub fn start(cx: &mut App) {
         app::set_trails_visible(cx, false);
     }
 }
+
 pub fn stop(cx: &mut App) {
-    for h in std::mem::take(&mut cx.global_mut::<Runtime>().trails) {
+    for (h, _) in std::mem::take(&mut cx.global_mut::<Runtime>().trails) {
         let _ = h.update(cx, |_, w, cx| {
             crate::window_pool::park(crate::window_pool::Role::Trail, w, cx)
         });
+    }
+}
+fn cursor_in_window(window: &Window) -> anyhow::Result<ImagePoint> {
+    #[cfg(target_os = "windows")]
+    {
+        snip_platform::cursor_in_window(app::raw(window)?, window.scale_factor())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let p = snip_platform::cursor_position()?;
+        let origin = window.bounds().origin;
+        Ok(ImagePoint::new(
+            p.x - f32::from(origin.x),
+            p.y - f32::from(origin.y),
+        ))
+    }
+}
+
+pub fn raise(cx: &mut App) {
+    #[cfg(target_os = "windows")]
+    if let Some(runtime) = cx.try_global::<Runtime>() {
+        let trails = runtime.trails.clone();
+        for (handle, view) in trails {
+            if view.read(cx).visible {
+                let _ = handle.update(cx, |_, w, _| {
+                    if let Ok(raw) = app::raw(w) {
+                        let _ = snip_platform::raise_overlay(raw);
+                    }
+                });
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let _ = cx;
+}
+
+impl TrailView {
+    #[cfg(target_os = "windows")]
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible != visible {
+            self.visible = visible;
+            self.trail = Trail::new(self.trail.lifetime);
+            cx.notify();
+        }
     }
 }
 impl Render for TrailView {
@@ -191,4 +248,33 @@ fn ribbon_gradient(
         linear_color_stop(from, at(a)),
         linear_color_stop(to, at(b).max(at(a) + 0.0001)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ImagePoint, Instant, Trail, TrailView};
+    use gpui_kit::{AppContext, TestAppContext};
+
+    #[gpui_kit::test]
+    fn capture_pause_and_resume_do_not_join_to_old_trail(cx: &mut TestAppContext) {
+        let view = cx.new(|_| TrailView {
+            trail: Trail::new(0.3),
+            visible: true,
+            start: Instant::now(),
+            width: 9.,
+        });
+        view.update(cx, |v, cx| {
+            v.trail.update(ImagePoint::new(20., 30.), 0.);
+            v.trail.update(ImagePoint::new(80., 40.), 0.01);
+            assert!(!v.trail.ribbon().is_empty());
+            v.set_visible(false, cx);
+            assert!(v.trail.ribbon().is_empty());
+            v.set_visible(true, cx);
+            v.trail.update(ImagePoint::new(300., 400.), 0.02);
+            assert_eq!(v.trail.points.len(), 1);
+            assert!(v.trail.ribbon().is_empty());
+            v.trail.update(ImagePoint::new(320., 410.), 0.03);
+            assert_eq!(v.trail.curves()[0].start, ImagePoint::new(300., 400.));
+        });
+    }
 }

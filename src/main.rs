@@ -21,6 +21,7 @@ fn main() {
         )
         .init();
     let config_path = snip_core::config::Config::path();
+    let smoke_test = std::env::args().any(|arg| arg == "--smoke-test");
     if let Some(dir) = config_path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -29,7 +30,7 @@ fn main() {
         .truncate(false)
         .read(true)
         .write(true)
-        .open(config_path.with_extension("lock"));
+        .open(config_path.with_extension(if smoke_test { "smoke.lock" } else { "lock" }));
     let _instance = match instance {
         Ok(file) => {
             if file.try_lock().is_err() {
@@ -47,13 +48,13 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .with_quit_mode(gpui_kit::QuitMode::Explicit);
     application.on_reopen(app::open_settings);
-    application.run(|cx| {
+    application.run(move |cx| {
         gpui_kit::init(cx);
-        app::start(cx);
+        app::start(cx, smoke_test);
         if std::env::args().any(|arg| arg == "--permission-dialog-test") {
             app::send(cx, app::Event::ScreenPermissionDenied);
         }
-        if std::env::args().any(|arg| arg == "--smoke-test") {
+        if smoke_test {
             app::smoke_test(cx);
         }
     });

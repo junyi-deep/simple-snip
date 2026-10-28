@@ -34,9 +34,12 @@ pub enum Command {
 pub enum Event {
     Command(Command),
     Hotkey(u32),
-    Captured(anyhow::Result<Vec<CapturedDisplay>>, CaptureMode),
+    Captured(
+        anyhow::Result<Vec<(CapturedDisplay, Arc<RenderImage>)>>,
+        CaptureMode,
+    ),
     Selection(CapturedDisplay, Rect, CaptureMode),
-    Pin(Arc<image::RgbaImage>, Option<Bounds<Pixels>>),
+    Pin(PreparedImage, Option<Bounds<Pixels>>),
     Edit(Arc<image::RgbaImage>),
     ApplyPin(
         u64,
@@ -53,6 +56,17 @@ pub enum Event {
     Status(String),
     ScreenPermissionDenied,
     Saved(anyhow::Result<PathBuf>),
+}
+/// Pixel conversion is CPU work; prepare it on the capture/clipboard worker.
+pub struct PreparedImage {
+    pub pixels: Arc<image::RgbaImage>,
+    pub texture: Arc<RenderImage>,
+}
+impl PreparedImage {
+    pub fn new(pixels: Arc<image::RgbaImage>) -> Self {
+        let texture = texture(&pixels);
+        Self { pixels, texture }
+    }
 }
 pub struct PinRecord {
     pub handle: AnyWindowHandle,
@@ -71,7 +85,7 @@ pub struct Runtime {
     pub settings: Option<AnyWindowHandle>,
     pub hotkeys: Option<HotkeyManager>,
     pub tray: Option<gpui_tray::Tray>,
-    pub trails: Vec<AnyWindowHandle>,
+    pub trails: Vec<(AnyWindowHandle, Entity<crate::effects::TrailView>)>,
     pub annotation_toolbar: Option<(AnyWindowHandle, Entity<crate::editor::FloatingToolbar>)>,
     pub capture_task: Option<AnyWindowHandle>,
 }
@@ -147,12 +161,28 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-w", CloseSelectedPin, Some("AnnotationTools")),
     ]);
 }
-pub fn start(cx: &mut App) {
+pub fn start(cx: &mut App, smoke_test: bool) {
     crate::window_pool::init(cx);
     bind_keys(cx);
-    let (config, warning) = Config::load(&Config::path());
+    let (config, warning) = if smoke_test {
+        (
+            Config {
+                show_settings_on_start: false,
+                ..Config::default()
+            },
+            None,
+        )
+    } else {
+        Config::load(&Config::path())
+    };
     let (tx, rx) = async_channel::bounded(64);
-    let mut hotkeys = HotkeyManager::new(tx.clone()).map_err(|e| e.to_string());
+    // A smoke instance can coexist with the user's app without stealing F1/F3
+    // or loading/saving their preferences.
+    let mut hotkeys = if smoke_test {
+        Err("原生窗口测试模式".into())
+    } else {
+        HotkeyManager::new(tx.clone()).map_err(|e| e.to_string())
+    };
     let key_status = match &mut hotkeys {
         Ok(h) => h
             .apply(&config)
@@ -312,7 +342,7 @@ fn handle(event: Event, cx: &mut App) {
                 std::thread::spawn(move || match NativeClipboard.read_image() {
                     Ok(image) => {
                         let _ = tx.send_blocking(if matches!(cmd, Command::Paste) {
-                            Event::Pin(image, None)
+                            Event::Pin(PreparedImage::new(image), None)
                         } else {
                             Event::Edit(image)
                         });
@@ -359,6 +389,7 @@ fn handle(event: Event, cx: &mut App) {
                         }
                     });
                 }
+                crate::effects::raise(cx);
             }
             Command::History => {
                 open_settings(cx);
@@ -420,11 +451,14 @@ fn handle(event: Event, cx: &mut App) {
             cx.global_mut::<Runtime>().capture_busy = false;
             match result {
                 Ok(displays) => {
-                    for display in displays {
-                        match Overlay::open(display, mode, cx) {
+                    for (display, texture) in displays {
+                        match Overlay::open_prepared(display, texture, mode, cx) {
                             Ok(handle) => cx.global_mut::<Runtime>().overlays.push(handle),
                             Err(e) => status(cx, e.to_string()),
                         }
+                    }
+                    if cx.global::<Runtime>().overlays.is_empty() {
+                        set_trails_visible(cx, true);
                     }
                 }
                 Err(e) => {
@@ -458,7 +492,7 @@ fn handle(event: Event, cx: &mut App) {
             cx.activate(true);
             let id = cx.global::<Runtime>().next_pin;
             cx.global_mut::<Runtime>().next_pin += 1;
-            match PinView::open_at(id, image, false, placement, cx) {
+            match PinView::open_prepared(id, image, false, placement, cx) {
                 Ok((handle, view)) => {
                     cx.global_mut::<Runtime>()
                         .pins
@@ -534,11 +568,25 @@ fn start_capture(mode: CaptureMode, cx: &mut App) {
     cx.global_mut::<Runtime>().capture_busy = true;
     set_trails_visible(cx, false);
     let tx = cx.global::<Runtime>().tx.clone();
+    let has_trails = !cx.global::<Runtime>().trails.is_empty();
     // Give the compositor time to remove the trail before sampling the desktop.
     cx.spawn(async move |_| {
-        smol::Timer::after(std::time::Duration::from_millis(70)).await;
+        if has_trails {
+            smol::Timer::after(std::time::Duration::from_millis(
+                if cfg!(target_os = "windows") { 35 } else { 70 },
+            ))
+            .await;
+        }
         std::thread::spawn(move || {
-            let result = NativeCapture.capture_desktop();
+            let result = NativeCapture.capture_desktop().map(|displays| {
+                displays
+                    .into_iter()
+                    .map(|d| {
+                        let texture = texture(&d.image);
+                        (d, texture)
+                    })
+                    .collect()
+            });
             let _ = tx.send_blocking(Event::Captured(result, mode));
         });
     })
@@ -556,7 +604,9 @@ pub fn close_overlays(cx: &mut App) {
                 tracing::warn!("关闭截图窗口失败: {error}");
             }
         }
-        if cx.global::<Runtime>().capture_task.is_none()
+        if !cx.global::<Runtime>().capture_busy
+            && cx.global::<Runtime>().overlays.is_empty()
+            && cx.global::<Runtime>().capture_task.is_none()
             && !cx
                 .global::<Runtime>()
                 .recordings
@@ -569,12 +619,20 @@ pub fn close_overlays(cx: &mut App) {
 }
 pub fn set_trails_visible(cx: &mut App, show: bool) {
     let handles = cx.global::<Runtime>().trails.clone();
-    for h in handles {
+    for (h, view) in handles {
+        view.update(cx, |v, cx| v.set_visible(show, cx));
         let _ = h.update(cx, |_, w, _| {
+            // Windows' full-screen transparent swap chain can stop presenting
+            // after native hide/show. Keep it mapped and paint an empty frame.
+            #[cfg(target_os = "macos")]
             if let Ok(raw) = raw(w) {
                 let _ = snip_platform::show_window(raw, show);
             }
+            w.refresh();
         });
+    }
+    if show {
+        crate::effects::raise(cx);
     }
 }
 pub(crate) fn close_pin(id: u64, cx: &mut App) {
@@ -599,6 +657,7 @@ pub fn open_settings(cx: &mut App) {
         })
         .is_ok()
     {
+        crate::effects::raise(cx);
         return;
     }
     match Settings::open(cx) {
@@ -663,6 +722,65 @@ pub fn smoke_test(cx: &mut App) {
     cx.spawn(async move |cx| {
         smol::Timer::after(std::time::Duration::from_millis(800)).await;
         let result = async {
+            #[cfg(target_os = "windows")]
+            for cycle in 0..3 {
+                let started = std::time::Instant::now();
+                cx.update(|cx| start_capture(CaptureMode::Screenshot, cx));
+                loop {
+                    if !cx.read_global::<Runtime, _>(|r, _| r.capture_busy) {
+                        break;
+                    }
+                    anyhow::ensure!(started.elapsed().as_secs() < 15, "capture did not finish");
+                    smol::Timer::after(std::time::Duration::from_millis(20)).await;
+                }
+                // Let the real overlay present before cancelling it.
+                smol::Timer::after(std::time::Duration::from_millis(100)).await;
+                cx.update(|cx| -> anyhow::Result<()> {
+                    anyhow::ensure!(!cx.global::<Runtime>().overlays.is_empty(), "capture failed: {}", cx.global::<Runtime>().status);
+                    anyhow::ensure!(cx.global::<Runtime>().trails.iter().all(|(_, v)| !v.read(cx).is_visible()), "trail was not suspended for capture");
+                    close_overlays(cx);
+                    Ok(())
+                })?;
+                smol::Timer::after(std::time::Duration::from_millis(40)).await;
+                cx.update(|cx| -> anyhow::Result<()> {
+                    anyhow::ensure!(cx.global::<Runtime>().overlays.is_empty(), "capture overlay retained");
+                    anyhow::ensure!(!cx.global::<Runtime>().trails.is_empty(), "no trail windows");
+                    for (handle, view) in cx.global::<Runtime>().trails.clone() {
+                        anyhow::ensure!(view.read(cx).is_visible(), "trail did not resume");
+                        handle.update(cx, |_, w, _| -> anyhow::Result<()> {
+                            let raw = raw(w)?;
+                            anyhow::ensure!(snip_platform::window_visible(raw)?, "trail swap chain window hidden");
+                            let (top, through, _) = snip_platform::inspect_window(raw)?;
+                            anyhow::ensure!(top && through, "trail lost topmost/click-through style");
+                            snip_platform::cursor_in_window(raw, w.scale_factor())?;
+                            Ok(())
+                        })??;
+                    }
+                    Ok(())
+                })?;
+                tracing::info!(cycle, elapsed_ms = started.elapsed().as_millis(), "SMOKE capture/cancel/trail-resume cycle passed");
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let image = smol::unblock(|| PreparedImage::new(Arc::new(image::RgbaImage::from_fn(360, 220, |x, y| image::Rgba([(x % 255) as u8, (y % 255) as u8, 100, 255]))))).await;
+                let id = cx.update(|cx| {
+                    let id = cx.global::<Runtime>().next_pin;
+                    handle(Event::Pin(image, None), cx);
+                    id
+                });
+                // Exercise the production pin event and actual presentation,
+                // not only create/destroy native handles in one event loop turn.
+                smol::Timer::after(std::time::Duration::from_millis(2000)).await;
+                cx.update(|cx| -> anyhow::Result<()> {
+                    let pin = cx.global::<Runtime>().pins.get(&id).ok_or_else(|| anyhow::anyhow!("pin event failed"))?.handle;
+                    pin.update(cx, |_, w, _| -> anyhow::Result<()> {
+                        anyhow::ensure!(!snip_platform::window_has_system_buttons(raw(w)?)?, "pin retained native system buttons");
+                        Ok(())
+                    })??;
+                    close_pin(id, cx);
+                    Ok(())
+                })?;
+            }
             let mut previous = None;
             for cycle in 0..3 {
                 let (handle, weak) = cx.update(|cx| -> anyhow::Result<_> {
@@ -677,6 +795,8 @@ pub fn smoke_test(cx: &mut App) {
                     }
                     handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
                         let h = raw(window)?;
+                        #[cfg(target_os = "windows")]
+                        anyhow::ensure!(!snip_platform::window_has_system_buttons(h)?, "pin retained native system buttons");
                         let (top, through, _) = snip_platform::inspect_window(h)?;
                         anyhow::ensure!(top && !through, "pin not interactive/topmost");
                         snip_platform::style_window(h, WindowStyle { click_through: true, opacity: 0.5, ..Default::default() })?;

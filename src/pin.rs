@@ -41,6 +41,19 @@ impl PinView {
         placement: Option<Bounds<Pixels>>,
         cx: &mut App,
     ) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
+        Self::open_prepared(id, app::PreparedImage::new(image), edit, placement, cx)
+    }
+    pub fn open_prepared(
+        id: u64,
+        prepared: app::PreparedImage,
+        edit: bool,
+        placement: Option<Bounds<Pixels>>,
+        cx: &mut App,
+    ) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
+        let app::PreparedImage {
+            pixels: image,
+            texture,
+        } = prepared;
         let scale = (680. / image.width() as f32)
             .min(500. / image.height() as f32)
             .min(1.);
@@ -75,6 +88,8 @@ impl PinView {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: None,
                 kind: WindowKind::Normal,
+                is_resizable: cfg!(target_os = "macos"),
+                is_minimizable: cfg!(target_os = "macos"),
                 app_owns_titlebar_drag: true,
                 window_background: WindowBackgroundAppearance::Transparent,
                 ..Default::default()
@@ -116,6 +131,9 @@ impl PinView {
                         if w.is_window_active() && v.editor.is_none() {
                             v.focus.focus(w, cx);
                         }
+                        if w.is_window_active() {
+                            cx.defer(crate::effects::raise);
+                        }
                         cx.notify();
                     })
                     .detach();
@@ -123,7 +141,7 @@ impl PinView {
                         id,
                         doc,
                         shown: image.clone(),
-                        texture: app::texture(&image),
+                        texture,
                         scale,
                         rotation: 0,
                         flip_x: false,

@@ -167,7 +167,9 @@ impl Drop for TaskToolbar {
     }
 }
 fn restore_trails(cx: &mut App) {
-    let idle = cx.global::<Runtime>().capture_task.is_none()
+    let idle = !cx.global::<Runtime>().capture_busy
+        && cx.global::<Runtime>().overlays.is_empty()
+        && cx.global::<Runtime>().capture_task.is_none()
         && !cx
             .global::<Runtime>()
             .recordings

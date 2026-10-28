@@ -62,11 +62,20 @@ pub fn open<V: Render>(
         })?;
         return Ok((handle, view.expect("reused window built its root")));
     }
-    #[cfg(target_os = "windows")]
-    let _ = role;
     #[cfg(target_os = "macos")]
     let bounds = options.window_bounds;
+    // On Windows, Normal + titlebar: None still creates WS_SYSMENU. A popup
+    // omits the system menu/buttons while GPUI supplies the titlebar-free frame.
+    #[cfg(target_os = "windows")]
+    let options = WindowOptions {
+        kind: WindowKind::PopUp,
+        ..options
+    };
     let result = gpui_kit::open_window(options, cx, build)?;
+    #[cfg(target_os = "windows")]
+    if role != Role::Trail {
+        cx.defer(crate::effects::raise);
+    }
     #[cfg(target_os = "macos")]
     if matches!(role, Role::Capture | Role::Trail | Role::Task | Role::Pin)
         && let Some(WindowBounds::Windowed(bounds)) = bounds

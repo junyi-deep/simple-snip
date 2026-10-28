@@ -31,6 +31,15 @@ impl Overlay {
         mode: CaptureMode,
         cx: &mut App,
     ) -> anyhow::Result<AnyWindowHandle> {
+        let texture = app::texture(&display.image);
+        Self::open_prepared(display, texture, mode, cx)
+    }
+    pub fn open_prepared(
+        display: CapturedDisplay,
+        texture: std::sync::Arc<RenderImage>,
+        mode: CaptureMode,
+        cx: &mut App,
+    ) -> anyhow::Result<AnyWindowHandle> {
         let d = display.map.desktop;
         let cursor = snip_platform::cursor_position().unwrap_or_default();
         let (bounds, display_id) = app::display_bounds(&display, cx);
@@ -64,7 +73,7 @@ impl Overlay {
                 let focus = cx.focus_handle();
                 focus.focus(window, cx);
                 cx.new(|_| Self {
-                    texture: app::texture(&display.image),
+                    texture,
                     display,
                     mode,
                     anchor: None,

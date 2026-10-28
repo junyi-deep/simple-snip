@@ -77,6 +77,7 @@ fn monitor_rect(m: &xcap::Monitor) -> Result<Rect> {
         m.height()? as f32,
     ))
 }
+#[cfg(target_os = "macos")]
 pub fn window_rectangles() -> Vec<Rect> {
     xcap::Window::all()
         .unwrap_or_default()

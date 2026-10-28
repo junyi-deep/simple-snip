@@ -11,11 +11,78 @@ use windows::{
     Media::Ocr::OcrEngine as WinOcr,
     Storage::Streams::DataWriter,
     Win32::{
-        Foundation::{COLORREF, GetLastError, HWND, POINT, SetLastError, WIN32_ERROR},
+        Foundation::{
+            COLORREF, GetLastError, HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR,
+        },
+        Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
+        Graphics::Gdi::ScreenToClient,
         System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
         UI::WindowsAndMessaging::*,
     },
 };
+
+/// Only geometry is needed for snapping. Avoid retrieving titles/process names
+/// and querying the same DWM bounds four times through xcap's accessors.
+pub fn window_rectangles() -> Vec<Rect> {
+    unsafe extern "system" fn collect(hwnd: HWND, data: LPARAM) -> windows::core::BOOL {
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool()
+                || IsIconic(hwnd).as_bool()
+                || hwnd == GetShellWindow()
+            {
+                return true.into();
+            }
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == std::process::id() {
+                return true.into();
+            }
+            let mut cloaked = 0u32;
+            let _ = DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAKED,
+                (&mut cloaked as *mut u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            if cloaked != 0 {
+                return true.into();
+            }
+            let mut bounds = RECT::default();
+            if DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut bounds as *mut RECT).cast(),
+                size_of::<RECT>() as u32,
+            )
+            .is_err()
+                && GetWindowRect(hwnd, &mut bounds).is_err()
+            {
+                return true.into();
+            }
+            let rect = Rect::new(
+                bounds.left as f32,
+                bounds.top as f32,
+                (bounds.right - bounds.left) as f32,
+                (bounds.bottom - bounds.top) as f32,
+            );
+            if rect.width > 10. && rect.height > 10. {
+                // EnumWindows is synchronous; data borrows the stack Vec below.
+                (&mut *(data.0 as *mut Vec<Rect>)).push(rect);
+            }
+            true.into()
+        }
+    }
+    let mut rectangles = Vec::new();
+    unsafe {
+        if let Err(error) = EnumWindows(
+            Some(collect),
+            LPARAM((&mut rectangles as *mut Vec<Rect>) as isize),
+        ) {
+            tracing::warn!("枚举截图吸附窗口失败: {error}");
+        }
+    }
+    rectangles
+}
 
 pub fn screen_permission() -> bool {
     true
@@ -101,6 +168,44 @@ pub fn native_cursor() -> Result<Point> {
         GetCursorPos(&mut p)?;
     }
     Ok(Point::new(p.x as f32, p.y as f32))
+}
+/// Convert physical desktop pixels through the actual client origin, then DPI.
+/// Dividing desktop coordinates first is incorrect on mixed-DPI monitors.
+pub fn cursor_in_window(handle: RawWindowHandle, scale: f32) -> Result<Point> {
+    let mut p = POINT::default();
+    unsafe {
+        GetCursorPos(&mut p)?;
+    }
+    client_point(handle, p, scale)
+}
+fn client_point(handle: RawWindowHandle, mut p: POINT, scale: f32) -> Result<Point> {
+    unsafe {
+        ScreenToClient(hwnd(handle)?, &mut p).ok()?;
+    }
+    Ok(Point::new(p.x as f32 / scale, p.y as f32 / scale))
+}
+
+pub fn raise_overlay(handle: RawWindowHandle) -> Result<()> {
+    unsafe {
+        SetWindowPos(
+            hwnd(handle)?,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )?;
+    }
+    Ok(())
+}
+
+/// Windows can add WS_CAPTION to a GPUI popup even when GPUI hides its titlebar.
+/// Check the actual system-button flags independently of that caption bit.
+pub fn window_has_system_buttons(handle: RawWindowHandle) -> Result<bool> {
+    let bits = unsafe { GetWindowLongPtrW(hwnd(handle)?, GWL_STYLE) as u32 };
+    tracing::debug!(style = format_args!("{bits:#010x}"), "native window frame");
+    Ok(bits & (WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0 != 0)
 }
 pub fn scroll_at(point: Point) -> Result<()> {
     let p = POINT {
@@ -247,4 +352,79 @@ pub fn verify_screen_permission() -> Result<()> {
 
 pub fn screen_permission_settings_url() -> Option<&'static str> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raw_window_handle::Win32WindowHandle;
+    use std::num::NonZeroIsize;
+    use windows::{Win32::Graphics::Gdi::ClientToScreen, core::w};
+
+    struct TestWindow(HWND);
+    impl TestWindow {
+        fn new() -> Self {
+            // Hidden native fixture: does not move the pointer or take focus.
+            Self(unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("STATIC"),
+                    w!(""),
+                    WS_OVERLAPPEDWINDOW,
+                    -800,
+                    120,
+                    400,
+                    300,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+        }
+        fn raw(&self) -> RawWindowHandle {
+            RawWindowHandle::Win32(Win32WindowHandle::new(
+                NonZeroIsize::new(self.0.0 as isize).unwrap(),
+            ))
+        }
+    }
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            unsafe {
+                DestroyWindow(self.0).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn client_coordinates_use_native_origin_before_dpi_conversion() {
+        let window = TestWindow::new();
+        let mut origin = POINT::default();
+        unsafe {
+            ClientToScreen(window.0, &mut origin).ok().unwrap();
+        }
+        for scale in [1., 1.25, 1.5, 2.] {
+            let p = client_point(
+                window.raw(),
+                POINT {
+                    x: origin.x + 300,
+                    y: origin.y + 150,
+                },
+                scale,
+            )
+            .unwrap();
+            assert_eq!(p, Point::new(300. / scale, 150. / scale));
+            let outside = client_point(
+                window.raw(),
+                POINT {
+                    x: origin.x - 60,
+                    y: origin.y - 30,
+                },
+                scale,
+            )
+            .unwrap();
+            assert_eq!(outside, Point::new(-60. / scale, -30. / scale));
+        }
+    }
 }

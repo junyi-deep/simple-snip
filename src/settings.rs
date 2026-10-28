@@ -568,7 +568,9 @@ impl Render for Settings {
                                 std::thread::spawn(move || {
                                     let event = match image::open(path) {
                                         Ok(i) => app::Event::Pin(
-                                            std::sync::Arc::new(i.into_rgba8()),
+                                            app::PreparedImage::new(std::sync::Arc::new(
+                                                i.into_rgba8(),
+                                            )),
                                             None,
                                         ),
                                         Err(e) => app::Event::Status(e.to_string()),

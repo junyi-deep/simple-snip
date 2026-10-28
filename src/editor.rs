@@ -408,10 +408,14 @@ impl EditorView {
                 }
                 1 => cx.update(|cx| app::save_image(image, cx)),
                 2 => {
+                    let prepared = smol::unblock(move || app::PreparedImage::new(image)).await;
+                    if cancel.cancelled() {
+                        return;
+                    }
                     if matches!(host, EditorHost::Capture) {
                         cx.update(app::close_overlays);
                     }
-                    let _ = tx.send(Event::Pin(image, placement)).await;
+                    let _ = tx.send(Event::Pin(prepared, placement)).await;
                 }
                 _ => match host {
                     EditorHost::Pin(id) => {
