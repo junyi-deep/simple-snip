@@ -1,5 +1,11 @@
 # 实际测试记录
 
+## 2026-10-28：v0.0.5 发布复核
+
+已推送 `v0.0.5` 注释标签，目标提交为 `075ce15ecc145127a8049f9b4096b47be5c0f838`。[流水线 40714940524](https://github.com/junyi-deep/simple-snip/actions/runs/40714940524) 的 Windows AMD64、macOS ARM64 和 Release job 全部成功；实际日志为 Windows 49 项、macOS 50 项测试通过，两平台各有 3 项系统测试默认 ignored。两个目标的 fmt / check / Clippy / Release / 打包 / 上传均通过。
+
+[v0.0.5 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.5) 已发布，非草稿、非预发布。已实际下载公开的三个安装包与 `SHA256SUMS`，每个安装包的 SHA-256 同时匹配校验文件和 GitHub 资产 digest；两个 ZIP 完整性、Windows AMD64 / PE32+ / GUI subsystem、macOS ARM64 Mach-O 与 Info.plist 双版本 `0.0.5` 均通过。未执行下载的二进制；本机 Windows 原生探测使用本地构建，未在 Windows 上声称执行 DMG 挂载 / macOS 签名验证。
+
 ## 2026-10-28：Windows 拖尾、贴图窗口与响应优化
 
 Windows 原生客户区坐标转换新增隐藏窗口回归，覆盖负坐标和 100% / 125% / 150% / 200% 比例；GUI 回归覆盖截图暂停时清空轨迹、恢复时不连接旧轨迹。Windows workspace 共 49 项自动测试通过，3 项系统测试默认 ignored，未计为通过。
