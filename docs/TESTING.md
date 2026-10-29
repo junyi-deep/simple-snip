@@ -1,5 +1,11 @@
 # 实际测试记录
 
+## 2026-10-30：v0.0.6 发布复核
+
+已推送注释标签 `v0.0.6`，目标提交 `6666f571f376a986fa0a6e42d8ff220bcd3b1d00`。[流水线 40913442851](https://github.com/junyi-deep/simple-snip/actions/runs/40913442851) 的 Windows、macOS、Release job 全部成功；实际日志为 Windows 54 项、macOS 53 项自动测试通过，两平台各另有 3 项系统测试默认 ignored。两个原生目标均通过 fmt / check / Clippy / Release / 打包和资产上传。
+
+[v0.0.6 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.6) 已发布，非草稿、非预发布。已实际下载三个公开安装包及 SHA256SUMS，哈希同时匹配校验文件和 GitHub digest；两个 ZIP 完整性、Windows AMD64 / PE32+ / GUI subsystem、macOS ARM64 Mach-O 与 Info.plist 双版本 0.0.6 均通过。未运行下载的发布二进制；本机原生 smoke 使用源码 Debug 构建，未在 Windows 上执行 DMG 挂载或 macOS 签名验证。完整目视 / 混合 DPI 矩阵仍不计为通过。
+
 ## 2026-10-30：v0.0.6 功能与性能回归
 
 Windows 本机最终执行 54 项自动测试通过（18 GUI/颜色转换 + 29 core + 3 Windows 原生属性 + 4 updater），另 3 项系统测试默认 ignored。fmt、Clippy -D warnings、版本一致性校验通过。新增普通设置窗口 APPWINDOW / 非 TOOLWINDOW / 非 TOPMOST 原生属性回归。
