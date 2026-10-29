@@ -82,9 +82,17 @@ impl PinView {
         } else {
             (bounds, scale)
         };
+        let display_id = placement.and_then(|content| {
+            let center = content.origin + point(content.size.width / 2., content.size.height / 2.);
+            cx.displays()
+                .into_iter()
+                .find(|d| d.bounds().contains(&center))
+                .map(|d| d.id())
+        });
         let (handle, view) = crate::window_pool::open(
             crate::window_pool::Role::Pin,
             WindowOptions {
+                display_id,
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: None,
                 kind: WindowKind::Normal,
@@ -224,10 +232,14 @@ impl PinView {
     }
     pub fn refresh_frame(&self, w: &mut Window, cx: &mut Context<Self>) {
         let margin = cx.global::<Runtime>().config.pin.margin();
-        w.resize(size(
-            px(self.shown.width() as f32 * self.scale + margin * 2.),
-            px(self.shown.height() as f32 * self.scale + margin * 2.),
-        ));
+        app::resize_pin(
+            w,
+            size(
+                px(self.shown.width() as f32 * self.scale + margin * 2.),
+                px(self.shown.height() as f32 * self.scale + margin * 2.),
+            ),
+            cx,
+        );
         cx.notify();
     }
     pub fn style(&self, w: &Window) {
@@ -318,7 +330,7 @@ impl PinView {
                             px(v.shown.height() as f32 * v.scale
                                 + cx.global::<Runtime>().config.pin.margin() * 2.),
                         );
-                        let _ = handle.update(cx, |_, w, _| w.resize(dimensions));
+                        let _ = handle.update(cx, |_, w, cx| app::resize_pin(w, dimensions, cx));
                     }
                     Err(e) => app::status(cx, e.to_string()),
                 }
@@ -420,20 +432,25 @@ impl Render for PinView {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|v, e: &MouseDownEvent, w, cx| {
+                cx.listener(|v, _: &MouseDownEvent, w, cx| {
                     tracing::debug!(pin = v.id, "pin received mouse down");
                     cx.activate(true);
                     w.activate_window();
                     v.focus.focus(w, cx);
                     cx.notify();
-                    if e.click_count == 2 {
-                        if let Ok(raw) = app::raw(w) {
-                            let _ = snip_platform::show_window(raw, false);
-                        }
-                    } else if app::raw(w).is_ok() {
-                        // Moving needs a native surface; GPUI's headless TestWindow
-                        // deliberately has no implementation for this operation.
+                    if app::raw(w).is_ok() {
+                        #[cfg(target_os = "macos")]
                         w.start_window_move();
+                        #[cfg(target_os = "windows")]
+                        {
+                            let handle = w.window_handle();
+                            cx.spawn(async move |_, cx| {
+                                if let Ok(Ok(raw)) = handle.update(cx, |_, w, _| app::raw(w)) {
+                                    let _ = snip_platform::start_window_drag(raw);
+                                }
+                            })
+                            .detach();
+                        }
                     }
                 }),
             )
@@ -457,12 +474,16 @@ impl Render for PinView {
                     v.style(w);
                 } else {
                     v.scale = (v.scale * (1. + delta.signum() * 0.05)).clamp(0.05, 6.);
-                    w.resize(size(
-                        px(v.shown.width() as f32 * v.scale
-                            + cx.global::<Runtime>().config.pin.margin() * 2.),
-                        px(v.shown.height() as f32 * v.scale
-                            + cx.global::<Runtime>().config.pin.margin() * 2.),
-                    ));
+                    app::resize_pin(
+                        w,
+                        size(
+                            px(v.shown.width() as f32 * v.scale
+                                + cx.global::<Runtime>().config.pin.margin() * 2.),
+                            px(v.shown.height() as f32 * v.scale
+                                + cx.global::<Runtime>().config.pin.margin() * 2.),
+                        ),
+                        cx,
+                    );
                 }
                 cx.notify();
             }))

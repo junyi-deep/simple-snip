@@ -140,10 +140,48 @@ pub fn apply_style(window: &Window, style: WindowStyle) {
 }
 pub fn texture(image: &image::RgbaImage) -> Arc<RenderImage> {
     let mut bgra = image.clone();
-    for p in bgra.pixels_mut() {
-        p.0.swap(0, 2);
+    let swizzle = |bytes: &mut [u8]| {
+        for pixel in bytes.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+        }
+    };
+    let workers =
+        std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).clamp(1, 4));
+    if bgra.as_raw().len() >= 8 * 1024 * 1024 && workers > 1 {
+        let chunk = (bgra.as_raw().len() / 4).div_ceil(workers) * 4;
+        std::thread::scope(|scope| {
+            let data: &mut [u8] = bgra.as_mut();
+            for bytes in data.chunks_mut(chunk) {
+                scope.spawn(move || swizzle(bytes));
+            }
+        });
+    } else {
+        swizzle(bgra.as_mut());
     }
     Arc::new(RenderImage::new(vec![image::Frame::new(bgra)]))
+}
+pub fn resize_pin(w: &mut Window, dimensions: Size<Pixels>, cx: &mut App) {
+    #[cfg(target_os = "windows")]
+    if raw(w).is_ok() {
+        let handle = Window::window_handle(w);
+        cx.spawn(async move |cx| {
+            if let Ok(Ok((raw, scale))) =
+                handle.update(cx, |_, w, _| raw(w).map(|raw| (raw, w.scale_factor())))
+                && let Err(error) = snip_platform::resize_borderless(
+                    raw,
+                    f32::from(dimensions.width),
+                    f32::from(dimensions.height),
+                    scale,
+                )
+            {
+                tracing::error!("贴图缩放失败: {error}");
+            }
+        })
+        .detach();
+        return;
+    }
+    let _ = cx;
+    w.resize(dimensions);
 }
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -448,6 +486,7 @@ fn handle(event: Event, cx: &mut App) {
             }
         }
         Event::Captured(result, mode) => {
+            let opened_at = std::time::Instant::now();
             cx.global_mut::<Runtime>().capture_busy = false;
             match result {
                 Ok(displays) => {
@@ -457,6 +496,10 @@ fn handle(event: Event, cx: &mut App) {
                             Err(e) => status(cx, e.to_string()),
                         }
                     }
+                    tracing::debug!(
+                        elapsed_ms = opened_at.elapsed().as_millis(),
+                        "capture overlay roots ready"
+                    );
                     if cx.global::<Runtime>().overlays.is_empty() {
                         set_trails_visible(cx, true);
                     }
@@ -578,11 +621,21 @@ fn start_capture(mode: CaptureMode, cx: &mut App) {
             .await;
         }
         std::thread::spawn(move || {
+            let captured_at = std::time::Instant::now();
             let result = NativeCapture.capture_desktop().map(|displays| {
+                tracing::debug!(
+                    elapsed_ms = captured_at.elapsed().as_millis(),
+                    "desktop pixels captured"
+                );
                 displays
                     .into_iter()
                     .map(|d| {
+                        let converted_at = std::time::Instant::now();
                         let texture = texture(&d.image);
+                        tracing::debug!(
+                            elapsed_ms = converted_at.elapsed().as_millis(),
+                            "capture texture prepared"
+                        );
                         (d, texture)
                     })
                     .collect()
@@ -650,7 +703,14 @@ pub fn open_settings(cx: &mut App) {
     if let Some(h) = cx.global::<Runtime>().settings
         && h.update(cx, |_, w, _| {
             if let Ok(raw) = raw(w) {
-                let _ = snip_platform::style_window(raw, WindowStyle::default());
+                let _ = snip_platform::style_window(
+                    raw,
+                    WindowStyle {
+                        topmost: false,
+                        app_window: true,
+                        ..Default::default()
+                    },
+                );
                 let _ = snip_platform::show_window(raw, true);
             }
             w.activate_window();
@@ -664,6 +724,7 @@ pub fn open_settings(cx: &mut App) {
         Ok(h) => cx.global_mut::<Runtime>().settings = Some(h),
         Err(e) => status(cx, e.to_string()),
     }
+    crate::effects::raise(cx);
 }
 pub fn open_editor(image: Arc<image::RgbaImage>, cx: &mut App) {
     cx.activate(true);
@@ -737,7 +798,7 @@ pub fn smoke_test(cx: &mut App) {
                 smol::Timer::after(std::time::Duration::from_millis(100)).await;
                 cx.update(|cx| -> anyhow::Result<()> {
                     anyhow::ensure!(!cx.global::<Runtime>().overlays.is_empty(), "capture failed: {}", cx.global::<Runtime>().status);
-                    anyhow::ensure!(cx.global::<Runtime>().trails.iter().all(|(_, v)| !v.read(cx).is_visible()), "trail was not suspended for capture");
+                    anyhow::ensure!(cx.global::<Runtime>().trails.iter().all(|(_, v)| v.read(cx).is_visible()), "capture-excluded trail disappeared during screenshot");
                     close_overlays(cx);
                     Ok(())
                 })?;
@@ -758,14 +819,14 @@ pub fn smoke_test(cx: &mut App) {
                     }
                     Ok(())
                 })?;
-                tracing::info!(cycle, elapsed_ms = started.elapsed().as_millis(), "SMOKE capture/cancel/trail-resume cycle passed");
+                tracing::info!(cycle, elapsed_ms = started.elapsed().as_millis(), "SMOKE capture/cancel/trail-visible cycle passed");
             }
             #[cfg(target_os = "windows")]
             {
                 let image = smol::unblock(|| PreparedImage::new(Arc::new(image::RgbaImage::from_fn(360, 220, |x, y| image::Rgba([(x % 255) as u8, (y % 255) as u8, 100, 255]))))).await;
                 let id = cx.update(|cx| {
                     let id = cx.global::<Runtime>().next_pin;
-                    handle(Event::Pin(image, None), cx);
+                    handle(Event::Pin(image, Some(Bounds::new(point(px(100.), px(140.)), size(px(360.), px(220.))))), cx);
                     id
                 });
                 // Exercise the production pin event and actual presentation,
@@ -773,8 +834,14 @@ pub fn smoke_test(cx: &mut App) {
                 smol::Timer::after(std::time::Duration::from_millis(2000)).await;
                 cx.update(|cx| -> anyhow::Result<()> {
                     let pin = cx.global::<Runtime>().pins.get(&id).ok_or_else(|| anyhow::anyhow!("pin event failed"))?.handle;
+                    let margin = cx.global::<Runtime>().config.pin.margin();
                     pin.update(cx, |_, w, _| -> anyhow::Result<()> {
                         anyhow::ensure!(!snip_platform::window_has_system_buttons(raw(w)?)?, "pin retained native system buttons");
+                        let rect = snip_platform::inspect_borderless_rect(raw(w)?)?;
+                        let scale = w.scale_factor();
+                        anyhow::ensure!((rect.x / scale - (100. - margin)).abs() < 1. && (rect.y / scale - (140. - margin)).abs() < 1.
+                            && (rect.width / scale - (360. + margin * 2.)).abs() < 1. && (rect.height / scale - (220. + margin * 2.)).abs() < 1., "pin moved or resized after presentation: {rect:?}");
+                        anyhow::ensure!((rect.width / w.scale_factor() - f32::from(w.viewport_size().width)).abs() < 1., "pin client size differs from native surface");
                         Ok(())
                     })??;
                     close_pin(id, cx);
@@ -789,6 +856,10 @@ pub fn smoke_test(cx: &mut App) {
                     let (handle, view) = PinView::open(999 + cycle, image, false, cx)?;
                     open_settings(cx);
                     if let Some(settings)=cx.global::<Runtime>().settings {
+                        settings.update(cx, |_, w, _| -> anyhow::Result<()> {
+                            anyhow::ensure!(!snip_platform::inspect_window(raw(w)?)?.0, "settings must not stay topmost");
+                            Ok(())
+                        })??;
                         settings.update(cx,|_,w,_| {snip_platform::show_window(raw(w)?,false)})??;
                         open_settings(cx);
                         settings.update(cx,|_,w,_| -> anyhow::Result<()> {anyhow::ensure!(snip_platform::window_visible(raw(w)?)?,"hidden settings did not reappear with a pin present");Ok(())})??;
@@ -958,5 +1029,30 @@ fn screen_permission_dialog(cx: &mut App) {
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod texture_tests {
+    #[test]
+    fn swizzle_preserves_alpha_source_and_odd_chunk_boundaries() {
+        for (width, height) in [(3, 1), (2049, 1025)] {
+            let source = image::RgbaImage::from_fn(width, height, |x, y| {
+                image::Rgba([(x % 251) as u8, (y % 239) as u8, 71, 93])
+            });
+            let converted = super::texture(&source);
+            let bytes = converted.as_bytes(0).unwrap();
+            for index in [
+                0,
+                (width as usize * height as usize) / 2,
+                width as usize * height as usize - 1,
+            ] {
+                let p = source
+                    .get_pixel(index as u32 % width, index as u32 / width)
+                    .0;
+                assert_eq!(&bytes[index * 4..index * 4 + 4], &[p[2], p[1], p[0], p[3]]);
+            }
+            assert_eq!(source.get_pixel(0, 0).0, [0, 0, 71, 93]);
+        }
     }
 }

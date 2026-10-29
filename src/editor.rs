@@ -36,6 +36,7 @@ pub struct EditorView {
     arrow_style: ArrowStyle,
     pointer: Option<Point<Pixels>>,
     text_anchor: Option<ImagePoint>,
+    next_number: u32,
     text_index: Option<usize>,
     _text_subscription: Subscription,
     last_wheel: Option<std::time::Instant>,
@@ -79,7 +80,7 @@ impl EditorView {
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(w, cx);
-        let text = cx.new(|cx| InputState::new(w, cx).placeholder("输入文字"));
+        let text = cx.new(|cx| InputState::new(w, cx));
         let window_handle = w.window_handle();
         let text_focus = focus.clone();
         let text_subscription = cx.subscribe(&text, move |v, _, event: &InputEvent, cx| {
@@ -89,9 +90,20 @@ impl EditorView {
                 cx.defer(move |cx| {
                     let _ = window_handle.update(cx, |_, w, cx| focus.focus(w, cx));
                 });
+            } else if v.text_anchor.is_some() {
+                cx.notify();
             }
         });
+        let next_number = doc
+            .objects
+            .iter()
+            .filter(|a| a.tool == Tool::Number)
+            .filter_map(|a| a.text.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         Self {
+            next_number,
             doc,
             transform,
             host,
@@ -203,6 +215,9 @@ impl EditorView {
             });
         });
         self.message.clear();
+        if index.is_some() {
+            self.refresh(cx);
+        }
         cx.notify();
     }
     fn commit_text(&mut self, cx: &mut Context<Self>) {
@@ -332,7 +347,10 @@ impl EditorView {
         }
         self.rendering = true;
         let generation = self.generation;
-        let doc = self.doc.clone();
+        let mut doc = self.doc.clone();
+        if let Some(i) = self.text_index.filter(|i| *i < doc.objects.len()) {
+            doc.objects.remove(i);
+        }
         let transform = self.transform;
         let render = cx
             .background_executor()
@@ -555,15 +573,8 @@ impl EditorView {
                 self.begin_text(p, index, w, cx);
             }
             Tool::Number => {
-                let number = self
-                    .doc
-                    .objects
-                    .iter()
-                    .filter(|a| a.tool == Tool::Number)
-                    .filter_map(|a| a.text.parse::<u32>().ok())
-                    .max()
-                    .unwrap_or(0)
-                    .saturating_add(1);
+                let number = self.next_number;
+                self.next_number = number.saturating_add(1);
                 self.doc.add(Annotation {
                     tool: Tool::Number,
                     points: vec![p],
@@ -673,6 +684,9 @@ impl EditorView {
                     .xsmall()
                     .ghost()
                     .icon(tool_icon(tool))
+                    .when(tool == Tool::Number, |b| {
+                        b.label(self.next_number.to_string())
+                    })
                     .accessibility_label(label)
                     .tooltip(label)
                     .selected(self.tool == tool && self.ocr.is_none())
@@ -840,6 +854,34 @@ impl EditorView {
                 );
         } else if has_options {
             let mut options = div().h_flex().gap_1().items_center().justify_end();
+            if self.tool == Tool::Number {
+                options = options
+                    .child(
+                        Button::new("number-minus")
+                            .xsmall()
+                            .label("−")
+                            .accessibility_label("减小下一个序号")
+                            .on_click(cx.listener(|v, _, _, cx| {
+                                v.next_number = v.next_number.saturating_sub(1).max(1);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .child(format!("下一个 {}", self.next_number)),
+                    )
+                    .child(
+                        Button::new("number-plus")
+                            .xsmall()
+                            .label("+")
+                            .accessibility_label("增大下一个序号")
+                            .on_click(cx.listener(|v, _, _, cx| {
+                                v.next_number = v.next_number.saturating_add(1);
+                                cx.notify();
+                            })),
+                    );
+            }
             for (i, (label, color)) in [
                 ("红色", [240, 60, 70, 255]),
                 ("黄色", [255, 180, 30, 255]),
@@ -950,6 +992,7 @@ impl Render for EditorView {
         let hover = self.ocr_hover;
         let selected_bounds = self
             .selected
+            .filter(|_| self.text_anchor.is_none())
             .and_then(|i| self.doc.objects.get(i))
             .map(|a| a.bounds());
         let canvas = canvas(
@@ -1134,41 +1177,40 @@ impl Render for EditorView {
             .children(self.cursor_indicator())
             .children(self.text_anchor.map(|p| {
                 let p = self.transform.forward(p);
-                let left =
-                    (p.x * self.scale).clamp(0., (f32::from(self.view_size.width) - 120.).max(0.));
-                let top =
-                    (p.y * self.scale).clamp(0., (f32::from(self.view_size.height) - 34.).max(0.));
+                let font = (self.width * 6. + 12.) * self.scale;
+                let content_width = self
+                    .text
+                    .read(cx)
+                    .value()
+                    .chars()
+                    .map(|c| if c.is_ascii() { 0.7 } else { 1.0 })
+                    .sum::<f32>()
+                    * font;
                 div()
                     .id("image-text-input")
                     .absolute()
-                    .left(px(left))
-                    .top(px(top))
-                    .w(px(240f32.min(f32::from(self.view_size.width).max(120.))))
-                    .p_1()
-                    .bg(cx.theme().popover)
+                    .left(px(p.x * self.scale))
+                    .top(px(p.y * self.scale))
+                    .w(px((content_width + font).max(48.)))
                     .border_1()
                     .border_color(rgb(0x1688ff))
-                    .h_flex()
-                    .gap_1()
+                    .bg(transparent_black())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
-                        div().flex_1().child(
-                            Input::new(&self.text)
-                                .id("annotation-text-field")
-                                .aria_label("图片文字")
-                                .xsmall(),
-                        ),
-                    )
-                    .child(
-                        Button::new("commit-image-text")
-                            .xsmall()
-                            .ghost()
-                            .icon(action_icon("done"))
-                            .accessibility_label("完成文字")
-                            .on_click(cx.listener(|v, _, w, cx| {
-                                v.commit_text(cx);
-                                v.focus.focus(w, cx);
-                            })),
+                        Input::new(&self.text)
+                            .id("annotation-text-field")
+                            .aria_label("图片文字")
+                            .appearance(false)
+                            .bordered(false)
+                            .p_0()
+                            .text_size(px(font))
+                            .h(px(font * 1.3))
+                            .text_color(rgba(
+                                ((self.color[0] as u32) << 24)
+                                    | ((self.color[1] as u32) << 16)
+                                    | ((self.color[2] as u32) << 8)
+                                    | self.color[3] as u32,
+                            )),
                     )
             }))
             .children(toolbar)
@@ -1181,6 +1223,7 @@ impl Render for EditorView {
                     if e.keystroke.key == "escape" {
                         v.text_anchor = None;
                         v.text_index = None;
+                        v.refresh(cx);
                         v.focus.focus(w, cx);
                         cx.notify();
                     }
@@ -1549,6 +1592,41 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn number_tool_uses_adjusted_next_value_and_advances(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.tool = super::Tool::Number;
+                        v.next_number = 6;
+                        let e = gpui_kit::MouseDownEvent {
+                            button: gpui_kit::MouseButton::Left,
+                            position: point(px(480.), px(680.)),
+                            modifiers: Default::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        };
+                        v.down(&e, w, cx);
+                        v.down(&e, w, cx);
+                        v.next_number = 3;
+                        v.down(&e, w, cx);
+                        assert_eq!(
+                            v.doc
+                                .objects
+                                .iter()
+                                .map(|a| a.text.as_str())
+                                .collect::<Vec<_>>(),
+                            ["6", "7", "3"]
+                        );
+                        assert_eq!(v.next_number, 4);
+                    })
+                })
+                .unwrap()
+        });
+    }
+
+    #[gpui_kit::test]
     fn switching_from_ocr_to_annotation_keeps_export_session_alive(cx: &mut TestAppContext) {
         let (window, editor) = editor(cx);
         let session = cx.update(|cx| {
@@ -1683,7 +1761,6 @@ mod tests {
         });
         cx.update(|cx| {
             assert!(cx.global::<crate::app::Runtime>().overlays.is_empty());
-            #[cfg(target_os = "macos")]
             window
                 .update(cx, |_, w, _| {
                     assert_ne!(
@@ -1695,11 +1772,6 @@ mod tests {
                     )
                 })
                 .unwrap();
-            #[cfg(target_os = "windows")]
-            {
-                let _ = before;
-                assert!(window.update(cx, |_, _, _| ()).is_err());
-            }
         });
     }
     #[gpui_kit::test]

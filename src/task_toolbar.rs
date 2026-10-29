@@ -98,6 +98,12 @@ pub fn open(
             })
         },
     )?;
+    if let Err(error) = open_region_frame(selected, display_id, cx) {
+        let _ = handle.update(cx, |_, w, cx| {
+            crate::window_pool::park(crate::window_pool::Role::Task, w, cx)
+        });
+        return Err(error);
+    }
     cx.global_mut::<Runtime>().capture_task = Some(handle);
     let exclusion = handle.update(cx, |_, w, _| {
         app::raw(w).and_then(snip_platform::exclude_capture_controls)
@@ -643,7 +649,70 @@ impl Render for TaskToolbar {
 }
 
 pub fn closed(cx: &mut App) {
+    if let Some(frame) = cx.try_global::<CaptureFrame>().and_then(|f| f.0) {
+        cx.global_mut::<CaptureFrame>().0 = None;
+        let _ = frame.update(cx, |_, w, cx| {
+            crate::window_pool::park(crate::window_pool::Role::Task, w, cx)
+        });
+    }
     restore_trails(cx);
+}
+
+struct CaptureFrame(Option<AnyWindowHandle>);
+impl Global for CaptureFrame {}
+struct RegionFrame;
+impl Render for RegionFrame {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .border_2()
+            .border_color(rgb(0x28d4de))
+            .bg(transparent_black())
+    }
+}
+fn open_region_frame(
+    region: Rect,
+    display_id: Option<DisplayId>,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    // Paint entirely outside the source rectangle; even backends that only
+    // exclude one control window never record this border in the selected area.
+    let (handle, _) = crate::window_pool::open(
+        crate::window_pool::Role::Task,
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                point(px(region.x - 2.), px(region.y - 2.)),
+                size(px(region.width + 4.), px(region.height + 4.)),
+            ))),
+            titlebar: None,
+            kind: WindowKind::PopUp,
+            focus: false,
+            is_resizable: false,
+            is_movable: false,
+            is_minimizable: false,
+            display_id,
+            window_background: WindowBackgroundAppearance::Transparent,
+            ..Default::default()
+        },
+        cx,
+        |w, cx| {
+            app::apply_style(
+                w,
+                snip_platform::WindowStyle {
+                    click_through: true,
+                    no_activate: true,
+                    ..Default::default()
+                },
+            );
+            #[cfg(target_os = "windows")]
+            if let Ok(raw) = app::raw(w) {
+                let _ = snip_platform::exclude_capture_controls(raw);
+            }
+            cx.new(|_| RegionFrame)
+        },
+    )?;
+    cx.set_global(CaptureFrame(Some(handle)));
+    Ok(())
 }
 
 #[cfg(test)]

@@ -112,7 +112,12 @@ pub fn native_style(handle: RawWindowHandle, style: WindowStyle) -> Result<()> {
     // SAFETY: The handle is borrowed from the live GPUI window on its UI thread.
     unsafe {
         let mut bits = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        bits |= WS_EX_TOOLWINDOW.0 | WS_EX_LAYERED.0;
+        bits |= WS_EX_LAYERED.0;
+        if style.app_window {
+            bits = (bits & !WS_EX_TOOLWINDOW.0) | WS_EX_APPWINDOW.0;
+        } else {
+            bits |= WS_EX_TOOLWINDOW.0;
+        }
         if style.click_through {
             bits |= WS_EX_TRANSPARENT.0;
         } else {
@@ -186,9 +191,13 @@ fn client_point(handle: RawWindowHandle, mut p: POINT, scale: f32) -> Result<Poi
 }
 
 pub fn raise_overlay(handle: RawWindowHandle) -> Result<()> {
+    let hwnd = hwnd(handle)?;
+    if unsafe { GetTopWindow(None) }.ok() == Some(hwnd) {
+        return Ok(());
+    }
     unsafe {
         SetWindowPos(
-            hwnd(handle)?,
+            hwnd,
             Some(HWND_TOPMOST),
             0,
             0,
@@ -198,6 +207,90 @@ pub fn raise_overlay(handle: RawWindowHandle) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Run outside an App/window update: frame changes synchronously deliver WM_SIZE.
+pub fn configure_borderless(handle: RawWindowHandle, bounds: Rect, scale: f32) -> Result<()> {
+    let hwnd = hwnd(handle)?;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let style = (style
+            & !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0)
+            | WS_POPUP.0;
+        SetLastError(WIN32_ERROR(0));
+        if SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize) == 0 && GetLastError().0 != 0 {
+            anyhow::bail!("设置无边框窗口失败: {:?}", GetLastError());
+        }
+        SetWindowPos(
+            hwnd,
+            None,
+            (bounds.x * scale).round() as i32,
+            (bounds.y * scale).round() as i32,
+            (bounds.width * scale).round() as i32,
+            (bounds.height * scale).round() as i32,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        )?;
+    }
+    Ok(())
+}
+
+pub fn start_window_drag(handle: RawWindowHandle) -> Result<()> {
+    let hwnd = hwnd(handle)?;
+    unsafe {
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+        let mut p = POINT::default();
+        GetCursorPos(&mut p)?;
+        let coordinates = ((p.y as u32 & 0xffff) << 16) | (p.x as u32 & 0xffff);
+        PostMessageW(
+            Some(hwnd),
+            WM_NCLBUTTONDOWN,
+            windows::Win32::Foundation::WPARAM(HTCAPTION as usize),
+            LPARAM(coordinates as isize),
+        )?;
+    }
+    Ok(())
+}
+
+pub fn resize_borderless(
+    handle: RawWindowHandle,
+    width: f32,
+    height: f32,
+    scale: f32,
+) -> Result<()> {
+    let mut rect = RECT::default();
+    unsafe {
+        GetWindowRect(hwnd(handle)?, &mut rect)?;
+    }
+    configure_borderless(
+        handle,
+        Rect::new(
+            rect.left as f32 / scale,
+            rect.top as f32 / scale,
+            width,
+            height,
+        ),
+        scale,
+    )
+}
+
+pub fn inspect_borderless_rect(handle: RawWindowHandle) -> Result<Rect> {
+    let hwnd = hwnd(handle)?;
+    let mut outer = RECT::default();
+    let mut client = RECT::default();
+    unsafe {
+        GetWindowRect(hwnd, &mut outer)?;
+        GetClientRect(hwnd, &mut client)?;
+    }
+    ensure!(
+        outer.right - outer.left == client.right && outer.bottom - outer.top == client.bottom,
+        "窗口残留原生边框"
+    );
+    Ok(Rect::new(
+        outer.left as f32,
+        outer.top as f32,
+        client.right as f32,
+        client.bottom as f32,
+    ))
 }
 
 /// Windows can add WS_CAPTION to a GPUI popup even when GPUI hides its titlebar.
@@ -395,6 +488,37 @@ mod tests {
                 DestroyWindow(self.0).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn settings_use_normal_non_topmost_app_window_style() {
+        let window = TestWindow::new();
+        native_style(
+            window.raw(),
+            WindowStyle {
+                topmost: false,
+                app_window: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bits = unsafe { GetWindowLongPtrW(window.0, GWL_EXSTYLE) as u32 };
+        assert_eq!(bits & (WS_EX_TOOLWINDOW | WS_EX_TOPMOST).0, 0);
+        assert_ne!(bits & WS_EX_APPWINDOW.0, 0);
+    }
+
+    #[test]
+    fn borderless_position_and_resize_have_no_extra_native_frame() {
+        let window = TestWindow::new();
+        let bounds = Rect::new(-500., 100., 360., 220.);
+        configure_borderless(window.raw(), bounds, 1.).unwrap();
+        assert_eq!(inspect_borderless_rect(window.raw()).unwrap(), bounds);
+        resize_borderless(window.raw(), 480., 260., 1.).unwrap();
+        assert_eq!(
+            inspect_borderless_rect(window.raw()).unwrap(),
+            Rect::new(-500., 100., 480., 260.)
+        );
+        assert!(!window_has_system_buttons(window.raw()).unwrap());
     }
 
     #[test]

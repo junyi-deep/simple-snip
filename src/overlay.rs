@@ -497,12 +497,14 @@ impl Render for Overlay {
                     _ => {}
                 }
             }));
-        let toolbar_y = if ui.bottom() + 70. < f32::from(s.height) {
-            ui.bottom() + 10.
-        } else {
-            (ui.y - 62.).max(8.)
-        };
-        let toolbar_x = ui.x.clamp(8., (f32::from(s.width) - 490.).max(8.));
+        let toolbar = snip_core::geometry::place_toolbar(
+            ui,
+            Rect::new(0., 0., f32::from(s.width), f32::from(s.height)),
+            490.,
+            70.,
+        );
+        let toolbar_x = toolbar.x;
+        let toolbar_y = toolbar.y;
         if self.selection.is_some() && self.anchor.is_none() && self.editor.is_none() {
             root = root.child(
                 div()

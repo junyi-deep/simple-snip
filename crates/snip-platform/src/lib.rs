@@ -175,6 +175,8 @@ pub struct WindowStyle {
     pub no_activate: bool,
     /// Full-display overlays must bypass macOS titled-window frame constraints.
     pub desktop_overlay: bool,
+    /// Normal settings windows participate in the Windows taskbar / Alt+Tab.
+    pub app_window: bool,
 }
 impl Default for WindowStyle {
     fn default() -> Self {
@@ -184,6 +186,7 @@ impl Default for WindowStyle {
             opacity: 1.,
             no_activate: false,
             desktop_overlay: false,
+            app_window: false,
         }
     }
 }

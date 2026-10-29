@@ -49,7 +49,14 @@ impl Settings {
             cx,
             |w, cx| {
                 app::prepare_window(w);
-                app::apply_style(w, snip_platform::WindowStyle::default());
+                app::apply_style(
+                    w,
+                    snip_platform::WindowStyle {
+                        topmost: false,
+                        app_window: true,
+                        ..Default::default()
+                    },
+                );
                 w.on_window_should_close(cx, |window, _| {
                     if let Ok(raw) = app::raw(window) {
                         let _ = snip_platform::show_window(raw, false);
@@ -92,39 +99,27 @@ impl Settings {
                     })
                     .collect();
                 let proxy_password = cx.new(|cx| InputState::new(w, cx).masked(true));
-                cx.new(|cx| {
-                    cx.observe_window_activation(w, |_, w, _| {
-                        app::apply_style(
-                            w,
-                            snip_platform::WindowStyle {
-                                topmost: w.is_window_active(),
-                                ..Default::default()
-                            },
-                        );
-                    })
-                    .detach();
-                    Self {
-                        section: 0,
-                        screenshot_key,
-                        paste_key,
-                        save_path,
-                        gif_seconds,
-                        gif_width,
-                        trail_width,
-                        trail_life,
-                        pin_border_color,
-                        pin_border_width,
-                        pin_shadow: config.pin.shadow,
-                        proxy_mode: config.updates.proxy_mode,
-                        proxy_url,
-                        proxy_username,
-                        proxy_password,
-                        update_busy: false,
-                        update_status: "手动检查 GitHub Release；截图和识别内容不会发送。".into(),
-                        update_release: None,
-                        update_file: None,
-                        optional,
-                    }
+                cx.new(|_| Self {
+                    section: 0,
+                    screenshot_key,
+                    paste_key,
+                    save_path,
+                    gif_seconds,
+                    gif_width,
+                    trail_width,
+                    trail_life,
+                    pin_border_color,
+                    pin_border_width,
+                    pin_shadow: config.pin.shadow,
+                    proxy_mode: config.updates.proxy_mode,
+                    proxy_url,
+                    proxy_username,
+                    proxy_password,
+                    update_busy: false,
+                    update_status: "手动检查 GitHub Release；截图和识别内容不会发送。".into(),
+                    update_release: None,
+                    update_file: None,
+                    optional,
                 })
             },
         )?;

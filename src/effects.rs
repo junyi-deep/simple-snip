@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 pub struct TrailView {
     trail: Trail,
     visible: bool,
+    capture_excluded: bool,
     start: Instant,
     width: f32,
 }
@@ -46,14 +47,15 @@ pub fn start(cx: &mut App) {
                     },
                 );
                 #[cfg(target_os = "windows")]
-                if let Ok(raw) = app::raw(window)
-                    && let Err(error) = snip_platform::exclude_capture_controls(raw)
-                {
-                    tracing::warn!("无法从采集中排除拖尾窗口: {error}");
-                }
+                let capture_excluded = app::raw(window)
+                    .and_then(snip_platform::exclude_capture_controls)
+                    .is_ok();
+                #[cfg(target_os = "macos")]
+                let capture_excluded = false;
                 let view = cx.new(|_| TrailView {
                     trail: Trail::new(config.lifetime_ms as f64 / 1000.),
                     visible: true,
+                    capture_excluded,
                     start: Instant::now(),
                     width: config.width,
                 });
@@ -63,8 +65,22 @@ pub fn start(cx: &mut App) {
                 cx.spawn(async move |cx| {
                     loop {
                         let visible = weak.read_with(cx, |v, _| v.visible).unwrap_or(false);
-                        let position =
-                            visible.then(|| handle.update(cx, |_, w, _| cursor_in_window(w)));
+                        let position = visible.then(|| {
+                            handle.update(cx, |_, w, _| {
+                                let p = cursor_in_window(w)?;
+                                #[cfg(target_os = "windows")]
+                                if p.x >= 0.
+                                    && p.y >= 0.
+                                    && p.x < f32::from(w.viewport_size().width)
+                                    && p.y < f32::from(w.viewport_size().height)
+                                {
+                                    // Settings, taskbar and other topmost windows can be
+                                    // raised without activating our app. Follow their Z order.
+                                    snip_platform::raise_overlay(app::raw(w)?)?;
+                                }
+                                Ok::<_, anyhow::Error>(p)
+                            })
+                        });
                         let active = weak.update(cx, |v, cx| {
                             if !v.visible {
                                 return false;
@@ -155,6 +171,10 @@ impl TrailView {
         self.visible
     }
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        // WDA_EXCLUDEFROMCAPTURE keeps the effect visible to the user while
+        // omitting it from screenshots/recordings. Fall back to suspension if
+        // Windows refused that capability; never bake a trail into the image.
+        let visible = visible || self.capture_excluded;
         if self.visible != visible {
             self.visible = visible;
             self.trail = Trail::new(self.trail.lifetime);
@@ -256,10 +276,28 @@ mod tests {
     use gpui_kit::{AppContext, TestAppContext};
 
     #[gpui_kit::test]
+    fn capture_exclusion_keeps_trail_visible_during_screenshot(cx: &mut TestAppContext) {
+        let view = cx.new(|_| TrailView {
+            trail: Trail::new(0.3),
+            visible: true,
+            capture_excluded: true,
+            start: Instant::now(),
+            width: 9.,
+        });
+        view.update(cx, |v, cx| {
+            v.trail.update(ImagePoint::new(20., 30.), 0.);
+            v.set_visible(false, cx);
+            assert!(v.visible);
+            assert_eq!(v.trail.points.len(), 1);
+        });
+    }
+
+    #[gpui_kit::test]
     fn capture_pause_and_resume_do_not_join_to_old_trail(cx: &mut TestAppContext) {
         let view = cx.new(|_| TrailView {
             trail: Trail::new(0.3),
             visible: true,
+            capture_excluded: false,
             start: Instant::now(),
             width: 9.,
         });
