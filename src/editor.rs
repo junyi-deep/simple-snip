@@ -18,6 +18,33 @@ use snip_core::{
 use snip_platform::{CapturedDisplay, ClipboardProvider};
 use std::sync::Arc;
 
+#[derive(Clone, Default)]
+struct PreferencesStore {
+    value: snip_core::editor_preferences::EditorPreferences,
+    writer: Option<std::sync::mpsc::Sender<snip_core::editor_preferences::EditorPreferences>>,
+}
+impl Global for PreferencesStore {}
+pub fn init_preferences(cx: &mut App) {
+    let path = snip_core::config::Config::path().with_file_name("editor.toml");
+    let value = snip_core::editor_preferences::EditorPreferences::load(&path);
+    let (writer, receiver) =
+        std::sync::mpsc::channel::<snip_core::editor_preferences::EditorPreferences>();
+    std::thread::spawn(move || {
+        while let Ok(mut value) = receiver.recv() {
+            for newer in receiver.try_iter() {
+                value = newer;
+            }
+            if let Err(error) = value.save(&path) {
+                tracing::error!("保存编辑偏好失败: {error}");
+            }
+        }
+    });
+    cx.set_global(PreferencesStore {
+        value,
+        writer: Some(writer),
+    });
+}
+
 #[derive(Clone, Copy)]
 pub enum EditorHost {
     Capture,
@@ -27,6 +54,8 @@ pub enum EditorHost {
 /// It never opens an application editor window.
 pub struct EditorView {
     pub doc: Document,
+    preferences: snip_core::editor_preferences::EditorPreferences,
+    toolbar_rows: [f32; 3],
     transform: ImageTransform,
     host: EditorHost,
     rendered: Arc<RgbaImage>,
@@ -84,6 +113,11 @@ impl EditorView {
         w: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        if cx.try_global::<PreferencesStore>().is_none() {
+            cx.set_global(PreferencesStore::default());
+        }
+        let preferences = cx.global::<PreferencesStore>().value.clone();
+        let style = preferences.style(preferences.tool);
         let focus = cx.focus_handle();
         focus.focus(w, cx);
         let text = cx.new(|cx| InputState::new(w, cx));
@@ -100,7 +134,16 @@ impl EditorView {
                 cx.notify();
             }
         });
-        let size_input = cx.new(|cx| InputState::new(w, cx).default_value("3"));
+        let size_input = cx.new(|cx| {
+            InputState::new(w, cx).default_value(format!(
+                "{:.1}",
+                if matches!(preferences.tool, Tool::Text | Tool::Number) {
+                    style.width * 6. + 12.
+                } else {
+                    style.width
+                }
+            ))
+        });
         let size_subscription = cx.subscribe(&size_input, |v, _, _: &InputEvent, cx| {
             if let Ok(size) = v.size_input.read(cx).value().trim().parse::<f32>() {
                 v.set_size(size, cx);
@@ -114,8 +157,11 @@ impl EditorView {
             .filter_map(|a| a.text.parse::<u32>().ok())
             .max()
             .unwrap_or(0)
-            .saturating_add(1);
+            .saturating_add(1)
+            .max(preferences.next_number);
         Self {
+            preferences: preferences.clone(),
+            toolbar_rows: [0.; 3],
             size_input,
             _size_subscription: size_subscription,
             capture_context: None,
@@ -127,10 +173,10 @@ impl EditorView {
             host,
             rendered: initial.clone(),
             texture: app::texture(&initial),
-            tool: Tool::Select,
-            color: [240, 60, 70, 255],
-            width: 3.,
-            arrow_style: ArrowStyle::default(),
+            tool: preferences.tool,
+            color: style.color,
+            width: style.width,
+            arrow_style: style.arrow,
             pointer: None,
             text_anchor: None,
             text_index: None,
@@ -162,6 +208,49 @@ impl EditorView {
             session_cancel: Cancellation::default(),
         }
     }
+    fn remember(&mut self, cx: &mut Context<Self>) {
+        let tool = self.option_tool();
+        self.preferences = cx.global::<PreferencesStore>().value.clone();
+        self.preferences.tool = self.tool;
+        if self.tool.is_shape() {
+            self.preferences.shape = self.tool;
+        }
+        if self.tool.is_line() {
+            self.preferences.line = self.tool;
+        }
+        self.preferences.next_number = self.next_number;
+        self.preferences.styles.insert(
+            tool,
+            snip_core::editor_preferences::ToolStyle {
+                width: self.width,
+                color: self.color,
+                arrow: self.arrow_style,
+            },
+        );
+        let store = cx.global_mut::<PreferencesStore>();
+        if store.value != self.preferences {
+            store.value = self.preferences.clone();
+            if let Some(writer) = &store.writer {
+                let _ = writer.send(store.value.clone());
+            }
+        }
+    }
+    fn choose_tool(&mut self, tool: Tool, w: &mut Window, cx: &mut Context<Self>) {
+        self.commit_text(cx);
+        self.finish_path(cx);
+        self.remember(cx);
+        self.tool = tool;
+        self.selected = None;
+        let style = self.preferences.style(tool);
+        self.width = style.width;
+        self.color = style.color;
+        self.arrow_style = style.arrow;
+        self.clear_ocr();
+        self.message.clear();
+        self.sync_size(w, cx);
+        self.remember(cx);
+        cx.notify();
+    }
     pub fn set_capture_context(&mut self, display: CapturedDisplay, rect: Rect) {
         self.capture_context = Some((display, rect));
     }
@@ -185,6 +274,7 @@ impl EditorView {
             return;
         }
         self.width = width;
+        self.remember(cx);
         if let Some(i) = self.selected.filter(|i| *i < self.doc.objects.len()) {
             self.doc.checkpoint();
             self.doc.objects[i].width = width;
@@ -404,6 +494,7 @@ impl EditorView {
             );
             cx.notify();
         }
+        self.remember(cx);
     }
     fn cursor_indicator(&self) -> Option<AnyElement> {
         let p = self.pointer?;
@@ -721,6 +812,7 @@ impl EditorView {
             Tool::Number => {
                 let number = self.next_number;
                 self.next_number = number.saturating_add(1);
+                self.remember(cx);
                 self.doc.add(Annotation {
                     tool: Tool::Number,
                     points: vec![p],
@@ -807,7 +899,25 @@ impl EditorView {
         }
     }
     fn toolbar_width(&self) -> f32 {
-        if self.ocr.is_some() { 520. } else { 840. }
+        if self.ocr.is_some() {
+            return 520.;
+        }
+        let base = if self.toolbar_rows[0] > 0. {
+            self.toolbar_rows[0]
+        } else {
+            650.
+        };
+        let options = if self.tool != Tool::Select || self.selected.is_some() {
+            self.toolbar_rows[1]
+        } else {
+            0.
+        };
+        let arrows = if self.option_tool() == Tool::Arrow {
+            self.toolbar_rows[2]
+        } else {
+            0.
+        };
+        base.max(options).max(arrows) + 8.
     }
     fn toolbar_height(&self) -> f32 {
         34. + if self.tool != Tool::Select || self.selected.is_some() || self.ocr.is_some() {
@@ -821,6 +931,31 @@ impl EditorView {
         } + if self.message.is_empty() { 0. } else { 32. }
     }
     fn toolbar(&mut self, w: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        let row_measure = |index: usize| {
+            let weak = cx.entity().downgrade();
+            move |bounds: Vec<Bounds<Pixels>>, _: &mut Window, cx: &mut App| {
+                let left = bounds
+                    .iter()
+                    .map(|b| f32::from(b.origin.x))
+                    .fold(f32::INFINITY, f32::min);
+                let right = bounds
+                    .iter()
+                    .map(|b| f32::from(b.origin.x + b.size.width))
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let width = (right - left).ceil();
+                if width.is_finite() && width > 0. {
+                    let weak = weak.clone();
+                    cx.defer(move |cx| {
+                        let _ = weak.update(cx, |v, cx| {
+                            if (v.toolbar_rows[index] - width).abs() > 1. {
+                                v.toolbar_rows[index] = width;
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
+            }
+        };
         let tools = [
             ("选择 / 移动标注", Tool::Select),
             ("矩形", Tool::Rectangle),
@@ -836,6 +971,7 @@ impl EditorView {
             ("橡皮擦", Tool::Eraser),
         ];
         let mut strip = div()
+            .on_children_prepainted(row_measure(0))
             .id("annotation-tools-strip")
             .h_flex()
             .gap(px(1.))
@@ -846,6 +982,7 @@ impl EditorView {
             strip = strip.child(
                 Button::new("capture-mode")
                     .xsmall()
+                    .flex_shrink_0()
                     .label("截图 ▾")
                     .dropdown_menu(move |menu, _, _| {
                         let long_display = display.clone();
@@ -879,6 +1016,7 @@ impl EditorView {
             strip = strip.child(
                 Button::new(("tool", i))
                     .xsmall()
+                    .flex_shrink_0()
                     .ghost()
                     .icon(tool_icon(tool))
                     .child(
@@ -902,14 +1040,14 @@ impl EditorView {
                             && self.ocr.is_none(),
                     )
                     .on_click(cx.listener(move |v, _, w, cx| {
-                        v.commit_text(cx);
-                        v.finish_path(cx);
-                        v.tool = tool;
-                        v.width = v.width.max(0.5);
-                        v.sync_size(w, cx);
-                        v.selected = None;
-                        v.clear_ocr();
-                        v.message.clear();
+                        let tool = if tool == Tool::Rectangle {
+                            v.preferences.shape
+                        } else if tool == Tool::Line {
+                            v.preferences.line
+                        } else {
+                            tool
+                        };
+                        v.choose_tool(tool, w, cx);
                         if let EditorHost::Pin(id) = v.host {
                             app::send(cx, Event::FocusPinCanvas(id));
                         }
@@ -935,6 +1073,7 @@ impl EditorView {
             strip = strip.child(
                 Button::new(("action", i))
                     .xsmall()
+                    .flex_shrink_0()
                     .ghost()
                     .icon(action_icon(name))
                     .accessibility_label(label)
@@ -1035,6 +1174,7 @@ impl EditorView {
                         .child(
                             Button::new("selection-text")
                                 .xsmall()
+                                .flex_shrink_0()
                                 .label("复制选中")
                                 .on_click(cx.listener(|v, _, _, cx| {
                                     let text = v.ocr_input.read(cx).selected_text().to_string();
@@ -1055,6 +1195,7 @@ impl EditorView {
                         .child(
                             Button::new("tsv")
                                 .xsmall()
+                                .flex_shrink_0()
                                 .label("TSV")
                                 .tooltip("仅适用于简单表格")
                                 .on_click(cx.listener(|v, _, _, cx| {
@@ -1095,6 +1236,7 @@ impl EditorView {
                 );
         } else if has_options {
             let mut options = div()
+                .on_children_prepainted(row_measure(1))
                 .id("annotation-options")
                 .h_flex()
                 .gap_1()
@@ -1107,10 +1249,12 @@ impl EditorView {
                     .child(
                         Button::new("number-minus")
                             .xsmall()
+                            .flex_shrink_0()
                             .label("−")
                             .accessibility_label("减小下一个序号")
                             .on_click(cx.listener(|v, _, _, cx| {
                                 v.next_number = v.next_number.saturating_sub(1).max(1);
+                                v.remember(cx);
                                 cx.notify();
                             })),
                     )
@@ -1122,10 +1266,12 @@ impl EditorView {
                     .child(
                         Button::new("number-plus")
                             .xsmall()
+                            .flex_shrink_0()
                             .label("+")
                             .accessibility_label("增大下一个序号")
                             .on_click(cx.listener(|v, _, _, cx| {
                                 v.next_number = v.next_number.saturating_add(1);
+                                v.remember(cx);
                                 cx.notify();
                             })),
                     );
@@ -1144,6 +1290,7 @@ impl EditorView {
                 options = options.child(
                     Button::new(("color", i))
                         .xsmall()
+                        .flex_shrink_0()
                         .ghost()
                         .child(
                             div()
@@ -1160,6 +1307,7 @@ impl EditorView {
                         .selected(self.color == color)
                         .on_click(cx.listener(move |v, _, _, cx| {
                             v.color = color;
+                            v.remember(cx);
                             if let Some(i) = v.selected.filter(|i| *i < v.doc.objects.len()) {
                                 v.doc.checkpoint();
                                 v.doc.objects[i].color = color;
@@ -1173,6 +1321,7 @@ impl EditorView {
                 .child(
                     Button::new("size-minus")
                         .xsmall()
+                        .flex_shrink_0()
                         .label("−")
                         .on_click(cx.listener(|v, _, w, cx| {
                             v.set_size(v.display_size() - 1., cx);
@@ -1183,12 +1332,14 @@ impl EditorView {
                     div().w(px(64.)).child(
                         Input::new(&self.size_input)
                             .xsmall()
+                            .flex_shrink_0()
                             .aria_label("字体大小 / 线宽像素"),
                     ),
                 )
                 .child(
                     Button::new("size-plus")
                         .xsmall()
+                        .flex_shrink_0()
                         .label("+")
                         .on_click(cx.listener(|v, _, w, cx| {
                             v.set_size(v.display_size() + 1., cx);
@@ -1223,19 +1374,20 @@ impl EditorView {
                     options = options.child(
                         Button::new(("variant", i))
                             .xsmall()
+                            .flex_shrink_0()
                             .label(label)
                             .selected(self.tool == tool)
-                            .on_click(cx.listener(move |v, _, _, cx| {
-                                v.finish_path(cx);
-                                v.tool = tool;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(move |v, _, w, cx| v.choose_tool(tool, w, cx))),
                     );
                 }
             }
             panel = panel.child(options);
             if self.option_tool() == Tool::Arrow {
-                let mut styles = div().h_flex().gap_1().justify_end();
+                let mut styles = div()
+                    .on_children_prepainted(row_measure(2))
+                    .h_flex()
+                    .gap_1()
+                    .justify_end();
                 for (i, (label, style)) in [
                     ("头尾等宽", ArrowStyle::Uniform),
                     ("头宽尾细", ArrowStyle::HeadWide),
@@ -1247,11 +1399,13 @@ impl EditorView {
                     styles = styles.child(
                         Button::new(("arrow-style", i))
                             .xsmall()
+                            .flex_shrink_0()
                             .ghost()
                             .label(label)
                             .selected(self.arrow_style == style)
                             .on_click(cx.listener(move |v, _, _, cx| {
                                 v.arrow_style = style;
+                                v.remember(cx);
                                 if let Some(i) = v.selected.filter(|i| {
                                     *i < v.doc.objects.len()
                                         && v.doc.objects[*i].tool == Tool::Arrow
@@ -1540,6 +1694,12 @@ impl Render for EditorView {
                 v.sync_size(w, cx);
                 cx.stop_propagation();
             }))
+            .capture_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" {
+                    v.cancel(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
                 if v.text_anchor.is_some() {
                     if e.keystroke.key == "escape" {
@@ -1578,13 +1738,14 @@ impl Render for EditorView {
                             "b" => Tool::Blur,
                             _ => Tool::Eraser,
                         };
-                        v.finish_path(cx);
-                        v.tool = tool;
-                        v.selected = None;
-                        v.clear_ocr();
-                        v.width = v.width.max(0.5);
-                        v.sync_size(w, cx);
-                        cx.notify();
+                        let tool = if tool == Tool::Rectangle {
+                            v.preferences.shape
+                        } else if tool == Tool::Line {
+                            v.preferences.line
+                        } else {
+                            tool
+                        };
+                        v.choose_tool(tool, w, cx);
                     }
                     "o" if !modifier => v.recognize(cx),
                     "p" if !modifier => v.export(2, cx),
@@ -1773,6 +1934,14 @@ impl Render for FloatingToolbar {
             .size_full()
             .track_focus(&self.focus)
             .key_context("AnnotationTools")
+            .capture_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" {
+                    if let Some(editor) = &v.editor {
+                        editor.update(cx, |v, cx| v.cancel(cx));
+                    }
+                    cx.stop_propagation();
+                }
+            }))
             .child(tools)
             .on_action(cx.listener(|v, _: &app::CancelAnnotation, _, cx| {
                 if let Some(editor) = &v.editor {
@@ -1959,6 +2128,120 @@ mod tests {
             .expect("test editor window");
             (window, built.unwrap())
         })
+    }
+
+    #[gpui_kit::test]
+    fn new_editor_restores_tool_shape_and_independent_sizes(cx: &mut TestAppContext) {
+        let (window, first) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    first.update(cx, |v, cx| {
+                        v.choose_tool(super::Tool::Diamond, w, cx);
+                        v.set_size(7., cx);
+                        v.choose_tool(super::Tool::Text, w, cx);
+                        v.set_size(42., cx);
+                    })
+                })
+                .unwrap()
+        });
+        let (window, next) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    next.update(cx, |v, cx| {
+                        assert_eq!(v.tool, super::Tool::Text);
+                        assert_eq!(v.display_size(), 42.);
+                        assert_eq!(v.preferences.shape, super::Tool::Diamond);
+                        v.choose_tool(v.preferences.shape, w, cx);
+                        assert_eq!(v.width, 7.);
+                    })
+                })
+                .unwrap()
+        });
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_width_follows_actual_button_content(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| editor.update(cx, |v, _| v.host = EditorHost::Capture));
+        for _ in 0..4 {
+            cx.update(|cx| {
+                window
+                    .update(cx, |_, w, cx| {
+                        let _ = w.draw(cx);
+                        w.simulate_next_frame(cx);
+                    })
+                    .unwrap()
+            });
+            cx.run_until_parked();
+        }
+        cx.update(|cx| {
+            let v = editor.read(cx);
+            assert!(v.toolbar_rows[0] > 0.);
+            assert!(v.toolbar_width() < 800., "{}", v.toolbar_width());
+            assert!((v.toolbar_width() - v.toolbar_rows[0] - 8.).abs() < 1.);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn escape_cancels_editor_even_with_text_or_size_input_focus(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        let (tx, rx) = async_channel::bounded(8);
+        cx.set_global(crate::app::Runtime {
+            recordings: vec![],
+            config: snip_core::config::Config::default(),
+            status: String::new(),
+            tx,
+            pins: Default::default(),
+            next_pin: 1,
+            overlays: vec![],
+            capture_busy: false,
+            permission_prompt: false,
+            settings: None,
+            hotkeys: None,
+            tray: None,
+            trails: vec![],
+            annotation_toolbar: None,
+            capture_task: None,
+        });
+        for text in [true, false] {
+            let key_window = if text {
+                window
+            } else {
+                cx.update(|cx| {
+                    window
+                        .update(cx, |_, w, cx| super::open_toolbar(editor.clone(), w, cx))
+                        .unwrap()
+                        .unwrap()
+                })
+            };
+            cx.update(|cx| {
+                key_window
+                    .update(cx, |_, w, cx| {
+                        editor.update(cx, |v, cx| {
+                            if text {
+                                v.tool = super::Tool::Text;
+                                v.begin_text(ImagePoint::new(20., 20.), None, w, cx);
+                            } else {
+                                v.text_anchor = None;
+                                v.size_input.update(cx, |i, cx| i.focus(w, cx));
+                            }
+                        });
+                        let _ = w.draw(cx);
+                        w.simulate_next_frame(cx);
+                        let _ = w.draw(cx);
+                    })
+                    .unwrap()
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes(key_window, "escape");
+            assert!(
+                matches!(rx.try_recv(), Ok(crate::app::Event::ClosePinEditor(1))),
+                "text focus: {text}"
+            );
+            cx.update(|cx| assert!(editor.read(cx).doc.objects.is_empty()));
+        }
     }
 
     #[gpui_kit::test]

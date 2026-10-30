@@ -745,6 +745,38 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn escape_cancels_editing_from_canvas_and_toolbar_keeps_pin(cx: &mut TestAppContext) {
+        let rx = setup(cx);
+        let (window, view) = pin(cx, 1, true);
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        cx.simulate_keystrokes(window, "escape");
+        assert!(matches!(rx.try_recv(), Ok(Event::ClosePinEditor(1))));
+        cx.update(|cx| view.update(cx, |v, cx| v.focus_toolbar(cx)));
+        let toolbar = cx.update(|cx| {
+            cx.global::<Runtime>()
+                .annotation_toolbar
+                .as_ref()
+                .unwrap()
+                .0
+        });
+        let mut tools = VisualTestContext::from_window(toolbar, cx);
+        tools.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        cx.simulate_keystrokes(toolbar, "escape");
+        assert!(matches!(rx.try_recv(), Ok(Event::ClosePinEditor(1))));
+        cx.update(|cx| {
+            view.update(cx, |v, cx| v.close_editor(cx));
+            assert!(view.read(cx).editor.is_none());
+            assert!(cx.global::<Runtime>().pins.contains_key(&1));
+            assert!(view.read(cx).doc.objects.is_empty());
+        });
+    }
+
+    #[gpui_kit::test]
     fn close_window_shortcut_works_from_pin_editor_and_toolbar(cx: &mut TestAppContext) {
         let rx = setup(cx);
         let (window, view) = pin(cx, 1, true);

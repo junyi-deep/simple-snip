@@ -202,6 +202,9 @@ pub(crate) fn bind_keys(cx: &mut App) {
 pub fn start(cx: &mut App, smoke_test: bool) {
     crate::window_pool::init(cx);
     bind_keys(cx);
+    if !smoke_test {
+        crate::editor::init_preferences(cx);
+    }
     let (config, warning) = if smoke_test {
         (
             Config {
