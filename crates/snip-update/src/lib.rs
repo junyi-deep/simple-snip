@@ -1,6 +1,8 @@
 //! Explicit, offline-until-requested GitHub release checks. No screenshot data
 //! enters this module. Passwords are session-only and never part of Config.
 use anyhow::{Context, Result, bail, ensure};
+mod install;
+pub use install::{launch_install, prepare_install};
 use reqwest::{Url, blocking::Client};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};

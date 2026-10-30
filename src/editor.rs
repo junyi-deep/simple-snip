@@ -2,7 +2,8 @@ use crate::app::{self, Event, Runtime};
 use gpui_kit::{
     component::{
         button::*,
-        input::{Input, InputEvent, InputState},
+        input::{Input, InputEvent, InputState, Textarea, TextareaState},
+        menu::*,
         *,
     },
     prelude::*,
@@ -37,6 +38,11 @@ pub struct EditorView {
     pointer: Option<Point<Pixels>>,
     text_anchor: Option<ImagePoint>,
     next_number: u32,
+    size_input: Entity<InputState>,
+    _size_subscription: Subscription,
+    capture_context: Option<(CapturedDisplay, Rect)>,
+    ocr_input: Entity<TextareaState>,
+    ocr_pending: Option<String>,
     text_index: Option<usize>,
     _text_subscription: Subscription,
     last_wheel: Option<std::time::Instant>,
@@ -94,6 +100,13 @@ impl EditorView {
                 cx.notify();
             }
         });
+        let size_input = cx.new(|cx| InputState::new(w, cx).default_value("3"));
+        let size_subscription = cx.subscribe(&size_input, |v, _, _: &InputEvent, cx| {
+            if let Ok(size) = v.size_input.read(cx).value().trim().parse::<f32>() {
+                v.set_size(size, cx);
+            }
+        });
+        let ocr_input = cx.new(|cx| TextareaState::new(w, cx));
         let next_number = doc
             .objects
             .iter()
@@ -103,6 +116,11 @@ impl EditorView {
             .unwrap_or(0)
             .saturating_add(1);
         Self {
+            size_input,
+            _size_subscription: size_subscription,
+            capture_context: None,
+            ocr_input,
+            ocr_pending: None,
             next_number,
             doc,
             transform,
@@ -143,6 +161,73 @@ impl EditorView {
             cancel: Cancellation::default(),
             session_cancel: Cancellation::default(),
         }
+    }
+    pub fn set_capture_context(&mut self, display: CapturedDisplay, rect: Rect) {
+        self.capture_context = Some((display, rect));
+    }
+    fn display_size(&self) -> f32 {
+        if matches!(self.option_tool(), Tool::Text | Tool::Number) {
+            self.width * 6. + 12.
+        } else {
+            self.width
+        }
+    }
+    fn set_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        if !size.is_finite() || size <= 0. || size > 512. {
+            return;
+        }
+        let width = if matches!(self.option_tool(), Tool::Text | Tool::Number) {
+            (size.max(13.) - 12.) / 6.
+        } else {
+            size.clamp(0.5, 128.)
+        };
+        if (width - self.width).abs() < 0.001 {
+            return;
+        }
+        self.width = width;
+        if let Some(i) = self.selected.filter(|i| *i < self.doc.objects.len()) {
+            self.doc.checkpoint();
+            self.doc.objects[i].width = width;
+            self.refresh(cx);
+        }
+        cx.notify();
+    }
+    fn sync_size(&self, w: &mut Window, cx: &mut Context<Self>) {
+        self.size_input.update(cx, |input, cx| {
+            input.set_value(format!("{:.1}", self.display_size()), w, cx)
+        });
+    }
+    fn finish_path(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut draft) = self.draft.take() {
+            if draft.tool == Tool::Polyline && draft.points.len() > 1 {
+                draft.points.dedup();
+            }
+            if draft.points.len() > 1 {
+                self.doc.add(draft);
+                self.refresh(cx);
+            }
+        }
+    }
+    fn paint_filter(&mut self, p: ImagePoint, checkpoint: bool, cx: &mut Context<Self>) {
+        let radius = (self.width * 3.).clamp(3., 256.);
+        let a = Annotation {
+            tool: self.tool,
+            points: vec![
+                ImagePoint::new(p.x - radius, p.y - radius),
+                ImagePoint::new(p.x + radius, p.y + radius),
+            ],
+            color: self.color,
+            width: self.width,
+            text: String::new(),
+            arrow_style: self.arrow_style,
+        };
+        if checkpoint {
+            self.doc.add(a);
+        } else {
+            self.doc.objects.push(a);
+        }
+        self.last = Some(p);
+        self.refresh(cx);
     }
     pub fn focus_canvas(&self, w: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(w, cx);
@@ -276,11 +361,47 @@ impl EditorView {
                 self.doc.checkpoint();
             }
             self.last_wheel = Some(now);
-            self.doc.objects[i].width = (self.doc.objects[i].width + delta.signum()).clamp(1., 80.);
+            self.doc.objects[i].width = (self.doc.objects[i].width
+                + delta.signum()
+                    * if matches!(self.doc.objects[i].tool, Tool::Text | Tool::Number) {
+                        1. / 6.
+                    } else {
+                        1.
+                    })
+            .clamp(
+                if matches!(self.doc.objects[i].tool, Tool::Text | Tool::Number) {
+                    1. / 6.
+                } else {
+                    0.5
+                },
+                if matches!(self.doc.objects[i].tool, Tool::Text | Tool::Number) {
+                    (512. - 12.) / 6.
+                } else {
+                    128.
+                },
+            );
             self.width = self.doc.objects[i].width;
             self.refresh(cx);
         } else if self.tool != Tool::Select {
-            self.width = (self.width + delta.signum()).clamp(1., 80.);
+            self.width = (self.width
+                + delta.signum()
+                    * if matches!(self.tool, Tool::Text | Tool::Number) {
+                        1. / 6.
+                    } else {
+                        1.
+                    })
+            .clamp(
+                if matches!(self.tool, Tool::Text | Tool::Number) {
+                    1. / 6.
+                } else {
+                    0.5
+                },
+                if matches!(self.tool, Tool::Text | Tool::Number) {
+                    (512. - 12.) / 6.
+                } else {
+                    128.
+                },
+            );
             cx.notify();
         }
     }
@@ -310,6 +431,9 @@ impl EditorView {
                             .rounded_full()
                             .border_1()
                             .border_color(rgb(0x15212d))
+                            .when(self.tool == Tool::Mosaic, |d| {
+                                d.child(tool_icon(Tool::Mosaic).size(px(14.)))
+                            })
                             .when(self.tool == Tool::Eraser, |d| {
                                 d.child(tool_icon(Tool::Eraser).size(px(14.)))
                             }),
@@ -346,7 +470,7 @@ impl EditorView {
             return;
         }
         self.rendering = true;
-        let generation = self.generation;
+        let source = self.doc.original.clone();
         let mut doc = self.doc.clone();
         if let Some(i) = self.text_index.filter(|i| *i < doc.objects.len()) {
             doc.objects.remove(i);
@@ -359,7 +483,7 @@ impl EditorView {
             let result = render.await;
             let _ = this.update(cx, |v, cx| {
                 v.rendering = false;
-                if v.generation == generation {
+                if Arc::ptr_eq(&v.doc.original, &source) {
                     match result {
                         Ok((doc, image)) => {
                             v.doc.font = doc.font;
@@ -381,6 +505,7 @@ impl EditorView {
     }
     fn export(&mut self, action: u8, cx: &mut Context<Self>) {
         self.commit_text(cx);
+        self.finish_path(cx);
         let doc = self.doc.clone();
         let transform = self.transform;
         let host = self.host;
@@ -483,6 +608,7 @@ impl EditorView {
                 match result {
                     Ok(ocr) => {
                         v.message = format!("{} 行文字 · 拖动选择后复制", ocr.lines.len());
+                        v.ocr_pending = Some(ocr.text());
                         v.ocr = Some(ocr);
                         v.ocr_start = None;
                         v.ocr_end = None;
@@ -555,6 +681,7 @@ impl EditorView {
                         return;
                     }
                 }
+                self.sync_size(w, cx);
                 if self.selected.is_some() {
                     self.doc.checkpoint();
                     self.last = Some(p);
@@ -571,6 +698,25 @@ impl EditorView {
                     .hit(p)
                     .filter(|i| self.doc.objects[*i].tool == Tool::Text);
                 self.begin_text(p, index, w, cx);
+            }
+            Tool::Mosaic | Tool::Blur => {
+                self.paint_filter(p, true, cx);
+            }
+            Tool::Polyline => {
+                if e.click_count == 2 {
+                    self.finish_path(cx);
+                } else if let Some(draft) = &mut self.draft {
+                    draft.points.push(p);
+                } else {
+                    self.draft = Some(Annotation {
+                        tool: self.tool,
+                        points: vec![p, p],
+                        color: self.color,
+                        width: self.width,
+                        text: String::new(),
+                        arrow_style: self.arrow_style,
+                    });
+                }
             }
             Tool::Number => {
                 let number = self.next_number;
@@ -622,12 +768,30 @@ impl EditorView {
             cx.notify();
             return;
         }
+        if let Some(draft) = &mut self.draft
+            && draft.tool == Tool::Polyline
+        {
+            if let Some(last) = draft.points.last_mut() {
+                *last = p;
+            }
+            cx.notify();
+            return;
+        }
+        if e.dragging() && matches!(self.tool, Tool::Mosaic | Tool::Blur) {
+            if self
+                .last
+                .is_none_or(|last| (p.x - last.x).hypot(p.y - last.y) >= (self.width * 1.5).max(2.))
+            {
+                self.paint_filter(p, false, cx);
+            }
+            return;
+        }
         if !e.dragging() {
             self.last = None;
             return;
         }
         if let Some(draft) = &mut self.draft {
-            if matches!(draft.tool, Tool::Pen | Tool::Highlight) {
+            if matches!(draft.tool, Tool::Pen | Tool::Highlight | Tool::Curve) {
                 draft.points.push(p);
             } else {
                 draft.points[1] = p;
@@ -643,13 +807,7 @@ impl EditorView {
         }
     }
     fn toolbar_width(&self) -> f32 {
-        if self.ocr.is_some() {
-            520.
-        } else if matches!(self.host, EditorHost::Capture) {
-            416.
-        } else {
-            437.
-        }
+        if self.ocr.is_some() { 520. } else { 840. }
     }
     fn toolbar_height(&self) -> f32 {
         34. + if self.tool != Tool::Select || self.selected.is_some() || self.ocr.is_some() {
@@ -677,22 +835,78 @@ impl EditorView {
             ("高斯模糊", Tool::Blur),
             ("橡皮擦", Tool::Eraser),
         ];
-        let mut strip = div().h_flex().gap(px(1.)).justify_end().flex_wrap();
+        let mut strip = div()
+            .id("annotation-tools-strip")
+            .h_flex()
+            .gap(px(1.))
+            .justify_end()
+            .flex_nowrap()
+            .overflow_x_scroll();
+        if let Some((display, rect)) = self.capture_context.clone() {
+            strip = strip.child(
+                Button::new("capture-mode")
+                    .xsmall()
+                    .label("截图 ▾")
+                    .dropdown_menu(move |menu, _, _| {
+                        let long_display = display.clone();
+                        let gif_display = display.clone();
+                        menu.item(PopupMenuItem::new("长截图 [L]").on_click(move |_, _, cx| {
+                            app::send(
+                                cx,
+                                Event::Selection(
+                                    long_display.clone(),
+                                    rect,
+                                    crate::overlay::CaptureMode::Long,
+                                ),
+                            )
+                        }))
+                        .item(
+                            PopupMenuItem::new("录制 GIF [G]").on_click(move |_, _, cx| {
+                                app::send(
+                                    cx,
+                                    Event::Selection(
+                                        gif_display.clone(),
+                                        rect,
+                                        crate::overlay::CaptureMode::Gif,
+                                    ),
+                                )
+                            }),
+                        )
+                    }),
+            );
+        }
         for (i, (label, tool)) in tools.into_iter().enumerate() {
             strip = strip.child(
                 Button::new(("tool", i))
                     .xsmall()
                     .ghost()
                     .icon(tool_icon(tool))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .child(["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "B", "E"][i]),
+                    )
                     .when(tool == Tool::Number, |b| {
                         b.label(self.next_number.to_string())
                     })
                     .accessibility_label(label)
-                    .tooltip(label)
-                    .selected(self.tool == tool && self.ocr.is_none())
-                    .on_click(cx.listener(move |v, _, _, cx| {
+                    .tooltip(format!(
+                        "{} [{}]",
+                        label,
+                        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "B", "E"][i]
+                    ))
+                    .selected(
+                        (self.tool == tool
+                            || tool == Tool::Rectangle && self.tool.is_shape()
+                            || tool == Tool::Line && self.tool.is_line())
+                            && self.ocr.is_none(),
+                    )
+                    .on_click(cx.listener(move |v, _, w, cx| {
                         v.commit_text(cx);
+                        v.finish_path(cx);
                         v.tool = tool;
+                        v.width = v.width.max(0.5);
+                        v.sync_size(w, cx);
                         v.selected = None;
                         v.clear_ocr();
                         v.message.clear();
@@ -724,7 +938,20 @@ impl EditorView {
                     .ghost()
                     .icon(action_icon(name))
                     .accessibility_label(label)
-                    .tooltip(label)
+                    .tooltip(format!(
+                        "{} · {}",
+                        label,
+                        match name {
+                            "undo" => "Ctrl/Cmd+Z",
+                            "redo" => "Ctrl/Cmd+Shift+Z",
+                            "save" => "Ctrl/Cmd+S",
+                            "copy" => "Ctrl/Cmd+C",
+                            "close" => "Esc",
+                            "done" => "Space",
+                            "ocr" => "O",
+                            _ => "P",
+                        }
+                    ))
                     .on_click(cx.listener(move |v, _, _, cx| {
                         match name {
                             "undo" => {
@@ -810,7 +1037,12 @@ impl EditorView {
                                 .xsmall()
                                 .label("复制选中")
                                 .on_click(cx.listener(|v, _, _, cx| {
-                                    v.copy_text(false, false);
+                                    let text = v.ocr_input.read(cx).selected_text().to_string();
+                                    if !text.is_empty() {
+                                        let _ = snip_platform::write_text(text);
+                                    } else {
+                                        v.copy_text(false, false);
+                                    }
                                     cx.notify();
                                 })),
                         )
@@ -833,7 +1065,15 @@ impl EditorView {
                         .child(div().flex_1().child(Input::new(&self.text).xsmall()))
                         .child(Button::new("correct").xsmall().label("修正行").on_click(
                             cx.listener(|v, _, _, cx| {
-                                if let (Some(ocr), Some((index, _))) = (&mut v.ocr, v.ocr_start)
+                                let offset = v.ocr_input.read(cx).selected_range().start;
+                                let value = v.ocr_input.read(cx).value().to_string();
+                                let index = value
+                                    .get(..offset)
+                                    .unwrap_or("")
+                                    .bytes()
+                                    .filter(|b| *b == b'\n')
+                                    .count();
+                                if let Some(ocr) = &mut v.ocr
                                     && let Some(line) = ocr.lines.get_mut(index)
                                 {
                                     let text = v.text.read(cx).value().to_string();
@@ -846,6 +1086,7 @@ impl EditorView {
                                         }];
                                         v.ocr_start = Some((index, 0));
                                         v.ocr_end = Some((index, 0));
+                                        v.ocr_pending = Some(ocr.text());
                                     }
                                 }
                                 cx.notify();
@@ -853,7 +1094,14 @@ impl EditorView {
                         )),
                 );
         } else if has_options {
-            let mut options = div().h_flex().gap_1().items_center().justify_end();
+            let mut options = div()
+                .id("annotation-options")
+                .h_flex()
+                .gap_1()
+                .items_center()
+                .justify_end()
+                .flex_nowrap()
+                .overflow_x_scroll();
             if self.tool == Tool::Number {
                 options = options
                     .child(
@@ -921,26 +1169,70 @@ impl EditorView {
                         })),
                 );
             }
-            for width in [2u32, 4, 8] {
-                options = options.child(
-                    Button::new(("width", width))
+            options = options
+                .child(
+                    Button::new("size-minus")
                         .xsmall()
-                        .ghost()
-                        .label(format!("{width}"))
-                        .tooltip(format!("线宽 {width} 像素"))
-                        .selected(self.width == width as f32)
-                        .on_click(cx.listener(move |v, _, _, cx| {
-                            v.width = width as f32;
-                            if let Some(i) = v.selected.filter(|i| *i < v.doc.objects.len()) {
-                                v.doc.checkpoint();
-                                v.doc.objects[i].width = width as f32;
-                                v.refresh(cx);
-                            }
-                            cx.notify();
+                        .label("−")
+                        .on_click(cx.listener(|v, _, w, cx| {
+                            v.set_size(v.display_size() - 1., cx);
+                            v.sync_size(w, cx);
                         })),
-                );
+                )
+                .child(
+                    div().w(px(64.)).child(
+                        Input::new(&self.size_input)
+                            .xsmall()
+                            .aria_label("字体大小 / 线宽像素"),
+                    ),
+                )
+                .child(
+                    Button::new("size-plus")
+                        .xsmall()
+                        .label("+")
+                        .on_click(cx.listener(|v, _, w, cx| {
+                            v.set_size(v.display_size() + 1., cx);
+                            v.sync_size(w, cx);
+                        })),
+                )
+                .on_scroll_wheel(cx.listener(|v, e: &ScrollWheelEvent, w, cx| {
+                    v.set_size(
+                        v.display_size() + f32::from(e.delta.pixel_delta(px(20.)).y).signum(),
+                        cx,
+                    );
+                    v.sync_size(w, cx);
+                    cx.stop_propagation();
+                }));
+            if self.tool.is_shape() || self.tool.is_line() {
+                let variants = if self.tool.is_shape() {
+                    vec![
+                        ("矩形", Tool::Rectangle),
+                        ("圆角", Tool::RoundedRectangle),
+                        ("椭圆", Tool::Ellipse),
+                        ("菱形", Tool::Diamond),
+                        ("三角", Tool::Triangle),
+                    ]
+                } else {
+                    vec![
+                        ("直线", Tool::Line),
+                        ("折线", Tool::Polyline),
+                        ("曲线", Tool::Curve),
+                    ]
+                };
+                for (i, (label, tool)) in variants.into_iter().enumerate() {
+                    options = options.child(
+                        Button::new(("variant", i))
+                            .xsmall()
+                            .label(label)
+                            .selected(self.tool == tool)
+                            .on_click(cx.listener(move |v, _, _, cx| {
+                                v.finish_path(cx);
+                                v.tool = tool;
+                                cx.notify();
+                            })),
+                    );
+                }
             }
-
             panel = panel.child(options);
             if self.option_tool() == Tool::Arrow {
                 let mut styles = div().h_flex().gap_1().justify_end();
@@ -983,6 +1275,9 @@ impl EditorView {
 }
 impl Render for EditorView {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(text) = self.ocr_pending.take() {
+            self.ocr_input.update(cx, |v, cx| v.set_value(text, w, cx));
+        }
         let weak = cx.entity().downgrade();
         let scale = self.scale;
         let transform = self.transform;
@@ -1015,7 +1310,7 @@ impl Render for EditorView {
                     bounds.origin + point(px(p.x * scale), px(p.y * scale))
                 };
                 if let Some(a) = &draft {
-                    let mut points = a.points.clone();
+                    let mut points = a.path_points();
                     let r = a.bounds();
                     if a.tool == Tool::Rectangle {
                         points = vec![
@@ -1167,6 +1462,9 @@ impl Render for EditorView {
                 cx.listener(|v, _, _, cx| {
                     v.ocr_drag = false;
                     v.last = None;
+                    if v.draft.as_ref().is_some_and(|a| a.tool == Tool::Polyline) {
+                        return;
+                    }
                     if let Some(a) = v.draft.take() {
                         v.doc.add(a);
                         v.refresh(cx);
@@ -1192,6 +1490,8 @@ impl Render for EditorView {
                     .left(px(p.x * self.scale))
                     .top(px(p.y * self.scale))
                     .w(px((content_width + font).max(48.)))
+                    .text_size(px(font))
+                    .line_height(px(font * 1.3))
                     .border_1()
                     .border_color(rgb(0x1688ff))
                     .bg(transparent_black())
@@ -1205,6 +1505,7 @@ impl Render for EditorView {
                             .p_0()
                             .text_size(px(font))
                             .h(px(font * 1.3))
+                            .line_height(px(font * 1.3))
                             .text_color(rgba(
                                 ((self.color[0] as u32) << 24)
                                     | ((self.color[1] as u32) << 16)
@@ -1213,9 +1514,30 @@ impl Render for EditorView {
                             )),
                     )
             }))
+            .children(self.ocr.as_ref().map(|_| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .p_2()
+                    .bg(rgba(0xfffffff0))
+                    .cursor_text()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Textarea::new(&self.ocr_input)
+                            .readonly(true)
+                            .appearance(false)
+                            .bordered(false)
+                            .size_full()
+                            .aria_label("OCR 文字，可直接选择复制"),
+                    )
+            }))
             .children(toolbar)
-            .on_scroll_wheel(cx.listener(|v, e: &ScrollWheelEvent, _, cx| {
+            .on_scroll_wheel(cx.listener(|v, e: &ScrollWheelEvent, w, cx| {
+                if v.ocr.is_some() {
+                    return;
+                }
                 v.resize_selected(f32::from(e.delta.pixel_delta(px(20.)).y), cx);
+                v.sync_size(w, cx);
                 cx.stop_propagation();
             }))
             .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
@@ -1230,12 +1552,58 @@ impl Render for EditorView {
                     return;
                 }
 
+                if !v.focus.is_focused(w) {
+                    return;
+                }
                 let modifier = if cfg!(target_os = "macos") {
                     e.keystroke.modifiers.platform
                 } else {
                     e.keystroke.modifiers.control
                 };
                 match e.keystroke.key.as_str() {
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "0" | "b" | "e"
+                        if !modifier =>
+                    {
+                        let tool = match e.keystroke.key.as_str() {
+                            "1" => Tool::Select,
+                            "2" => Tool::Rectangle,
+                            "3" => Tool::Ellipse,
+                            "4" => Tool::Line,
+                            "5" => Tool::Arrow,
+                            "6" => Tool::Pen,
+                            "7" => Tool::Highlight,
+                            "8" => Tool::Text,
+                            "9" => Tool::Number,
+                            "0" => Tool::Mosaic,
+                            "b" => Tool::Blur,
+                            _ => Tool::Eraser,
+                        };
+                        v.finish_path(cx);
+                        v.tool = tool;
+                        v.selected = None;
+                        v.clear_ocr();
+                        v.width = v.width.max(0.5);
+                        v.sync_size(w, cx);
+                        cx.notify();
+                    }
+                    "o" if !modifier => v.recognize(cx),
+                    "p" if !modifier => v.export(2, cx),
+                    "enter" if v.tool == Tool::Polyline => v.finish_path(cx),
+                    "l" | "g" if v.capture_context.is_some() => {
+                        let (display, rect) = v.capture_context.clone().unwrap();
+                        app::send(
+                            cx,
+                            Event::Selection(
+                                display,
+                                rect,
+                                if e.keystroke.key == "l" {
+                                    crate::overlay::CaptureMode::Long
+                                } else {
+                                    crate::overlay::CaptureMode::Gif
+                                },
+                            ),
+                        );
+                    }
                     "escape" => v.cancel(cx),
                     "space" if matches!(v.host, EditorHost::Pin(_)) => v.export(3, cx),
                     "z" if modifier => {
@@ -1274,9 +1642,11 @@ fn svg_icon(path: &str) -> Icon {
 fn tool_icon(tool: Tool) -> Icon {
     svg_icon(match tool {
         Tool::Select => "<path d='m5 3 14 9-7 1-4 7z'/>",
-        Tool::Rectangle => "<rect x='4' y='5' width='16' height='14' rx='1'/>",
+        Tool::Rectangle | Tool::RoundedRectangle | Tool::Diamond | Tool::Triangle => {
+            "<rect x='4' y='5' width='16' height='14' rx='1'/>"
+        }
         Tool::Ellipse => "<ellipse cx='12' cy='12' rx='8' ry='7'/>",
-        Tool::Line => "<path d='m4 20 16-16'/>",
+        Tool::Line | Tool::Polyline | Tool::Curve => "<path d='m4 20 16-16'/>",
         Tool::Arrow => "<path d='M5 19 19 5M8 5h11v11'/>",
         Tool::Pen => "<path d='m4 19 3-7L17 2l5 5-10 10zM4 19l8-2M14 5l5 5'/>",
         Tool::Highlight => "<path d='m8 15 8-11 5 4-9 10zM8 15l-4 6 8-3M3 22h17'/>",
@@ -1592,6 +1962,93 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn filter_paints_on_down_and_whole_gesture_undoes_once(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.tool = super::Tool::Mosaic;
+                        let event = gpui_kit::MouseDownEvent {
+                            button: gpui_kit::MouseButton::Left,
+                            position: point(px(480.), px(680.)),
+                            modifiers: Default::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        };
+                        v.down(&event, w, cx);
+                        assert_eq!(v.doc.objects.len(), 1, "paint before releasing mouse");
+                        v.paint_filter(ImagePoint::new(130., 100.), false, cx);
+                        assert_eq!(v.doc.objects.len(), 2);
+                        v.doc.undo();
+                        assert!(v.doc.objects.is_empty(), "one undo per brush gesture");
+                    })
+                })
+                .unwrap()
+        });
+    }
+
+    #[gpui_kit::test]
+    fn numeric_size_changes_selected_font_and_wheel_by_one_pixel(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.tool = super::Tool::Text;
+                        v.begin_text(ImagePoint::new(100., 80.), None, w, cx);
+                        v.text.update(cx, |i, cx| i.set_value("字", w, cx));
+                        v.commit_text(cx);
+                        v.set_size(25., cx);
+                        assert!((v.doc.objects[0].width * 6. + 12. - 25.).abs() < 0.001);
+                        v.resize_selected(1., cx);
+                        assert!((v.display_size() - 26.).abs() < 0.001);
+                        v.set_size(f32::NAN, cx);
+                        assert!((v.display_size() - 26.).abs() < 0.001);
+                        v.sync_size(w, cx);
+                        assert_eq!(v.size_input.read(cx).value().as_str(), "26.0");
+                    })
+                })
+                .unwrap()
+        });
+    }
+
+    #[gpui_kit::test]
+    fn polyline_finishes_with_enter_without_losing_last_segment(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.tool = super::Tool::Polyline;
+                        v.draft = Some(super::Annotation {
+                            tool: v.tool,
+                            points: vec![
+                                ImagePoint::new(10., 10.),
+                                ImagePoint::new(50., 50.),
+                                ImagePoint::new(80., 10.),
+                                ImagePoint::new(80., 10.),
+                            ],
+                            color: v.color,
+                            width: v.width,
+                            text: String::new(),
+                            arrow_style: v.arrow_style,
+                        });
+                        v.focus.focus(w, cx);
+                    })
+                })
+                .unwrap()
+        });
+        cx.simulate_keystrokes(window, "enter");
+        cx.update(|cx| {
+            let v = editor.read(cx);
+            assert!(v.draft.is_none());
+            assert_eq!(v.doc.objects[0].points.len(), 3);
+            assert_eq!(v.doc.objects[0].points[2], ImagePoint::new(80., 10.));
+        });
+    }
+
+    #[gpui_kit::test]
     fn number_tool_uses_adjusted_next_value_and_advances(cx: &mut TestAppContext) {
         let (window, editor) = editor(cx);
         cx.update(|cx| {
@@ -1775,6 +2232,52 @@ mod tests {
         });
     }
     #[gpui_kit::test]
+    fn ocr_text_supports_character_and_cross_line_selection_copy(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, _| {
+                        v.ocr = Some(super::OcrResult::default());
+                        v.ocr_pending = Some("Hello world\n第二行".into());
+                    });
+                    let _ = w.draw(cx);
+                    w.simulate_next_frame(cx);
+                    let _ = w.draw(cx);
+                    editor.update(cx, |v, cx| {
+                        v.ocr_input.update(cx, |i, cx| {
+                            i.focus(w, cx);
+                            i.set_selected_range(1..4, cx);
+                            assert_eq!(i.selected_text().to_string(), "ell");
+                            i.set_selected_range(6..21, cx);
+                            assert_eq!(i.selected_text().to_string(), "world\n第二行");
+                        })
+                    });
+                })
+                .unwrap()
+        });
+        let copy = if cfg!(target_os = "macos") {
+            "cmd-c"
+        } else {
+            "ctrl-c"
+        };
+        cx.simulate_keystrokes(window, copy);
+        cx.update(|cx| {
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|c| c.text()),
+                Some("world\n第二行".into())
+            )
+        });
+        cx.simulate_input(window, "must not replace OCR");
+        cx.update(|cx| {
+            assert_eq!(
+                editor.read(cx).ocr_input.read(cx).value().to_string(),
+                "Hello world\n第二行"
+            )
+        });
+    }
+
+    #[gpui_kit::test]
     fn new_inline_text_field_receives_keyboard_input_after_mount(cx: &mut TestAppContext) {
         let (window, editor) = editor(cx);
         cx.update(|cx| {
@@ -1782,6 +2285,7 @@ mod tests {
                 .update(cx, |_, w, cx| {
                     editor.update(cx, |v, cx| {
                         v.tool = super::Tool::Text;
+                        v.width = 8.;
                         v.begin_text(ImagePoint::new(100., 80.), None, w, cx);
                     });
                 })
@@ -1797,6 +2301,15 @@ mod tests {
                 .unwrap();
         });
         cx.run_until_parked();
+        cx.update(|cx| {
+            let v = editor.read(cx);
+            let expected = (v.width * 6. + 12.) * v.scale * 1.3;
+            assert!(
+                (f32::from(v.text.read(cx).line_height().unwrap()) - expected).abs() < 0.1,
+                "caret line height {:?} must follow scaled image font {expected}",
+                v.text.read(cx).line_height()
+            );
+        });
         cx.simulate_input(window, "hello");
         cx.update(|cx| {
             assert_eq!(editor.read(cx).text.read(cx).value().as_str(), "hello");

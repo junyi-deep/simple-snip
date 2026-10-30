@@ -1,7 +1,12 @@
 //! Live capture controls attached to the selected desktop region.
 use crate::app::{self, Event, Runtime};
 use gpui_kit::{
-    component::{button::*, *},
+    component::{
+        button::*,
+        input::{Input, InputEvent, InputState},
+        menu::*,
+        *,
+    },
     prelude::*,
     *,
 };
@@ -70,31 +75,61 @@ pub fn open(
                 app::send(cx, Event::CloseTask(w.window_handle()));
                 false
             });
-            cx.new(|_| TaskToolbar {
-                display,
-                rect,
-                gif,
-                handle: w.window_handle(),
-                control: Default::default(),
-                recording: false,
-                message: if gif {
-                    "准备就绪；开始后控制栏保持可用"
+            cx.new(|cx| {
+                let focus = cx.focus_handle();
+                focus.focus(w, cx);
+                let rate = if gif {
+                    cx.global::<Runtime>().config.gif.fps
                 } else {
-                    "自动检测左右 / 上下滚动；请小幅、缓慢滚动"
+                    450
+                };
+                let rate_input =
+                    cx.new(|cx| InputState::new(w, cx).default_value(rate.to_string()));
+                let rate_subscription =
+                    cx.subscribe(&rate_input, |v: &mut TaskToolbar, _, _: &InputEvent, cx| {
+                        if let Ok(rate) = v.rate_input.read(cx).value().parse::<u32>() {
+                            let rate = rate
+                                .clamp(if v.gif { 1 } else { 100 }, if v.gif { 30 } else { 5000 });
+                            if rate != v.rate && !v.recording {
+                                v.rate = rate;
+                                cx.notify();
+                            }
+                        }
+                    });
+                TaskToolbar {
+                    rate_input,
+                    _rate_subscription: rate_subscription,
+                    focus,
+                    rate: if gif {
+                        cx.global::<Runtime>().config.gif.fps
+                    } else {
+                        450
+                    },
+                    display,
+                    rect,
+                    gif,
+                    handle: w.window_handle(),
+                    control: Default::default(),
+                    recording: false,
+                    message: if gif {
+                        "准备就绪；开始后控制栏保持可用"
+                    } else {
+                        "自动检测左右 / 上下滚动；请小幅、缓慢滚动"
+                    }
+                    .into(),
+                    path: None,
+                    stitch: None,
+                    summary: None,
+                    finish_requested: false,
+                    busy: false,
+                    auto: false,
+                    watch: false,
+                    generation: 0,
+                    empty_frames: 0,
+                    cancel: Default::default(),
+                    excluded: 0,
+                    capture_allowed: true,
                 }
-                .into(),
-                path: None,
-                stitch: None,
-                summary: None,
-                finish_requested: false,
-                busy: false,
-                auto: false,
-                watch: false,
-                generation: 0,
-                empty_frames: 0,
-                cancel: Default::default(),
-                excluded: 0,
-                capture_allowed: true,
             })
         },
     )?;
@@ -132,7 +167,7 @@ pub fn open(
 }
 
 fn toolbar_placement(selected: Rect, screen: Rect, gif: bool) -> Rect {
-    let width = if gif { 440. } else { 520. };
+    let width = if gif { 660. } else { 740. };
     place_toolbar(
         selected,
         screen,
@@ -151,6 +186,10 @@ struct TaskToolbar {
     gif: bool,
     handle: AnyWindowHandle,
     control: RecordingControl,
+    focus: FocusHandle,
+    rate: u32,
+    rate_input: Entity<InputState>,
+    _rate_subscription: Subscription,
     recording: bool,
     message: String,
     path: Option<PathBuf>,
@@ -207,6 +246,10 @@ impl TaskToolbar {
         self.generation += 1;
         app::send(cx, Event::CloseTask(self.handle));
     }
+    fn sync_rate(&self, w: &mut Window, cx: &mut Context<Self>) {
+        self.rate_input
+            .update(cx, |v, cx| v.set_value(self.rate.to_string(), w, cx));
+    }
     fn start_recording(&mut self, cx: &mut Context<Self>) {
         if self.recording || !self.capture_allowed {
             return;
@@ -232,7 +275,8 @@ impl TaskToolbar {
         self.path = None;
         app::set_trails_visible(cx, false);
         app::refresh_tray(cx);
-        let config = cx.global::<Runtime>().config.clone();
+        let mut config = cx.global::<Runtime>().config.clone();
+        config.gif.fps = self.rate;
         let (display, rect, excluded) = (self.display.id, self.rect, self.excluded);
         let control = self.control.clone();
         let timer = control.clone();
@@ -452,7 +496,8 @@ impl TaskToolbar {
                 if !active {
                     break;
                 }
-                smol::Timer::after(Duration::from_millis(if automatic { 900 } else { 450 })).await;
+                let interval = this.read_with(cx, |v, _| v.rate).unwrap_or(450);
+                smol::Timer::after(Duration::from_millis(interval as u64)).await;
                 if automatic {
                     let target = this
                         .update(cx, |v, _| {
@@ -523,13 +568,96 @@ impl Render for TaskToolbar {
             "长截图 · 等待采集".into()
         };
         let mut controls = div().h_flex().gap_1().flex_wrap();
+        let display = self.display.clone();
+        let rect = self.rect;
+        let handle = self.handle;
+        controls = controls.child(
+            Button::new("session-mode")
+                .small()
+                .label(if self.gif { "GIF ▾" } else { "长截图 ▾" })
+                .disabled(self.recording)
+                .dropdown_menu(move |menu, _, _| {
+                    let other = display.clone();
+                    let gif_display = display.clone();
+                    menu.item(PopupMenuItem::new("长截图 [L]").on_click(move |_, _, cx| {
+                        app::send(cx, Event::CloseTask(handle));
+                        app::send(
+                            cx,
+                            Event::Selection(
+                                other.clone(),
+                                rect,
+                                crate::overlay::CaptureMode::Long,
+                            ),
+                        );
+                    }))
+                    .item(
+                        PopupMenuItem::new("录制 GIF [G]").on_click(move |_, _, cx| {
+                            app::send(cx, Event::CloseTask(handle));
+                            app::send(
+                                cx,
+                                Event::Selection(
+                                    gif_display.clone(),
+                                    rect,
+                                    crate::overlay::CaptureMode::Gif,
+                                ),
+                            );
+                        }),
+                    )
+                    .item(PopupMenuItem::new("重新截图 F1").on_click(move |_, _, cx| {
+                        app::send(cx, Event::CloseTask(handle));
+                        app::command(cx, app::Command::Capture);
+                    }))
+                }),
+        );
+        controls = controls
+            .child(
+                Button::new("rate-minus")
+                    .small()
+                    .label("−")
+                    .disabled(self.recording)
+                    .on_click(cx.listener(|v, _, w, cx| {
+                        v.rate = v
+                            .rate
+                            .saturating_sub(if v.gif { 1 } else { 100 })
+                            .max(if v.gif { 1 } else { 100 });
+                        v.sync_rate(w, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div().w(px(72.)).child(
+                    Input::new(&self.rate_input)
+                        .small()
+                        .readonly(self.recording)
+                        .aria_label(if self.gif {
+                            "录制帧率 FPS"
+                        } else {
+                            "采集间隔毫秒"
+                        }),
+                ),
+            )
+            .child(
+                Button::new("rate-plus")
+                    .small()
+                    .label("+")
+                    .disabled(self.recording)
+                    .on_click(cx.listener(|v, _, w, cx| {
+                        v.rate = (v.rate + if v.gif { 1 } else { 100 }).min(if v.gif {
+                            30
+                        } else {
+                            5000
+                        });
+                        v.sync_rate(w, cx);
+                        cx.notify();
+                    })),
+            );
         if self.gif {
             controls = controls
                 .child(
                     Button::new("record-start")
                         .small()
                         .primary()
-                        .label("开始")
+                        .label("开始 [1]")
                         .disabled(self.recording || !self.capture_allowed)
                         .on_click(cx.listener(|v, _, _, cx| v.start_recording(cx))),
                 )
@@ -537,9 +665,9 @@ impl Render for TaskToolbar {
                     Button::new("record-pause")
                         .small()
                         .label(if self.control.paused.load(Ordering::Relaxed) {
-                            "继续"
+                            "继续 [2]"
                         } else {
-                            "暂停"
+                            "暂停 [2]"
                         })
                         .disabled(!self.recording)
                         .on_click(cx.listener(|v, _, _, cx| {
@@ -551,7 +679,7 @@ impl Render for TaskToolbar {
                 .child(
                     Button::new("record-stop")
                         .small()
-                        .label("停止并保存")
+                        .label("停止并保存 [3]")
                         .disabled(!self.recording)
                         .on_click(cx.listener(|v, _, _, cx| {
                             v.control.finish();
@@ -575,9 +703,9 @@ impl Render for TaskToolbar {
                         .small()
                         .primary()
                         .label(if self.watch {
-                            "暂停检测"
+                            "暂停检测 [1]"
                         } else {
-                            "继续检测"
+                            "继续检测 [1]"
                         })
                         .disabled(!self.capture_allowed)
                         .on_click(cx.listener(|v, _, _, cx| v.monitor(false, cx))),
@@ -586,9 +714,9 @@ impl Render for TaskToolbar {
                     Button::new("scroll-auto")
                         .small()
                         .label(if self.auto {
-                            "停止自动滚动"
+                            "停止自动滚动 [2]"
                         } else {
-                            "自动向下滚动"
+                            "自动向下滚动 [2]"
                         })
                         .disabled(!self.capture_allowed)
                         .on_click(cx.listener(|v, _, _, cx| v.monitor(true, cx))),
@@ -596,7 +724,7 @@ impl Render for TaskToolbar {
                 .child(
                     Button::new("scroll-sample")
                         .small()
-                        .label("采一帧")
+                        .label("采一帧 [3]")
                         .disabled(self.busy || !self.capture_allowed)
                         .on_click(cx.listener(|v, _, _, cx| v.sample(cx))),
                 )
@@ -606,7 +734,7 @@ impl Render for TaskToolbar {
                         .label(if self.finish_requested {
                             "完成中…"
                         } else {
-                            "完成 / 编辑"
+                            "完成 / 编辑 [4]"
                         })
                         .disabled(self.summary.is_none() || self.finish_requested)
                         .on_click(cx.listener(|v, _, _, cx| {
@@ -618,13 +746,49 @@ impl Render for TaskToolbar {
             Button::new("capture-task-close")
                 .small()
                 .label(if self.recording {
-                    "取消录制"
+                    "取消录制 Esc"
                 } else {
-                    "关闭"
+                    "关闭 Esc"
                 })
                 .on_click(cx.listener(|v, _, _, cx| v.close(cx))),
         );
         div()
+            .id("capture-controls")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
+                if v.rate_input.read(cx).focus_handle(cx).is_focused(w) {
+                    return;
+                }
+                match e.keystroke.key.as_str() {
+                    "l" | "g" if !v.recording => {
+                        app::send(cx, Event::CloseTask(v.handle));
+                        app::send(
+                            cx,
+                            Event::Selection(
+                                v.display.clone(),
+                                v.rect,
+                                if e.keystroke.key == "l" {
+                                    crate::overlay::CaptureMode::Long
+                                } else {
+                                    crate::overlay::CaptureMode::Gif
+                                },
+                            ),
+                        );
+                    }
+                    "escape" => v.close(cx),
+                    "1" if v.gif => v.start_recording(cx),
+                    "2" if v.gif && v.recording => {
+                        v.control.pause(!v.control.paused.load(Ordering::Relaxed))
+                    }
+                    "3" if v.gif && v.recording => v.control.finish(),
+                    "1" if !v.gif => v.monitor(false, cx),
+                    "2" if !v.gif => v.monitor(true, cx),
+                    "3" if !v.gif => v.sample(cx),
+                    "4" if !v.gif => v.finish_long_capture(cx),
+                    _ => {}
+                }
+                cx.notify();
+            }))
             .size_full()
             .min_w_0()
             .v_flex()

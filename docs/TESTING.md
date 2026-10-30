@@ -236,3 +236,16 @@ cargo test -p snip-platform --test native native_region_retina_odd_pixel_bounds 
 人工补充：创建贴图并关闭设置，从托盘重新打开，确认设置位于贴图前方；切到其他应用按真实 F1 / 必要时 Fn+F1，检查日志 global hotkey received 和 Overlay。配置不同颜色 / 粗细 / 阴影保存，现有贴图立即变化，复制内容不含外框。截图绘制后拖动角和边改变宽高，确认标注保持位置、撤销正常，工具条末尾紧靠图片右边。
 
 0.0.2 最终发布确认：GitHub Actions 40251248659 的 macOS ARM64、Windows AMD64 和 Release job 全部成功。远程日志实际为 macOS 9 GUI/键映射 + 27 core + 4 updater = 40；Windows 8 GUI + 27 core + 4 updater = 39，均 0 失败；3 项依赖桌面的 native 测试仍 ignored。三份制品的 GitHub digest 与 SHA256SUMS 一致。实际下载 Windows ZIP 并校验哈希，读取 PE 确认为 AMD64 / GUI subsystem；依赖 VCRUNTIME140.dll，运行库要求已补充到文档和发布说明。更新模块实际读取最新 v0.0.2、下载 DMG 并通过 SHA256。最终本地 `.app` 严格签名检查、Info.plist、DMG 校验及原生 smoke 均通过。桌面仍锁屏，未将 F1/Fn 真实输入和最终目视操作标记通过。
+
+
+## 0.0.7 Issue #1 回归（2026-10-30）
+
+Windows 本机实际执行 fmt / workspace check / Clippy（-D warnings）/ workspace test / Debug build。62 项常规自动测试通过：22 GUI / 像素转换、30 core、4 Windows、6 updater。新增覆盖形状和曲线导出、折线 Enter 收尾、按下即涂抹及整笔撤销、字体像素调整、实际光标行高、OCR 字符 / 跨行选择及 Ctrl+C / 只读保护、更新归档的单引号路径和多程序拒绝。安装准备阶段断言原可执行文件不变。
+
+另外显式运行 3 项默认 ignored 的原生测试，全部通过。首次 OCR 实测识别为 `Offline 2026 测 试 文 字`，发现 Windows 引擎字间空格问题；修复后输出 `Offline 2026 测试文字` 并通过原有断言，没有放宽测试。新单测确认拉丁单词和双空格 / 制表符保持不变。
+
+原生 `--smoke-test` 输出 SMOKE PASS，验证三次实际截图 / 取消和拖尾可见、贴图物理边界和无系统按钮、设置窗口非置顶、复用句柄 / 释放文档和采集工具栏生命周期。Debug 探测：首轮 Overlay 根节点创建 259ms，复用 0–1ms；截图 / 取消含采集、纹理准备、100ms 展示等待等总用时 817 / 603 / 666ms，不视为 Release 基准。普通应用启动还验证了滚轮监听和热键注册无初始化错误；没有据此声称范围外滚轮已完成物理交互验收。
+
+Windows UI 自动化因无法确认浏览器 URL 而停止。自动审批阻止了在临时目录执行安装替换 / 回滚的端到端测试；只完成格式检查、下载 / 哈希、归档准备及不提前覆盖原程序的测试。未执行用户实际安装目录的升级。多屏、真实拖动与动态拖尾、完整编辑组合和自动升级后重启仍需后续实机复查。
+
+复现操作：F1 框选，首个模式下拉或 L / G 切换；检查区域边框和右下控制栏，输入 FPS / 毫秒，数字键操作且编辑数值时不误触动作。贴图选中后将鼠标移出，滚轮缩放、Ctrl+滚轮透明度；点击其他应用后应释放全局滚轮。形状子选项、折线点击节点 / Enter、实时马赛克 / 一次撤销、数值框 / 加减 / 滚轮、OCR 字符选择 / Ctrl+C、系统另存为和目录记忆都应在解锁桌面进一步交互复查。旧版先手动安装 0.0.7，此后检查到新版本才能使用升级并重启。

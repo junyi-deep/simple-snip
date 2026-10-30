@@ -129,6 +129,9 @@ impl Overlay {
                 cx,
             )
         }));
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |v, _| v.set_capture_context(self.display.clone(), r));
+        }
         cx.notify();
     }
     fn apply_resized_selection(&mut self, w: &mut Window, cx: &mut Context<Self>) {
@@ -156,6 +159,7 @@ impl Overlay {
                 size(px(r.width * sx), px(r.height * sy)),
             );
             editor.update(cx, |v, cx| {
+                v.set_capture_context(self.display.clone(), r);
                 v.reframe_capture(
                     image,
                     old_x as f32 - x as f32,

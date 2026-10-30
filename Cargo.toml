@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "simple-snip"
-version = "0.0.6"
+version = "0.0.7"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"

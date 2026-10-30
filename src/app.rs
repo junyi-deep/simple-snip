@@ -246,8 +246,34 @@ pub fn start(cx: &mut App, smoke_test: bool) {
         annotation_toolbar: None,
         capture_task: None,
     });
+    #[cfg(target_os = "windows")]
+    if !smoke_test {
+        let (sender, wheel) = async_channel::bounded(64);
+        match snip_platform::watch_pin_wheel(move |id, delta, opacity| {
+            sender.try_send((id, delta, opacity)).is_ok()
+        }) {
+            Ok(()) => {
+                cx.spawn(async move |cx| {
+                    while let Ok((id, delta, opacity)) = wheel.recv().await {
+                        cx.update(|cx| {
+                            if let Some(record) = cx.global::<Runtime>().pins.get(&id) {
+                                let (handle, view) = (record.handle, record.view.clone());
+                                let _ = handle.update(cx, |_, w, cx| {
+                                    view.update(cx, |v, cx| v.wheel(delta, opacity, w, cx))
+                                });
+                            }
+                        });
+                    }
+                })
+                .detach();
+            }
+            Err(error) => status(cx, format!("全局滚轮不可用：{error}")),
+        }
+    }
     cx.set_activation_policy(ActivationPolicy::Accessory);
     cx.on_app_quit(|cx| {
+        #[cfg(target_os = "windows")]
+        snip_platform::stop_pin_wheel();
         let controls = cx.global::<Runtime>().recordings.clone();
         for control in &controls {
             control.cancel();
@@ -740,39 +766,69 @@ pub fn open_editor(image: Arc<image::RgbaImage>, cx: &mut App) {
     }
 }
 pub fn save_image(image: Arc<image::RgbaImage>, cx: &App) {
+    let directory = cx.global::<Runtime>().config.save_directory.clone();
+    let name = format!(
+        "Snip_{}.{}",
+        chrono::Local::now().format("%Y%m%d_%H%M%S"),
+        cx.global::<Runtime>().config.format
+    );
+    let picker = cx.prompt_for_new_path(&directory, Some(&name));
+    cx.spawn(async move |cx| match picker.await {
+        Ok(Ok(Some(path))) => cx.update(|cx| {
+            let extension = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !matches!(extension.as_str(), "png" | "jpg" | "jpeg") {
+                status(cx, "请选择 .png 或 .jpg 文件名");
+                return;
+            }
+            if let Some(parent) = path.parent() {
+                cx.global_mut::<Runtime>().config.save_directory = parent.to_path_buf();
+                if let Err(error) = cx.global::<Runtime>().config.save(&Config::path()) {
+                    status(cx, format!("保存位置记忆失败：{error}"));
+                }
+            }
+            write_image_to(image, path, cx);
+        }),
+        Ok(Ok(None)) => {}
+        _ => cx.update(|cx| status(cx, "无法打开保存对话框")),
+    })
+    .detach();
+}
+fn write_image_to(image: Arc<image::RgbaImage>, path: PathBuf, cx: &App) {
     let config = cx.global::<Runtime>().config.clone();
     let tx = cx.global::<Runtime>().tx.clone();
     std::thread::spawn(move || {
-        let result = (|| -> anyhow::Result<PathBuf> {
-            std::fs::create_dir_all(&config.save_directory)?;
-            let path = config.save_directory.join(format!(
-                "Snip_{}.{}",
-                chrono::Local::now().format("%Y%m%d_%H%M%S_%3f"),
-                config.format
-            ));
-            let mut data = std::io::Cursor::new(Vec::new());
-            if config.format == "jpg" {
-                image::DynamicImage::ImageRgba8((*image).clone())
-                    .to_rgb8()
-                    .write_to(&mut data, image::ImageFormat::Jpeg)?;
-            } else {
-                image.write_to(&mut data, image::ImageFormat::Png)?;
-            }
-            snip_core::config::atomic_write(&path, data.get_ref())?;
-            let history_path = snip_core::history::History::path();
-            let mut history = snip_core::history::History::load(&history_path);
-            history.record(
-                snip_core::history::Entry {
-                    path: path.clone(),
-                    created: chrono::Local::now().to_rfc3339(),
-                },
-                config.history_limit,
-            );
-            if let Err(e) = history.save(&history_path) {
-                tracing::warn!("历史索引保存失败: {e}");
-            }
-            Ok(path)
-        })();
+        let result =
+            (|| -> anyhow::Result<PathBuf> {
+                std::fs::create_dir_all(&config.save_directory)?;
+                let mut data = std::io::Cursor::new(Vec::new());
+                if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                    e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg")
+                }) {
+                    image::DynamicImage::ImageRgba8((*image).clone())
+                        .to_rgb8()
+                        .write_to(&mut data, image::ImageFormat::Jpeg)?;
+                } else {
+                    image.write_to(&mut data, image::ImageFormat::Png)?;
+                }
+                snip_core::config::atomic_write(&path, data.get_ref())?;
+                let history_path = snip_core::history::History::path();
+                let mut history = snip_core::history::History::load(&history_path);
+                history.record(
+                    snip_core::history::Entry {
+                        path: path.clone(),
+                        created: chrono::Local::now().to_rfc3339(),
+                    },
+                    config.history_limit,
+                );
+                if let Err(e) = history.save(&history_path) {
+                    tracing::warn!("历史索引保存失败: {e}");
+                }
+                Ok(path)
+            })();
         let _ = tx.send_blocking(Event::Saved(result));
     });
 }

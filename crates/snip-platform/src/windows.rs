@@ -234,21 +234,43 @@ pub fn configure_borderless(handle: RawWindowHandle, bounds: Rect, scale: f32) -
     Ok(())
 }
 
-pub fn start_window_drag(handle: RawWindowHandle) -> Result<()> {
-    let hwnd = hwnd(handle)?;
+pub struct WindowDrag {
+    origin: POINT,
+    cursor: POINT,
+}
+pub fn begin_window_drag(handle: RawWindowHandle) -> Result<WindowDrag> {
+    let mut rect = RECT::default();
+    let mut cursor = POINT::default();
     unsafe {
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-        let mut p = POINT::default();
-        GetCursorPos(&mut p)?;
-        let coordinates = ((p.y as u32 & 0xffff) << 16) | (p.x as u32 & 0xffff);
-        PostMessageW(
-            Some(hwnd),
-            WM_NCLBUTTONDOWN,
-            windows::Win32::Foundation::WPARAM(HTCAPTION as usize),
-            LPARAM(coordinates as isize),
+        GetWindowRect(hwnd(handle)?, &mut rect)?;
+        GetCursorPos(&mut cursor)?;
+    }
+    Ok(WindowDrag {
+        origin: POINT {
+            x: rect.left,
+            y: rect.top,
+        },
+        cursor,
+    })
+}
+pub fn step_window_drag(handle: RawWindowHandle, drag: &WindowDrag) -> Result<bool> {
+    unsafe {
+        if windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(1) >= 0 {
+            return Ok(false);
+        }
+        let mut cursor = POINT::default();
+        GetCursorPos(&mut cursor)?;
+        SetWindowPos(
+            hwnd(handle)?,
+            None,
+            drag.origin.x + cursor.x - drag.cursor.x,
+            drag.origin.y + cursor.y - drag.cursor.y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         )?;
     }
-    Ok(())
+    Ok(true)
 }
 
 pub fn resize_borderless(
@@ -333,6 +355,24 @@ impl Drop for Apartment {
     }
 }
 pub struct NativeOcr;
+// Windows OCR inserts a separator between Han characters. Keep Latin word
+// boundaries and intentional runs of whitespace, but restore normal Han text.
+fn ocr_line_text(text: &str) -> String {
+    let han = |c: char| matches!(c as u32, 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0x20000..=0x323af);
+    let chars: Vec<_> = text.chars().collect();
+    chars
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &c)| {
+            if c == ' ' && i > 0 && i + 1 < chars.len() && han(chars[i - 1]) && han(chars[i + 1]) {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .collect()
+}
+
 impl OcrEngine for NativeOcr {
     fn recognize(&self, image: &RgbaImage, cancel: &Cancellation) -> Result<OcrResult> {
         ensure!(!cancel.cancelled(), "识别已取消");
@@ -385,7 +425,7 @@ impl OcrEngine for NativeOcr {
                 });
             }
             lines.push(OcrLine {
-                text: line.Text()?.to_string(),
+                text: ocr_line_text(&line.Text()?.to_string()),
                 bounds: bounds.unwrap_or_default(),
                 words,
                 confidence: None,
@@ -491,6 +531,19 @@ mod tests {
     }
 
     #[test]
+    fn windows_ocr_joins_han_without_removing_latin_or_intentional_spaces() {
+        assert_eq!(
+            super::ocr_line_text("Offline 2026 测 试 文 字"),
+            "Offline 2026 测试文字"
+        );
+        assert_eq!(
+            super::ocr_line_text("hello world 中 文 text"),
+            "hello world 中文 text"
+        );
+        assert_eq!(super::ocr_line_text("测  试\n测\t试"), "测  试\n测\t试");
+    }
+
+    #[test]
     fn settings_use_normal_non_topmost_app_window_style() {
         let window = TestWindow::new();
         native_style(
@@ -549,6 +602,90 @@ mod tests {
             )
             .unwrap();
             assert_eq!(outside, Point::new(-60. / scale, -30. / scale));
+        }
+    }
+}
+
+static WHEEL_TARGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WHEEL_THREAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+type WheelCallback = Box<dyn Fn(u64, f32, bool) -> bool>;
+thread_local! { static WHEEL_SENDER: std::cell::RefCell<Option<WheelCallback>> = const { std::cell::RefCell::new(None) }; }
+pub fn pin_wheel_target(id: u64, active: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if active {
+        WHEEL_TARGET.store(id, Relaxed);
+    } else {
+        let _ = WHEEL_TARGET.compare_exchange(id, 0, Relaxed, Relaxed);
+    }
+}
+pub fn watch_pin_wheel(sender: impl Fn(u64, f32, bool) -> bool + Send + 'static) -> Result<()> {
+    let (ready, status) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || unsafe {
+        unsafe extern "system" fn hook(
+            code: i32,
+            w: windows::Win32::Foundation::WPARAM,
+            l: LPARAM,
+        ) -> windows::Win32::Foundation::LRESULT {
+            unsafe {
+                let id = WHEEL_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+                if code >= 0 && w.0 == WM_MOUSEWHEEL as usize && id != 0 {
+                    let data = &*(l.0 as *const MSLLHOOKSTRUCT);
+                    let delta = (data.mouseData >> 16) as u16 as i16 as f32;
+                    let ctrl =
+                        windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) < 0;
+                    if WHEEL_SENDER
+                        .with(|s| s.borrow().as_ref().is_some_and(|s| s(id, delta, ctrl)))
+                    {
+                        return windows::Win32::Foundation::LRESULT(1);
+                    }
+                }
+                CallNextHookEx(None, code, w, l)
+            }
+        }
+        WHEEL_SENDER.with(|s| *s.borrow_mut() = Some(Box::new(sender)));
+        match SetWindowsHookExW(
+            WH_MOUSE_LL,
+            Some(hook),
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                .ok()
+                .map(Into::into),
+            0,
+        ) {
+            Ok(handle) => {
+                WHEEL_THREAD.store(
+                    windows::Win32::System::Threading::GetCurrentThreadId(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                let mut msg = MSG::default();
+                let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+                let _ = ready.send(Ok(()));
+                while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                let _ = UnhookWindowsHookEx(handle);
+            }
+            Err(e) => {
+                let _ = ready.send(Err(e.to_string()));
+            }
+        }
+    });
+    status
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .context("鼠标滚轮监听初始化超时")?
+        .map_err(anyhow::Error::msg)
+}
+pub fn stop_pin_wheel() {
+    WHEEL_TARGET.store(0, std::sync::atomic::Ordering::Relaxed);
+    let id = WHEEL_THREAD.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if id != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(
+                id,
+                WM_QUIT,
+                windows::Win32::Foundation::WPARAM(0),
+                LPARAM(0),
+            );
         }
     }
 }

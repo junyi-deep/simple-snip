@@ -136,6 +136,11 @@ impl PinView {
                 };
                 cx.new(|cx| {
                     cx.observe_window_activation(window, |v: &mut Self, w, cx| {
+                        #[cfg(target_os = "windows")]
+                        snip_platform::pin_wheel_target(
+                            v.id,
+                            w.is_window_active() && v.editor.is_none() && !v.click_through,
+                        );
                         if w.is_window_active() && v.editor.is_none() {
                             v.focus.focus(w, cx);
                         }
@@ -243,6 +248,11 @@ impl PinView {
         cx.notify();
     }
     pub fn style(&self, w: &Window) {
+        #[cfg(target_os = "windows")]
+        snip_platform::pin_wheel_target(
+            self.id,
+            w.is_window_active() && self.editor.is_none() && !self.click_through,
+        );
         app::apply_style(
             w,
             snip_platform::WindowStyle {
@@ -251,6 +261,28 @@ impl PinView {
                 ..Default::default()
             },
         );
+    }
+    pub fn wheel(&mut self, delta: f32, opacity: bool, w: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.is_some() || self.click_through || delta == 0. {
+            return;
+        }
+        if opacity {
+            self.opacity = (self.opacity + delta.signum() * 0.05).clamp(0.1, 1.);
+            self.style(w);
+        } else {
+            self.scale = (self.scale * (1. + delta.signum() * 0.05)).clamp(0.05, 6.);
+            app::resize_pin(
+                w,
+                size(
+                    px(self.shown.width() as f32 * self.scale
+                        + cx.global::<Runtime>().config.pin.margin() * 2.),
+                    px(self.shown.height() as f32 * self.scale
+                        + cx.global::<Runtime>().config.pin.margin() * 2.),
+                ),
+                cx,
+            );
+        }
+        cx.notify();
     }
     fn transform(&self) -> ImageTransform {
         ImageTransform {
@@ -269,6 +301,8 @@ impl PinView {
         let image = self.shown.clone();
         let id = self.id;
         let margin = cx.global::<Runtime>().config.pin.margin();
+        #[cfg(target_os = "windows")]
+        snip_platform::pin_wheel_target(self.id, false);
         self.editor = Some(cx.new(|cx| {
             EditorView::new(
                 doc,
@@ -434,8 +468,10 @@ impl Render for PinView {
                 MouseButton::Left,
                 cx.listener(|v, _: &MouseDownEvent, w, cx| {
                     tracing::debug!(pin = v.id, "pin received mouse down");
-                    cx.activate(true);
-                    w.activate_window();
+                    if !w.is_window_active() {
+                        cx.activate(true);
+                        w.activate_window();
+                    }
                     v.focus.focus(w, cx);
                     cx.notify();
                     if app::raw(w).is_ok() {
@@ -444,9 +480,29 @@ impl Render for PinView {
                         #[cfg(target_os = "windows")]
                         {
                             let handle = w.window_handle();
-                            cx.spawn(async move |_, cx| {
-                                if let Ok(Ok(raw)) = handle.update(cx, |_, w, _| app::raw(w)) {
-                                    let _ = snip_platform::start_window_drag(raw);
+                            cx.spawn(async move |this, cx| {
+                                if let Ok(Ok(raw)) = handle.update(cx, |_, w, _| app::raw(w))
+                                    && let Ok(drag) = snip_platform::begin_window_drag(raw)
+                                {
+                                    loop {
+                                        if this.update(cx, |_, _| ()).is_err() {
+                                            break;
+                                        }
+                                        let valid = handle
+                                            .update(cx, |_, w, _| app::raw(w))
+                                            .ok()
+                                            .and_then(Result::ok);
+                                        let Some(raw) = valid else {
+                                            break;
+                                        };
+                                        if !snip_platform::step_window_drag(raw, &drag)
+                                            .unwrap_or(false)
+                                        {
+                                            break;
+                                        }
+                                        smol::Timer::after(std::time::Duration::from_millis(8))
+                                            .await;
+                                    }
                                 }
                             })
                             .detach();
@@ -457,8 +513,10 @@ impl Render for PinView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|v, _, w, cx| {
-                    cx.activate(true);
-                    w.activate_window();
+                    if !w.is_window_active() {
+                        cx.activate(true);
+                        w.activate_window();
+                    }
                     v.focus.focus(w, cx);
                     cx.notify();
                 }),
@@ -469,22 +527,7 @@ impl Render for PinView {
             }))
             .on_scroll_wheel(cx.listener(|v, e: &ScrollWheelEvent, w, cx| {
                 let delta = f32::from(e.delta.pixel_delta(px(20.)).y);
-                if e.modifiers.control || e.modifiers.platform {
-                    v.opacity = (v.opacity + delta.signum() * 0.05).clamp(0.1, 1.);
-                    v.style(w);
-                } else {
-                    v.scale = (v.scale * (1. + delta.signum() * 0.05)).clamp(0.05, 6.);
-                    app::resize_pin(
-                        w,
-                        size(
-                            px(v.shown.width() as f32 * v.scale
-                                + cx.global::<Runtime>().config.pin.margin() * 2.),
-                            px(v.shown.height() as f32 * v.scale
-                                + cx.global::<Runtime>().config.pin.margin() * 2.),
-                        ),
-                        cx,
-                    );
-                }
+                v.wheel(delta, e.modifiers.control || e.modifiers.platform, w, cx);
                 cx.notify();
             }))
             .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
@@ -551,6 +594,13 @@ impl Render for PinView {
                 }))
             })
             .into_any_element()
+    }
+}
+
+impl Drop for PinView {
+    fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
+        snip_platform::pin_wheel_target(self.id, false);
     }
 }
 

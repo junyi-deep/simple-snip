@@ -8,8 +8,13 @@ use tiny_skia::{Paint, PathBuilder, Pixmap, Stroke, Transform};
 pub enum Tool {
     Select,
     Rectangle,
+    RoundedRectangle,
+    Diamond,
+    Triangle,
     Ellipse,
     Line,
+    Polyline,
+    Curve,
     Arrow,
     Pen,
     Highlight,
@@ -37,7 +42,81 @@ pub struct Annotation {
     #[serde(default)]
     pub arrow_style: ArrowStyle,
 }
+impl Tool {
+    pub fn is_shape(self) -> bool {
+        matches!(
+            self,
+            Self::Rectangle
+                | Self::RoundedRectangle
+                | Self::Ellipse
+                | Self::Diamond
+                | Self::Triangle
+        )
+    }
+    pub fn is_line(self) -> bool {
+        matches!(self, Self::Line | Self::Polyline | Self::Curve)
+    }
+}
 impl Annotation {
+    pub fn path_points(&self) -> Vec<Point> {
+        let r = self.bounds();
+        match self.tool {
+            Tool::Diamond => vec![
+                Point::new(r.x + r.width / 2., r.y),
+                Point::new(r.right(), r.y + r.height / 2.),
+                Point::new(r.x + r.width / 2., r.bottom()),
+                Point::new(r.x, r.y + r.height / 2.),
+                Point::new(r.x + r.width / 2., r.y),
+            ],
+            Tool::Triangle => vec![
+                Point::new(r.x + r.width / 2., r.y),
+                Point::new(r.right(), r.bottom()),
+                Point::new(r.x, r.bottom()),
+                Point::new(r.x + r.width / 2., r.y),
+            ],
+            Tool::RoundedRectangle => {
+                let radius = r.width.min(r.height) * 0.2;
+                let mut points = vec![];
+                for (x, y, angle) in [
+                    (r.right() - radius, r.y + radius, -90.),
+                    (r.right() - radius, r.bottom() - radius, 0.),
+                    (r.x + radius, r.bottom() - radius, 90.),
+                    (r.x + radius, r.y + radius, 180.),
+                ] {
+                    for i in 0..=8 {
+                        let t = (angle + i as f32 * 90. / 8.).to_radians();
+                        points.push(Point::new(x + radius * t.cos(), y + radius * t.sin()));
+                    }
+                }
+                if let Some(p) = points.first().copied() {
+                    points.push(p);
+                }
+                points
+            }
+            Tool::Curve if self.points.len() > 2 => {
+                let mut points = vec![];
+                for i in 0..self.points.len() - 1 {
+                    let a = self.points[i.saturating_sub(1)];
+                    let b = self.points[i];
+                    let c = self.points[i + 1];
+                    let d = self.points[(i + 2).min(self.points.len() - 1)];
+                    for k in 0..8 {
+                        let t = k as f32 / 8.;
+                        let f = |a: f32, b: f32, c: f32, d: f32| {
+                            0.5 * ((2. * b)
+                                + (-a + c) * t
+                                + (2. * a - 5. * b + 4. * c - d) * t * t
+                                + (-a + 3. * b - 3. * c + d) * t * t * t)
+                        };
+                        points.push(Point::new(f(a.x, b.x, c.x, d.x), f(a.y, b.y, c.y, d.y)));
+                    }
+                }
+                points.push(*self.points.last().unwrap());
+                points
+            }
+            _ => self.points.clone(),
+        }
+    }
     pub fn number_radius(&self) -> f32 {
         let font = self.width * 6. + 12.;
         (font * 0.7).max(self.text.chars().count() as f32 * font * 0.32 + 4.)
@@ -277,8 +356,9 @@ impl Document {
                     }
                 }
                 _ => {
-                    pb.move_to(a.points[0].x, a.points[0].y);
-                    for p in a.points.iter().skip(1) {
+                    let points = a.path_points();
+                    pb.move_to(points[0].x, points[0].y);
+                    for p in points.iter().skip(1) {
                         pb.line_to(p.x, p.y);
                     }
                 }
@@ -323,6 +403,47 @@ impl Document {
 #[cfg(test)]
 mod reframe_tests {
     use super::*;
+    #[test]
+    fn new_shapes_and_curves_export_visible_paths_without_mutating_source() {
+        for tool in [
+            Tool::RoundedRectangle,
+            Tool::Diamond,
+            Tool::Triangle,
+            Tool::Polyline,
+            Tool::Curve,
+        ] {
+            let mut doc = Document::new(Arc::new(RgbaImage::new(100, 100)));
+            let points = vec![
+                Point::new(10., 20.),
+                Point::new(70., 30.),
+                Point::new(50., 80.),
+            ];
+            let a = Annotation {
+                tool,
+                points: points.clone(),
+                color: [220, 20, 30, 255],
+                width: 3.,
+                text: String::new(),
+                arrow_style: ArrowStyle::default(),
+            };
+            let path = a.path_points();
+            assert!(path.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
+            if tool.is_shape() {
+                assert_eq!(path.first(), path.last());
+            }
+            if tool == Tool::Curve {
+                assert!(path.len() > points.len());
+                assert_eq!(path.first(), points.first());
+                assert_eq!(path.last(), points.last());
+            }
+            doc.add(a);
+            assert!(doc.flatten().pixels().any(|p| p[3] != 0), "{tool:?}");
+            assert!(doc.original.pixels().all(|p| p[3] == 0));
+            doc.undo();
+            assert!(doc.objects.is_empty());
+        }
+    }
+
     #[test]
     fn crop_rebase_preserves_desktop_marks_and_undo_coordinates() {
         let mut doc = Document::new(Arc::new(RgbaImage::new(100, 100)));

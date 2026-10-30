@@ -30,7 +30,6 @@ pub struct Settings {
     update_busy: bool,
     update_status: String,
     update_release: Option<snip_update::Release>,
-    update_file: Option<std::path::PathBuf>,
     optional: Vec<(String, Entity<InputState>)>,
 }
 impl Settings {
@@ -116,9 +115,20 @@ impl Settings {
                     proxy_username,
                     proxy_password,
                     update_busy: false,
-                    update_status: "手动检查 GitHub Release；截图和识别内容不会发送。".into(),
+                    update_status: match std::fs::read_to_string(
+                        Config::path()
+                            .with_file_name("updates")
+                            .join("last-install.txt"),
+                    )
+                    .as_deref()
+                    {
+                        Ok("ok") => "上次升级安装完成；可检查新版本。".into(),
+                        Ok("failed") => {
+                            "上次升级失败，已尝试恢复原版本；请检查安装目录中的升级日志。".into()
+                        }
+                        _ => "手动检查 GitHub Release；截图和识别内容不会发送。".into(),
+                    },
                     update_release: None,
-                    update_file: None,
                     optional,
                 })
             },
@@ -213,7 +223,6 @@ impl Settings {
         let password = self.proxy_password.read(cx).value().to_string();
         self.update_busy = true;
         self.update_release = None;
-        self.update_file = None;
         self.update_status = "正在检查 GitHub 发布版本…".into();
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
@@ -224,8 +233,7 @@ impl Settings {
                 v.update_busy = false;
                 match result {
                     Ok(Some(release)) => {
-                        v.update_status =
-                            format!("发现 {}，可下载当前平台更新包。", release.tag_name);
+                        v.update_status = format!("发现 {}，可一键升级并重启。", release.tag_name);
                         v.update_release = Some(release);
                     }
                     Ok(None) => v.update_status = "当前已是最新版本（或尚无公开稳定版本）。".into(),
@@ -249,27 +257,57 @@ impl Settings {
         let directory = Config::path().with_file_name("updates");
         enum DownloadEvent {
             Progress(u64, u64),
-            Done(anyhow::Result<std::path::PathBuf>),
+            Done(anyhow::Result<()>),
         }
         let (tx, rx) = async_channel::bounded(8);
         self.update_busy = true;
         self.update_status = "正在下载并校验更新包…".into();
+        let app_tx = cx.global::<Runtime>().tx.clone();
         std::thread::spawn(move || {
             let result =
                 snip_update::download(&release, &config, &password, &directory, |done, total| {
                     let _ = tx.try_send(DownloadEvent::Progress(done, total));
-                });
+                })
+                .and_then(|path| snip_update::prepare_install(&path))
+                .and_then(snip_update::launch_install);
+            if result.is_ok() {
+                let _ = app_tx.send_blocking(app::Event::Command(Command::Quit));
+            }
             let _ = tx.send_blocking(DownloadEvent::Done(result));
         });
-        cx.spawn(async move |this,cx| {
-            while let Ok(event)=rx.recv().await {
-                let finished=matches!(event,DownloadEvent::Done(_));
-                if this.update(cx,|v,cx| {match event {
-                    DownloadEvent::Progress(done,total)=>v.update_status=format!("正在下载：{}%（完成后校验 SHA256）",done*100/total.max(1)),
-                    DownloadEvent::Done(result)=>{v.update_busy=false;match result {Ok(path)=>{v.update_file=Some(path);v.update_status="下载与 SHA256 校验完成。打开更新包后，退出当前应用并替换安装；macOS 未签名包可能需要重新授权录屏。".into();},Err(e)=>v.update_status=format!("下载失败：{e}")}}
-                }cx.notify();}).is_err() || finished {break;}
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv().await {
+                let finished = matches!(event, DownloadEvent::Done(_));
+                if this
+                    .update(cx, |v, cx| {
+                        match event {
+                            DownloadEvent::Progress(done, total) => {
+                                v.update_status = format!(
+                                    "正在下载：{}%（完成后校验 SHA256）",
+                                    done * 100 / total.max(1)
+                                )
+                            }
+                            DownloadEvent::Done(result) => {
+                                v.update_busy = false;
+                                match result {
+                                    Ok(()) => {
+                                        v.update_status =
+                                            "升级助手已就绪，正在退出并安装新版本…".into();
+                                    }
+                                    Err(e) => v.update_status = format!("升级失败：{e}"),
+                                }
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                    || finished
+                {
+                    break;
+                }
             }
-        }).detach();
+        })
+        .detach();
         cx.notify();
     }
 }
@@ -649,20 +687,12 @@ impl Render for Settings {
                             .when(self.update_release.is_some(), |d| {
                                 d.child(
                                     Button::new("download-update")
-                                        .label("下载更新包")
+                                        .label("升级并重启")
+                                        .tooltip(
+                                            "自动下载、校验并替换；重启会结束当前采集，请先保存",
+                                        )
                                         .disabled(self.update_busy)
                                         .on_click(cx.listener(|v, _, _, cx| v.download_update(cx))),
-                                )
-                            })
-                            .when(self.update_file.is_some(), |d| {
-                                d.child(
-                                    Button::new("open-update")
-                                        .label("在文件夹中显示更新包")
-                                        .on_click(cx.listener(|v, _, _, cx| {
-                                            if let Some(path) = &v.update_file {
-                                                cx.reveal_path(path);
-                                            }
-                                        })),
                                 )
                             }),
                     )
