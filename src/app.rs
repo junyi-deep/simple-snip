@@ -398,6 +398,13 @@ fn menu(cx: &mut App) -> Vec<MenuItem> {
         MenuItem::action("退出 Simple Snip", Quit),
     ]
 }
+pub(crate) fn current_capture_editor(cx: &App) -> Option<Entity<crate::editor::EditorView>> {
+    if cx.global::<Runtime>().overlays.is_empty() {
+        return None;
+    }
+    cx.try_global::<crate::editor::ActiveCaptureEditor>()
+        .and_then(|e| e.0.upgrade())
+}
 fn handle(event: Event, cx: &mut App) {
     match event {
         Event::Command(cmd) => match cmd {
@@ -405,6 +412,12 @@ fn handle(event: Event, cx: &mut App) {
             Command::LongCapture => start_capture(CaptureMode::Long, cx),
             Command::Gif => start_capture(CaptureMode::Gif, cx),
             Command::Paste | Command::Ocr => {
+                if matches!(cmd, Command::Paste)
+                    && let Some(editor) = current_capture_editor(cx)
+                {
+                    editor.update(cx, |v, cx| v.export(2, cx));
+                    return;
+                }
                 let tx = cx.global::<Runtime>().tx.clone();
                 std::thread::spawn(move || match NativeClipboard.read_image() {
                     Ok(image) => {

@@ -25,6 +25,10 @@ pub struct EditorPreferences {
     pub shape: Tool,
     pub line: Tool,
     pub next_number: u32,
+    pub toast_enabled: bool,
+    pub toast_delay_ms: u32,
+    #[serde(default)]
+    pub arrow_style_version: u32,
     pub styles: BTreeMap<Tool, ToolStyle>,
 }
 impl Default for EditorPreferences {
@@ -34,6 +38,9 @@ impl Default for EditorPreferences {
             shape: Tool::Rectangle,
             line: Tool::Line,
             next_number: 1,
+            toast_enabled: true,
+            toast_delay_ms: 2000,
+            arrow_style_version: 1,
             styles: BTreeMap::new(),
         }
     }
@@ -53,6 +60,15 @@ impl EditorPreferences {
         if !prefs.line.is_line() {
             prefs.line = Tool::Line;
         }
+        if prefs.arrow_style_version == 0 {
+            if let Some(style) = prefs.styles.get_mut(&Tool::Arrow)
+                && style.arrow == ArrowStyle::Uniform
+            {
+                style.arrow = ArrowStyle::Swallow;
+            }
+            prefs.arrow_style_version = 1;
+        }
+        prefs.toast_delay_ms = prefs.toast_delay_ms.clamp(500, 10000);
         prefs.next_number = prefs.next_number.max(1);
         prefs.styles.retain(|tool, style| {
             let (min, max) = if matches!(tool, Tool::Text | Tool::Number) {
@@ -81,6 +97,8 @@ mod tests {
             shape: Tool::Diamond,
             line: Tool::Curve,
             next_number: 7,
+            toast_enabled: false,
+            toast_delay_ms: 5000,
             ..Default::default()
         };
         prefs.styles.insert(
@@ -94,6 +112,14 @@ mod tests {
             Tool::Text,
             ToolStyle {
                 width: 8.,
+                ..Default::default()
+            },
+        );
+        prefs.styles.insert(
+            Tool::Arrow,
+            ToolStyle {
+                width: 11.,
+                arrow: ArrowStyle::DiamondHollow,
                 ..Default::default()
             },
         );

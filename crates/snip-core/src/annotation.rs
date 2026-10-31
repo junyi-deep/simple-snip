@@ -26,10 +26,17 @@ pub enum Tool {
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArrowStyle {
-    #[default]
     Uniform,
     HeadWide,
     TailWide,
+    #[default]
+    Swallow,
+    TriangleFilled,
+    TriangleHollow,
+    CircleFilled,
+    CircleHollow,
+    DiamondFilled,
+    DiamondHollow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +149,7 @@ impl Annotation {
             ArrowStyle::Uniform => (0.5, 0.5, 2.),
             ArrowStyle::HeadWide => (0.16, 1.1, 2.4),
             ArrowStyle::TailWide => (2., 0.25, 1.2),
+            _ => (0.5, 0.5, 2.),
         };
         let at = |along: f32, side: f32| {
             Point::new(
@@ -159,6 +167,80 @@ impl Annotation {
             at(0., -tail),
         ]
     }
+    /// Shared shaft/head geometry for preview, export and hit bounds.
+    pub fn arrow_parts(&self) -> (Vec<Point>, Vec<Point>, bool) {
+        if matches!(
+            self.arrow_style,
+            ArrowStyle::Uniform | ArrowStyle::HeadWide | ArrowStyle::TailWide
+        ) {
+            return (self.arrow_outline(), vec![], true);
+        }
+        if self.points.len() < 2 {
+            return (vec![], vec![], true);
+        }
+        let a = self.points[0];
+        let b = *self.points.last().unwrap();
+        let length = (b.x - a.x).hypot(b.y - a.y);
+        if length < 0.01 {
+            return (vec![], vec![], true);
+        }
+        let ux = (b.x - a.x) / length;
+        let uy = (b.y - a.y) / length;
+        let r = (self.width * 2. + 5.).min(length * 0.3);
+        let at = |x: f32, y: f32| Point::new(a.x + ux * x - uy * y, a.y + uy * x + ux * y);
+        let circle = matches!(
+            self.arrow_style,
+            ArrowStyle::CircleFilled | ArrowStyle::CircleHollow
+        );
+        let diamond = matches!(
+            self.arrow_style,
+            ArrowStyle::DiamondFilled | ArrowStyle::DiamondHollow
+        );
+        let swallow = self.arrow_style == ArrowStyle::Swallow;
+        let mut head = if circle {
+            (0..32)
+                .map(|i| {
+                    let t = i as f32 * std::f32::consts::TAU / 32.;
+                    at(length - r + r * t.cos(), r * t.sin())
+                })
+                .collect()
+        } else if diamond {
+            vec![
+                at(length, 0.),
+                at(length - r, r),
+                at(length - 2. * r, 0.),
+                at(length - r, -r),
+            ]
+        } else if swallow {
+            vec![
+                at(length, 0.),
+                at(length - 2. * r, r),
+                at(length - r * 1.3, 0.),
+                at(length - 2. * r, -r),
+            ]
+        } else {
+            vec![
+                at(length, 0.),
+                at(length - 2. * r, r),
+                at(length - 2. * r, -r),
+            ]
+        };
+        head.push(head[0]);
+        let end = length - if swallow { r * 1.3 } else { r * 2. };
+        let half = self.width * 0.5;
+        let shaft = vec![
+            at(0., half),
+            at(end, half),
+            at(end, -half),
+            at(0., -half),
+            at(0., half),
+        ];
+        let filled = !matches!(
+            self.arrow_style,
+            ArrowStyle::TriangleHollow | ArrowStyle::CircleHollow | ArrowStyle::DiamondHollow
+        );
+        (shaft, head, filled)
+    }
     pub fn bounds(&self) -> Rect {
         if self.points.is_empty() {
             return Rect::new(0., 0., 0., 0.);
@@ -173,7 +255,9 @@ impl Annotation {
         let mut right = f32::MIN;
         let mut bottom = f32::MIN;
         let arrow = if self.tool == Tool::Arrow {
-            self.arrow_outline()
+            let (mut shaft, head, _) = self.arrow_parts();
+            shaft.extend(head);
+            shaft
         } else {
             vec![]
         };
@@ -332,13 +416,35 @@ impl Document {
                     pb.push_circle(p.x, p.y, a.number_radius());
                 }
                 Tool::Arrow => {
-                    let points = a.arrow_outline();
-                    if let Some(first) = points.first() {
-                        pb.move_to(first.x, first.y);
-                        for p in points.iter().skip(1) {
-                            pb.line_to(p.x, p.y);
+                    let (shaft, head, filled) = a.arrow_parts();
+                    for (points, fill) in [(shaft, true), (head, filled)] {
+                        let mut path = PathBuilder::new();
+                        if let Some(first) = points.first() {
+                            path.move_to(first.x, first.y);
+                            for p in points.iter().skip(1) {
+                                path.line_to(p.x, p.y);
+                            }
+                            path.close();
+                            if let Some(path) = path.finish() {
+                                if fill {
+                                    layer.fill_path(
+                                        &path,
+                                        &paint,
+                                        tiny_skia::FillRule::Winding,
+                                        Transform::identity(),
+                                        None,
+                                    );
+                                } else {
+                                    layer.stroke_path(
+                                        &path,
+                                        &paint,
+                                        &stroke,
+                                        Transform::identity(),
+                                        None,
+                                    );
+                                }
+                            }
                         }
-                        pb.close();
                     }
                 }
                 Tool::Rectangle => {
@@ -441,6 +547,39 @@ mod reframe_tests {
             assert!(doc.original.pixels().all(|p| p[3] == 0));
             doc.undo();
             assert!(doc.objects.is_empty());
+        }
+    }
+
+    #[test]
+    fn all_arrow_heads_export_and_hollow_heads_preserve_background() {
+        for style in [
+            ArrowStyle::Swallow,
+            ArrowStyle::TriangleFilled,
+            ArrowStyle::TriangleHollow,
+            ArrowStyle::CircleFilled,
+            ArrowStyle::CircleHollow,
+            ArrowStyle::DiamondFilled,
+            ArrowStyle::DiamondHollow,
+        ] {
+            let original = Arc::new(RgbaImage::from_pixel(160, 80, image::Rgba([255; 4])));
+            let mut doc = Document::new(original.clone());
+            let a = Annotation {
+                tool: Tool::Arrow,
+                points: vec![Point::new(10., 40.), Point::new(140., 40.)],
+                color: [240, 0, 0, 255],
+                width: 3.,
+                text: String::new(),
+                arrow_style: style,
+            };
+            let (shaft, head, filled) = a.arrow_parts();
+            assert!(!shaft.is_empty() && !head.is_empty());
+            doc.add(a);
+            let output = doc.flatten();
+            assert!(output.pixels().any(|p| p[1] < 200));
+            if !filled {
+                assert_eq!(output.get_pixel(129, 40).0, [255; 4], "{style:?}");
+            }
+            assert!(original.pixels().all(|p| p.0 == [255; 4]));
         }
     }
 

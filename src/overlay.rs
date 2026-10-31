@@ -130,6 +130,7 @@ impl Overlay {
             )
         }));
         if let Some(editor) = &self.editor {
+            cx.set_global(crate::editor::ActiveCaptureEditor(editor.downgrade()));
             editor.update(cx, |v, _| v.set_capture_context(self.display.clone(), r));
         }
         cx.notify();

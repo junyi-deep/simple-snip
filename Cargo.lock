@@ -6669,7 +6669,7 @@ dependencies = [
 
 [[package]]
 name = "simple-snip"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -6773,7 +6773,7 @@ dependencies = [
 
 [[package]]
 name = "snip-core"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -6789,7 +6789,7 @@ dependencies = [
 
 [[package]]
 name = "snip-platform"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6812,7 +6812,7 @@ dependencies = [
 
 [[package]]
 name = "snip-update"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "reqwest",
