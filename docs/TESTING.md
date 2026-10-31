@@ -286,3 +286,5 @@ Windows 本机 fmt / Clippy（-D warnings）通过，81 项常规测试通过：
 人工复查步骤：截图与贴图编辑分别打开 ColorPicker 的调色板 / HSLA，确认面板完整且工具栏不跳位；箭头样式、颜色、线宽同排。文字输入时检查黑白插入光标，回车或点其他工具后无消失间隙，再次编辑旧文字和中文 IME。设置「基本」修改提示开关与时间，标注工具栏不再出现「提示」。OCR 拖选后在画布和修正输入框焦点下分别 Ctrl/Cmd+C，检查剪贴板文字。贴图编辑中 F3 只关闭工具栏、保留位置和贴图数量。
 
 长截图 / GIF 控制栏聚焦后使用数字键；编辑帧率 / 间隔时数字不触发动作，Enter 回控制栏、Esc 取消。GIF 录制后按 3 只停止并编码到会话临时目录，4 在原选区循环预览 / 关闭预览，5 打开原生另存为；取消保存可继续预览和保存。长帧间隔下关闭预览也应立即释放解码线程。关闭录制控制栏或重新录制会清理未保存结果，已另存为文件保留。完整多屏 / 缩放、物理按键、全部弹层、IME 与原生保存对话框仍需实机交互补充，不用 headless 断言代替。
+
+0.0.11 最终发布确认：[GitHub Actions 41220517991](https://github.com/junyi-deep/simple-snip/actions/runs/41220517991) 的 Windows、macOS 和 Release 任务全部成功，标签对应提交 `682bdac`。实际日志确认 Windows 38 GUI / 交互 + 33 core + 4 platform + 6 updater = 81；macOS 38 GUI / 交互 + 33 core + 1 platform + 5 updater = 77，均 0 失败，3 项桌面 native 测试仍 ignored。实际下载公开 Windows ZIP、macOS ZIP / DMG 和 SHA256SUMS，所有文件尺寸、SHA256 清单与 GitHub asset digest 一致；ZIP CRC、Windows AMD64 / GUI / 8MB 栈保留和 macOS ARM64 / Info.plist 双版本 0.0.11 检查通过。下载程序未执行，本地独立构建的最终 native smoke 再次输出 SMOKE PASS。
