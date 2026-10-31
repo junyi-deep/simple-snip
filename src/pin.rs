@@ -323,6 +323,11 @@ impl PinView {
         self.open_toolbar(w, cx);
         cx.notify();
     }
+    pub fn selected_editor(&self, w: &Window, cx: &App) -> Option<Entity<EditorView>> {
+        self.is_selected(w, cx)
+            .then(|| self.editor.clone())
+            .flatten()
+    }
     pub fn apply_document(&mut self, doc: Document, image: Arc<RgbaImage>, cx: &mut Context<Self>) {
         self.doc = doc;
         self.shown = image;
@@ -773,6 +778,25 @@ mod tests {
             assert!(view.read(cx).editor.is_none());
             assert!(cx.global::<Runtime>().pins.contains_key(&1));
             assert!(view.read(cx).doc.objects.is_empty());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn f3_selects_existing_pin_editor_instead_of_creating_clipboard_pin(cx: &mut TestAppContext) {
+        setup(cx);
+        let (window, view) = pin(cx, 1, true);
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        cx.update(|cx| view.update(cx, |v, cx| v.focus_toolbar(cx)));
+        let editor = cx.update(|cx| view.read(cx).editor.clone().unwrap());
+        cx.update(|cx| {
+            assert_eq!(
+                app::current_pin_editor(cx).unwrap().entity_id(),
+                editor.entity_id()
+            );
+            assert_eq!(cx.global::<Runtime>().pins.len(), 1);
         });
     }
 

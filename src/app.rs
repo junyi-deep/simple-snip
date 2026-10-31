@@ -450,7 +450,7 @@ fn menu(cx: &mut App) -> Vec<MenuItem> {
         MenuItem::action("长截图…", LongCapture),
         MenuItem::action("GIF 录制…", Gif),
         MenuItem::action("暂停 / 继续当前录制", RecordingPause).disabled(!active),
-        MenuItem::action("停止录制并保存", RecordingStop).disabled(!active),
+        MenuItem::action("停止录制", RecordingStop).disabled(!active),
         MenuItem::action("取消当前录制", RecordingCancel).disabled(!active),
         MenuItem::action("剪贴板贴图    F3", Paste),
         MenuItem::action("识别剪贴板图片文字…", Ocr),
@@ -474,6 +474,20 @@ pub(crate) fn current_capture_editor(cx: &App) -> Option<Entity<crate::editor::E
     cx.try_global::<crate::editor::ActiveCaptureEditor>()
         .and_then(|e| e.0.upgrade())
 }
+pub(crate) fn current_pin_editor(cx: &mut App) -> Option<Entity<crate::editor::EditorView>> {
+    let pins: Vec<_> = cx
+        .global::<Runtime>()
+        .pins
+        .values()
+        .map(|p| (p.handle, p.view.clone()))
+        .collect();
+    pins.into_iter().find_map(|(handle, view)| {
+        handle
+            .update(cx, |_, w, cx| view.read(cx).selected_editor(w, cx))
+            .ok()
+            .flatten()
+    })
+}
 fn handle(event: Event, cx: &mut App) {
     match event {
         Event::Command(cmd) => match cmd {
@@ -485,6 +499,12 @@ fn handle(event: Event, cx: &mut App) {
                     && let Some(editor) = current_capture_editor(cx)
                 {
                     editor.update(cx, |v, cx| v.export(2, cx));
+                    return;
+                }
+                if matches!(cmd, Command::Paste)
+                    && let Some(editor) = current_pin_editor(cx)
+                {
+                    editor.update(cx, |v, cx| v.export(3, cx));
                     return;
                 }
                 let tx = cx.global::<Runtime>().tx.clone();

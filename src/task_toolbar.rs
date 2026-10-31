@@ -25,11 +25,19 @@ use std::{
 };
 
 pub fn open(
-    mut display: CapturedDisplay,
+    display: CapturedDisplay,
     rect: Rect,
     gif: bool,
     cx: &mut App,
 ) -> anyhow::Result<AnyWindowHandle> {
+    build(display, rect, gif, cx).map(|(handle, _)| handle)
+}
+fn build(
+    mut display: CapturedDisplay,
+    rect: Rect,
+    gif: bool,
+    cx: &mut App,
+) -> anyhow::Result<(AnyWindowHandle, Entity<TaskToolbar>)> {
     let (bounds, display_id) = app::display_bounds(&display, cx);
     let screen = Rect::new(
         f32::from(bounds.origin.x),
@@ -55,7 +63,7 @@ pub fn open(
             ))),
             titlebar: None,
             kind: WindowKind::PopUp,
-            focus: false,
+            focus: true,
             is_resizable: false,
             is_movable: false,
             is_minimizable: false,
@@ -118,6 +126,8 @@ pub fn open(
                     }
                     .into(),
                     path: None,
+                    temporary: None,
+                    preview: None,
                     stitch: None,
                     summary: None,
                     finish_requested: false,
@@ -163,19 +173,19 @@ pub fn open(
         }
         cx.notify();
     });
-    Ok(handle)
+    Ok((handle, view))
 }
 
 fn toolbar_placement(selected: Rect, screen: Rect, gif: bool) -> Rect {
-    let width = if gif { 660. } else { 740. };
+    let width = if gif { 900. } else { 740. };
     place_toolbar(
         selected,
         screen,
         width,
         if screen.width < width + 16. {
-            128.
+            192.
         } else {
-            96.
+            128.
         },
     )
 }
@@ -193,6 +203,8 @@ struct TaskToolbar {
     recording: bool,
     message: String,
     path: Option<PathBuf>,
+    temporary: Option<Arc<tempfile::TempDir>>,
+    preview: Option<AnyWindowHandle>,
     stitch: Option<Stitcher>,
     summary: Option<(u32, u32, usize)>,
     finish_requested: bool,
@@ -239,12 +251,99 @@ impl TaskToolbar {
         cx.notify();
     }
     fn close(&mut self, cx: &mut Context<Self>) {
+        self.close_preview(cx);
         self.control.cancel();
         self.cancel.cancel();
         self.watch = false;
         self.auto = false;
         self.generation += 1;
         app::send(cx, Event::CloseTask(self.handle));
+    }
+    fn close_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.preview.take() {
+            if cx
+                .try_global::<PreviewWindow>()
+                .is_some_and(|v| v.0 == Some(handle))
+            {
+                cx.global_mut::<PreviewWindow>().0 = None;
+            }
+            let _ = handle.update(cx, |_, w, cx| {
+                crate::window_pool::park(crate::window_pool::Role::Preview, w, cx)
+            });
+            cx.notify();
+        }
+    }
+    fn preview_gif(&mut self, cx: &mut Context<Self>) {
+        if self.preview.is_some() {
+            self.close_preview(cx);
+            return;
+        }
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        match open_preview(path, self.temporary.clone(), &self.display, self.rect, cx) {
+            Ok(handle) => self.preview = Some(handle),
+            Err(error) => self.message = format!("预览失败：{error}"),
+        }
+        cx.notify();
+    }
+    fn save_gif(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.path.clone() else {
+            return;
+        };
+        let temporary = self.temporary.clone();
+        let directory = cx.global::<Runtime>().config.save_directory.clone();
+        let picker = cx.prompt_for_new_path(
+            &directory,
+            Some(&format!(
+                "Snip_{}.gif",
+                chrono::Local::now().format("%Y%m%d_%H%M%S")
+            )),
+        );
+        cx.spawn(async move |this, cx| {
+            let _keep_temporary = temporary;
+            let Ok(Ok(Some(mut path))) = picker.await else {
+                return;
+            };
+            if path.extension().is_none() {
+                path.set_extension("gif");
+            }
+            if !path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("gif"))
+            {
+                let _ = this.update(cx, |v, cx| {
+                    v.message = "请选择 .gif 文件".into();
+                    cx.notify();
+                });
+                return;
+            }
+            let destination = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { save_gif_file(&source, &destination) })
+                .await;
+            if result.is_ok() {
+                cx.update(|cx| {
+                    if let Some(parent) = path.parent() {
+                        cx.global_mut::<Runtime>().config.save_directory = parent.to_path_buf();
+                        let _ = cx
+                            .global::<Runtime>()
+                            .config
+                            .save(&snip_core::config::Config::path());
+                    }
+                });
+            }
+            let _ = this.update(cx, |v, cx| {
+                v.message = match result {
+                    Ok(()) => format!("GIF 已保存：{}", path.display()),
+                    Err(e) => format!("保存失败：{e}"),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
     fn sync_rate(&self, w: &mut Window, cx: &mut Context<Self>) {
         self.rate_input
@@ -264,6 +363,16 @@ impl TaskToolbar {
             cx.notify();
             return;
         }
+        self.close_preview(cx);
+        let temporary = match tempfile::tempdir() {
+            Ok(dir) => Arc::new(dir),
+            Err(e) => {
+                self.message = format!("无法创建录制临时目录：{e}");
+                cx.notify();
+                return;
+            }
+        };
+        self.temporary = Some(temporary.clone());
         self.control = Default::default();
         cx.global_mut::<Runtime>()
             .recordings
@@ -277,6 +386,7 @@ impl TaskToolbar {
         app::refresh_tray(cx);
         let mut config = cx.global::<Runtime>().config.clone();
         config.gif.fps = self.rate;
+        config.save_directory = temporary.path().to_path_buf();
         let (display, rect, excluded) = (self.display.id, self.rect, self.excluded);
         let control = self.control.clone();
         let timer = control.clone();
@@ -290,6 +400,7 @@ impl TaskToolbar {
         })
         .detach();
         cx.spawn(async move |this, cx| {
+            let _keep_temporary = temporary;
             for remaining in (1..=config.gif.countdown).rev() {
                 if control.stop.load(Ordering::Relaxed) {
                     break;
@@ -350,7 +461,7 @@ impl TaskToolbar {
                     v.recording = false;
                     match result {
                         Ok(path) => {
-                            v.message = "GIF 已保存，可预览或再次录制".into();
+                            v.message = "录制已停止，临时文件就绪；可预览或另存为".into();
                             v.path = Some(path);
                         }
                         Err(e) => {
@@ -679,7 +790,7 @@ impl Render for TaskToolbar {
                 .child(
                     Button::new("record-stop")
                         .small()
-                        .label("停止并保存 [3]")
+                        .label("停止 [3]")
                         .disabled(!self.recording)
                         .on_click(cx.listener(|v, _, _, cx| {
                             v.control.finish();
@@ -687,14 +798,24 @@ impl Render for TaskToolbar {
                             cx.notify();
                         })),
                 );
-            if let Some(path) = &self.path {
-                let path = path.clone();
-                controls = controls.child(
-                    Button::new("record-preview")
-                        .small()
-                        .label("预览 GIF")
-                        .on_click(move |_, _, cx| cx.open_with_system(&path)),
-                );
+            if self.path.is_some() {
+                controls = controls
+                    .child(
+                        Button::new("record-preview")
+                            .small()
+                            .label(if self.preview.is_some() {
+                                "关闭预览 [4]"
+                            } else {
+                                "预览 [4]"
+                            })
+                            .on_click(cx.listener(|v, _, _, cx| v.preview_gif(cx))),
+                    )
+                    .child(
+                        Button::new("record-save")
+                            .small()
+                            .label("保存 [5]")
+                            .on_click(cx.listener(|v, _, _, cx| v.save_gif(cx))),
+                    );
             }
         } else {
             controls = controls
@@ -755,8 +876,14 @@ impl Render for TaskToolbar {
         div()
             .id("capture-controls")
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
-                if v.rate_input.read(cx).focus_handle(cx).is_focused(w) {
+            .capture_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
+                if v.rate_input.read(cx).focus_handle(cx).is_focused(w)
+                    && e.keystroke.key != "escape"
+                {
+                    if e.keystroke.key == "enter" {
+                        v.focus.focus(w, cx);
+                        cx.stop_propagation();
+                    }
                     return;
                 }
                 match e.keystroke.key.as_str() {
@@ -781,6 +908,8 @@ impl Render for TaskToolbar {
                         v.control.pause(!v.control.paused.load(Ordering::Relaxed))
                     }
                     "3" if v.gif && v.recording => v.control.finish(),
+                    "4" if v.gif && !v.recording => v.preview_gif(cx),
+                    "5" if v.gif && !v.recording => v.save_gif(cx),
                     "1" if !v.gif => v.monitor(false, cx),
                     "2" if !v.gif => v.monitor(true, cx),
                     "3" if !v.gif => v.sample(cx),
@@ -812,7 +941,15 @@ impl Render for TaskToolbar {
     }
 }
 
+struct PreviewWindow(Option<AnyWindowHandle>);
+impl Global for PreviewWindow {}
 pub fn closed(cx: &mut App) {
+    if let Some(handle) = cx.try_global::<PreviewWindow>().and_then(|v| v.0) {
+        cx.global_mut::<PreviewWindow>().0 = None;
+        let _ = handle.update(cx, |_, w, cx| {
+            crate::window_pool::park(crate::window_pool::Role::Preview, w, cx)
+        });
+    }
     if let Some(frame) = cx.try_global::<CaptureFrame>().and_then(|f| f.0) {
         cx.global_mut::<CaptureFrame>().0 = None;
         let _ = frame.update(cx, |_, w, cx| {
@@ -820,6 +957,188 @@ pub fn closed(cx: &mut App) {
         });
     }
     restore_trails(cx);
+}
+
+fn save_gif_file(source: &std::path::Path, destination: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("保存目录无效"))?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    let mut input = std::fs::File::open(source)?;
+    std::io::copy(&mut input, &mut staged)?;
+    staged.flush()?;
+    staged.as_file().sync_all()?;
+    staged.persist(destination).map_err(|e| e.error)?;
+    Ok(())
+}
+struct GifPreview {
+    texture: Option<Arc<RenderImage>>,
+    message: String,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    receiver: async_channel::Receiver<PreviewFrame>,
+    _temporary: Option<Arc<tempfile::TempDir>>,
+}
+impl Drop for GifPreview {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        // Wake a producer blocked on a full queue even if the current GIF
+        // frame has a long delay and the playback task is still sleeping.
+        self.receiver.close();
+    }
+}
+impl Render for GifPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .bg(rgb(0x202020))
+            .text_color(rgb(0xffffff))
+            .when_some(self.texture.clone(), |d, t| {
+                d.child(img(t).size_full().object_fit(ObjectFit::Fill))
+            })
+            .when(!self.message.is_empty(), |d| d.child(self.message.clone()))
+    }
+}
+type PreviewFrame = Result<(Arc<RenderImage>, Duration), String>;
+fn preview_stream(
+    path: PathBuf,
+    temporary: Option<Arc<tempfile::TempDir>>,
+) -> (
+    async_channel::Receiver<PreviewFrame>,
+    Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = stopped.clone();
+    let (tx, rx) = async_channel::bounded(1);
+    let keep = temporary.clone();
+    let worker = std::thread::spawn(move || {
+        use image::AnimationDecoder;
+        let _keep = keep;
+        while !stop.load(Ordering::Relaxed) && !tx.is_closed() {
+            let result = (|| -> anyhow::Result<()> {
+                let reader = std::io::BufReader::new(std::fs::File::open(&path)?);
+                let decoder = image::codecs::gif::GifDecoder::new(reader)?;
+                let mut count = 0;
+                for frame in decoder.into_frames() {
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    let frame = frame?;
+                    let (n, d) = frame.delay().numer_denom_ms();
+                    let delay = Duration::from_millis((u64::from(n) / u64::from(d.max(1))).max(10));
+                    let texture = app::texture(frame.buffer());
+                    count += 1;
+                    if tx.send_blocking(Ok((texture, delay))).is_err() {
+                        return Ok(());
+                    }
+                }
+                anyhow::ensure!(count > 0, "GIF 没有帧");
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let _ = tx.send_blocking(Err(error.to_string()));
+                break;
+            }
+        }
+    });
+    (rx, stopped, worker)
+}
+fn open_preview(
+    path: PathBuf,
+    temporary: Option<Arc<tempfile::TempDir>>,
+    display: &CapturedDisplay,
+    rect: Rect,
+    cx: &mut App,
+) -> anyhow::Result<AnyWindowHandle> {
+    let (screen, display_id) = app::display_bounds(display, cx);
+    let bounds = Bounds::new(
+        screen.origin
+            + point(
+                px(rect.x / display.map.pixel_width as f32 * f32::from(screen.size.width)),
+                px(rect.y / display.map.pixel_height as f32 * f32::from(screen.size.height)),
+            ),
+        size(
+            px(rect.width / display.map.pixel_width as f32 * f32::from(screen.size.width)),
+            px(rect.height / display.map.pixel_height as f32 * f32::from(screen.size.height)),
+        ),
+    );
+    let (rx, stopped, _worker) = preview_stream(path, temporary.clone());
+    let (handle, _) = crate::window_pool::open(
+        crate::window_pool::Role::Preview,
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            kind: WindowKind::PopUp,
+            focus: false,
+            display_id,
+            is_resizable: false,
+            is_movable: false,
+            ..Default::default()
+        },
+        cx,
+        |w, cx| {
+            app::apply_style(
+                w,
+                snip_platform::WindowStyle {
+                    no_activate: true,
+                    ..Default::default()
+                },
+            );
+            #[cfg(target_os = "windows")]
+            if let Ok(raw) = app::raw(w) {
+                let _ = snip_platform::configure_borderless(
+                    raw,
+                    Rect::new(
+                        f32::from(bounds.origin.x),
+                        f32::from(bounds.origin.y),
+                        f32::from(bounds.size.width),
+                        f32::from(bounds.size.height),
+                    ),
+                    w.scale_factor(),
+                );
+            }
+            cx.new(|cx| {
+                let receiver = rx.clone();
+                cx.spawn(async move |this, cx| {
+                    while let Ok(result) = rx.recv().await {
+                        let delay = match result {
+                            Ok((texture, delay)) => {
+                                if this
+                                    .update(cx, |v: &mut GifPreview, cx| {
+                                        v.texture = Some(texture);
+                                        cx.notify();
+                                    })
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                delay
+                            }
+                            Err(error) => {
+                                let _ = this.update(cx, |v: &mut GifPreview, cx| {
+                                    v.message = error;
+                                    cx.notify();
+                                });
+                                break;
+                            }
+                        };
+                        cx.background_executor().timer(delay).await;
+                    }
+                })
+                .detach();
+                GifPreview {
+                    texture: None,
+                    message: String::new(),
+                    stopped,
+                    receiver,
+                    _temporary: temporary,
+                }
+            })
+        },
+    )?;
+    cx.set_global(PreviewWindow(Some(handle)));
+    Ok(handle)
 }
 
 struct CaptureFrame(Option<AnyWindowHandle>);
@@ -884,6 +1203,122 @@ mod tests {
     use super::toolbar_placement;
     use snip_core::geometry::Rect;
     #[test]
+    fn gif_save_is_explicit_atomic_and_preserves_temporary_recording() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("recording.gif");
+        let destination = temp.path().join("saved.gif");
+        std::fs::write(&source, b"temporary recording bytes").unwrap();
+        assert!(!destination.exists());
+        super::save_gif_file(&source, &destination).unwrap();
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(&destination).unwrap()
+        );
+        std::fs::write(&destination, b"old saved data").unwrap();
+        super::save_gif_file(&source, &destination).unwrap();
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"temporary recording bytes"
+        );
+    }
+
+    #[test]
+    fn preview_stream_decodes_frames_with_timing_and_stops_on_close() {
+        use image::{Delay, Frame, Rgba, RgbaImage};
+        let temporary = std::sync::Arc::new(tempfile::tempdir().unwrap());
+        let path = temporary.path().join("preview.gif");
+        {
+            let mut encoder =
+                image::codecs::gif::GifEncoder::new(std::fs::File::create(&path).unwrap());
+            for (color, delay) in [([255, 0, 0, 255], 40), ([0, 0, 255, 255], 80)] {
+                encoder
+                    .encode_frame(Frame::from_parts(
+                        RgbaImage::from_pixel(4, 4, Rgba(color)),
+                        0,
+                        0,
+                        Delay::from_numer_denom_ms(delay, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        let (receiver, stopped, worker) = super::preview_stream(path, Some(temporary));
+        let (first, delay) = receiver.recv_blocking().unwrap().unwrap();
+        assert_eq!(delay.as_millis(), 40);
+        assert_eq!(&first.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
+        let (second, delay) = receiver.recv_blocking().unwrap().unwrap();
+        assert_eq!(delay.as_millis(), 80);
+        assert_eq!(&second.as_bytes(0).unwrap()[..4], &[255, 0, 0, 255]);
+        stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+        receiver.close();
+        worker.join().unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn gif_shortcuts_pause_and_stop_without_saving(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(crate::window_pool::init);
+        let (tx, _) = async_channel::bounded(8);
+        cx.set_global(crate::app::Runtime {
+            recordings: vec![],
+            config: snip_core::config::Config::default(),
+            status: String::new(),
+            tx,
+            pins: Default::default(),
+            next_pin: 1,
+            overlays: vec![],
+            capture_busy: false,
+            permission_prompt: false,
+            settings: None,
+            hotkeys: None,
+            tray: None,
+            trails: vec![],
+            annotation_toolbar: None,
+            capture_task: None,
+        });
+        let (handle, view) = cx.update(|cx| {
+            super::build(
+                snip_platform::CapturedDisplay {
+                    id: 1,
+                    image: std::sync::Arc::new(image::RgbaImage::new(800, 600)),
+                    map: snip_core::geometry::DisplayMap {
+                        desktop: Rect::new(0., 0., 800., 600.),
+                        pixel_width: 800,
+                        pixel_height: 600,
+                    },
+                    windows: vec![],
+                },
+                Rect::new(20., 20., 200., 100.),
+                true,
+                cx,
+            )
+            .unwrap()
+        });
+        cx.update(|cx| {
+            handle
+                .update(cx, |_, w, cx| {
+                    view.update(cx, |v, _| v.recording = true);
+                    let _ = w.draw(cx);
+                })
+                .unwrap()
+        });
+        cx.simulate_keystrokes(handle, "2");
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .control
+                    .paused
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            )
+        });
+        cx.simulate_keystrokes(handle, "3");
+        cx.update(|cx| {
+            let v = view.read(cx);
+            assert!(v.control.stop.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(v.path.is_none());
+        });
+    }
+
+    #[test]
     fn controls_attach_to_region_right_edge_and_move_inside_at_screen_bottom() {
         let screen = Rect::new(-1440., 0., 1440., 900.);
         let region = Rect::new(-1000., 100., 600., 400.);
@@ -901,7 +1336,7 @@ mod tests {
         let screen = Rect::new(0., 0., 360., 640.);
         let controls = toolbar_placement(screen, screen, false);
         assert!(controls.width <= 344.);
-        assert_eq!(controls.height, 128.);
+        assert_eq!(controls.height, 192.);
         assert_eq!(controls.intersect(screen), controls);
     }
 }

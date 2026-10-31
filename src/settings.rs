@@ -436,7 +436,38 @@ impl Render for Settings {
             );
         match self.section {
             0 => {
+                let (toast_enabled, toast_delay) = crate::editor::toast_preferences(cx);
                 content = content
+                    .child(row(
+                        "图片内提示",
+                        "提示开关和显示时间",
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .child(
+                                Switch::new("annotation-toast")
+                                    .checked(toast_enabled)
+                                    .on_click(move |enabled, _, cx| {
+                                        crate::editor::set_toast_preferences(
+                                            *enabled,
+                                            toast_delay,
+                                            cx,
+                                        )
+                                    }),
+                            )
+                            .children([1000, 2000, 3000, 5000].into_iter().map(|delay| {
+                                Button::new(("toast-delay", delay))
+                                    .label(format!("{} 秒", delay / 1000))
+                                    .selected(toast_delay == delay)
+                                    .on_click(move |_, _, cx| {
+                                        crate::editor::set_toast_preferences(
+                                            toast_enabled,
+                                            delay,
+                                            cx,
+                                        )
+                                    })
+                            })),
+                    ))
                     .child(row(
                         "启动时显示偏好设置",
                         "关闭窗口后继续驻留菜单栏 / 系统托盘",

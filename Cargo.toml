@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "simple-snip"
-version = "0.0.10"
+version = "0.0.11"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
@@ -26,6 +26,7 @@ anyhow.workspace = true
 image.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
 async-channel = "2"
 smol = "2"
 global-hotkey = "=0.9.0"

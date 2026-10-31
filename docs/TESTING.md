@@ -276,3 +276,13 @@ Windows UI 自动化因无法确认浏览器 URL 而停止。自动审批阻止�
 
 
 0.0.10 最终发布确认：[GitHub Actions 41214519865](https://github.com/junyi-deep/simple-snip/actions/runs/41214519865) 的 Windows、macOS 与 Release 任务均成功，标签对应 `35ea280`。日志确认 Windows 32 GUI / 热键 + 33 core + 4 platform + 6 updater = 75；macOS 32 GUI / 键映射 + 33 core + 1 platform + 5 updater = 71，均 0 失败，3 项默认原生桌面测试仍 ignored。实际下载三份公开安装包与 SHA256SUMS，文件尺寸、清单 SHA256 和 GitHub digest 一致；ZIP CRC、macOS ARM64 / 双版本 0.0.10、Windows AMD64 / PE32+ / GUI 通过。额外检查实际发布 Windows EXE 的 SizeOfStackReserve=8388608，确认栈修复进入安装包。下载程序未执行，最终本地 native smoke 另有独立成功日志。
+
+## 0.0.11 标注与 GIF 分阶段操作回归（2026-11-01）
+
+Windows 本机 fmt / Clippy（-D warnings）通过，81 项常规测试通过：38 GUI / 快捷键 / 文件流程、33 core、4 platform、6 updater。新增验证打开颜色面板后的工具栏窗口空间、箭头单行高度、文字提交后即时预览直到渲染完成、OCR 修正输入框焦点下的真实 Copy action、F3 选中已有贴图编辑器且不增加贴图数量、GIF 数字键暂停 / 停止而不永久保存、逐帧 BGRA 像素 / 40ms 与 80ms 时序、关闭接收队列唤醒解码线程、显式保存不删除临时源文件及原子覆盖。最初一轮已有代理 CONNECT 测试遇到握手超时，单项和全量复跑通过；未为此放宽断言。
+
+普通 Debug 可执行文件被用户现有实例占用，故使用 `cargo rustc --locked --bin simple-snip -- -C extra-filename=-v0011` 构建独立程序，保留用户实例运行。前台执行该程序 `--smoke-test` 输出 SMOKE PASS：三轮实际截图进入箭头编辑器、取消 / 拖尾恢复，贴图 / 设置原生样式和窗口生命周期均通过。常规测试的 3 项默认 ignored 桌面测试在本次未单独执行，不计为通过。日志保留本地 `verification/v0011-final-smoke.log`。该探测不等于实际展开每个弹层或目视验收。
+
+人工复查步骤：截图与贴图编辑分别打开 ColorPicker 的调色板 / HSLA，确认面板完整且工具栏不跳位；箭头样式、颜色、线宽同排。文字输入时检查黑白插入光标，回车或点其他工具后无消失间隙，再次编辑旧文字和中文 IME。设置「基本」修改提示开关与时间，标注工具栏不再出现「提示」。OCR 拖选后在画布和修正输入框焦点下分别 Ctrl/Cmd+C，检查剪贴板文字。贴图编辑中 F3 只关闭工具栏、保留位置和贴图数量。
+
+长截图 / GIF 控制栏聚焦后使用数字键；编辑帧率 / 间隔时数字不触发动作，Enter 回控制栏、Esc 取消。GIF 录制后按 3 只停止并编码到会话临时目录，4 在原选区循环预览 / 关闭预览，5 打开原生另存为；取消保存可继续预览和保存。长帧间隔下关闭预览也应立即释放解码线程。关闭录制控制栏或重新录制会清理未保存结果，已另存为文件保留。完整多屏 / 缩放、物理按键、全部弹层、IME 与原生保存对话框仍需实机交互补充，不用 headless 断言代替。
