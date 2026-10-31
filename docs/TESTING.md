@@ -251,3 +251,12 @@ Windows UI 自动化因无法确认浏览器 URL 而停止。自动审批阻止�
 复现操作：F1 框选，首个模式下拉或 L / G 切换；检查区域边框和右下控制栏，输入 FPS / 毫秒，数字键操作且编辑数值时不误触动作。贴图选中后将鼠标移出，滚轮缩放、Ctrl+滚轮透明度；点击其他应用后应释放全局滚轮。形状子选项、折线点击节点 / Enter、实时马赛克 / 一次撤销、数值框 / 加减 / 滚轮、OCR 字符选择 / Ctrl+C、系统另存为和目录记忆都应在解锁桌面进一步交互复查。旧版先手动安装 0.0.7，此后检查到新版本才能使用升级并重启。
 
 0.0.7 最终发布确认：[GitHub Actions 41066825747](https://github.com/junyi-deep/simple-snip/actions/runs/41066825747) 的 macOS、Windows 和 Release 任务全部成功，标签对应提交 `41dffc0`。远程日志实际为 Windows 22 GUI + 30 core + 4 platform + 6 updater = 62，macOS 23 GUI / 键映射 + 30 core + 1 platform + 5 updater = 59，均 0 失败；CI 的 3 项桌面测试仍 ignored，本机另外显式执行通过。实际下载公开 Release 的三份安装包和 SHA256SUMS，所有文件的尺寸、SHA256 清单与 GitHub asset digest 一致；ZIP CRC 检查、Windows AMD64 / PE32+ / GUI subsystem、macOS ARM64 和 Info.plist 两处 0.0.7 版本通过。下载的程序未执行。PowerShell 安装准备及替换脚本另经只读 AST 语法检查通过，仍不等同于完整安装重启验收。
+
+
+## 0.0.9 编辑交互与发布验证（2026-10-31）
+
+本地 fmt / Clippy（-D warnings）/ workspace tests 通过。Windows 71 项：29 GUI / 路由 / 纹理、32 core、4 platform、6 updater。新增测试覆盖 F3 优先取得当前截图编辑器而非剪贴板、toast 自动到期与禁用、消息不改变工具栏高度、OCR 原图状态、七种新箭头导出 / 空心保留背景、切换工具不覆盖保存的箭头粗细，以及箭头 / 提示偏好的文件恢复。toast 使用 GPUI 时钟测试到期，测试不依赖实际等待。F3 测试验证命令目标路由，不能当作物理全局按键或真实桌面导出验收。
+
+[GitHub Actions 41209833257](https://github.com/junyi-deep/simple-snip/actions/runs/41209833257) 的 macOS、Windows、Release 任务全部成功；标签 `v0.0.9` 对应 `8ea2437`。远程日志确认 Windows 71、macOS 68（30 GUI / 键映射 + 32 core + 1 platform + 5 updater）通过、0 失败；3 项桌面原生测试仍 ignored，本批不计为通过。实际下载 Windows ZIP、macOS ZIP / DMG 和 SHA256SUMS，文件尺寸、清单 SHA256 与 GitHub digest 全部一致；ZIP CRC、Windows AMD64 / PE32+ / GUI、macOS ARM64 和 Info.plist 双版本 0.0.9 检查通过。下载程序未执行。完整桌面目视、多屏及复杂 OCR 字符边界仍需更多实机复查。
+
+复查步骤：F1 框选后 F3 固定当前选区（包括标注，保留位置）；未截图时 F3 仍读剪贴板。开启 OCR 后应保留原图颜色和文字显示，在识别文字上拖选、Ctrl/Cmd+C 复制、Ctrl/Cmd+A 全选。图片复制后保留编辑画面，以显示 toast 并继续 F3 贴图；Esc 取消。提示贴近图片上沿内侧，默认 2 秒消失，「提示」菜单可关闭或设置 1/2/3/5 秒，退出后仍记住。选择七种箭头头形并导出，检查空心内图像不被涂白；修改粗细后切换工具、选旧箭头改颜色、重进编辑和重启，粗细不应被无关属性覆盖。
