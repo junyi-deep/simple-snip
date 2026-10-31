@@ -273,3 +273,6 @@ Windows UI 自动化因无法确认浏览器 URL 而停止。自动审批阻止�
 原生 smoke 已增强为自动进入截图编辑并显示箭头工具栏和 ColorPicker。0.0.10 最终前台独立测试输出 SMOKE PASS、正常退出，无 panic；三轮实际截图 / 编辑 / 取消含拖尾显示与贴图 / 设置 / 窗口复用通过。最后测量中开发版首轮编辑根节点创建 534ms，复用后 84 / 80ms，整轮（含采集、纹理与展示等待）1254 / 928 / 844ms；这是带编辑器的 Debug 探测，不与旧版仅遮罩探测直接作速度比较，也不声称 Release FPS 达标。组合后台测试命令曾被自动审批拦截，改为独立前台原生命令后完成了最终验证。原始日志保留本地 verification/v0010-final-smoke.log。
 
 设置窗口通过 Notification 显示保存、更新、冲突与恢复，更新通知使用固定 id 避免进度堆叠；打开设置可重看当前注册错误。失败快捷键每 5 秒重试，成功项不重复注销 / 注册；退出时停止重试。贴图边框和编辑颜色都使用 ColorPicker。完整多屏、长时间运行、全部弹层和跨应用物理按键组合仍需更多实机回归。
+
+
+0.0.10 最终发布确认：[GitHub Actions 41214519865](https://github.com/junyi-deep/simple-snip/actions/runs/41214519865) 的 Windows、macOS 与 Release 任务均成功，标签对应 `35ea280`。日志确认 Windows 32 GUI / 热键 + 33 core + 4 platform + 6 updater = 75；macOS 32 GUI / 键映射 + 33 core + 1 platform + 5 updater = 71，均 0 失败，3 项默认原生桌面测试仍 ignored。实际下载三份公开安装包与 SHA256SUMS，文件尺寸、清单 SHA256 和 GitHub digest 一致；ZIP CRC、macOS ARM64 / 双版本 0.0.10、Windows AMD64 / PE32+ / GUI 通过。额外检查实际发布 Windows EXE 的 SizeOfStackReserve=8388608，确认栈修复进入安装包。下载程序未执行，最终本地 native smoke 另有独立成功日志。
