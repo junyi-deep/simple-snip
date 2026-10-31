@@ -260,3 +260,16 @@ Windows UI 自动化因无法确认浏览器 URL 而停止。自动审批阻止�
 [GitHub Actions 41209833257](https://github.com/junyi-deep/simple-snip/actions/runs/41209833257) 的 macOS、Windows、Release 任务全部成功；标签 `v0.0.9` 对应 `8ea2437`。远程日志确认 Windows 71、macOS 68（30 GUI / 键映射 + 32 core + 1 platform + 5 updater）通过、0 失败；3 项桌面原生测试仍 ignored，本批不计为通过。实际下载 Windows ZIP、macOS ZIP / DMG 和 SHA256SUMS，文件尺寸、清单 SHA256 与 GitHub digest 全部一致；ZIP CRC、Windows AMD64 / PE32+ / GUI、macOS ARM64 和 Info.plist 双版本 0.0.9 检查通过。下载程序未执行。完整桌面目视、多屏及复杂 OCR 字符边界仍需更多实机复查。
 
 复查步骤：F1 框选后 F3 固定当前选区（包括标注，保留位置）；未截图时 F3 仍读剪贴板。开启 OCR 后应保留原图颜色和文字显示，在识别文字上拖选、Ctrl/Cmd+C 复制、Ctrl/Cmd+A 全选。图片复制后保留编辑画面，以显示 toast 并继续 F3 贴图；Esc 取消。提示贴近图片上沿内侧，默认 2 秒消失，「提示」菜单可关闭或设置 1/2/3/5 秒，退出后仍记住。选择七种箭头头形并导出，检查空心内图像不被涂白；修改粗细后切换工具、选旧箭头改颜色、重进编辑和重启，粗细不应被无关属性覆盖。
+
+
+## 0.0.10 栈溢出定位与组件回归（2026-10-31）
+
+实际检查两份用户本机 Windows 崩溃转储和 Application 事件：23:00 前的两次 Debug simple-snip.exe 回调异常为 0xc000041d，故障偏移 0x2a4c5c7，经原构建 PDB / llvm-symbolizer 定位到 `_alloca_probe`；故障线程栈转储约 1,014,832 字节，返回地址包含 `DropdownMenu::dropdown_menu` 和 `EditorView::toolbar`。没有上传原始转储，也没有将其中的用户数据写入仓库。结论是 Debug 工具栏构建的栈压力耗尽 Windows 默认 1MB 主线程栈，不能仅用此前 headless 测试未崩溃认定桌面正确。
+
+修复采用三个下拉组件独立构建并擦除中间类型、应用开发代码 opt-level=1，以及 Windows PE 8MB 栈保留。PE 实测 reserve=8388608。渲染快照移除无关撤销历史，BGRA 准备移到后台；画笔 / 曲线增加采样距离和点数上限。Rust panic 写入用户配置目录 panic.log；原生异常仍依赖系统转储。
+
+本机 fmt / Clippy（-D warnings）/ cargo build / workspace tests 通过，共 75 项：32 GUI / 键映射 / 热键、33 core、4 platform、6 updater。新增实际 RegisterHotKey 冲突持有 / 释放 / 再注册测试，确认另一正常组合键持续注册；ColorPicker 颜色变更更新标注并保存；非法设置保存通过 Notification 显示错误（测试不写用户配置）；渲染快照像素相同但不携带历史。系统 API 不提供可靠的热键占用应用查询，提示仅显示确定的组合键与系统错误，不推断前台应用为占用方。
+
+原生 smoke 已增强为自动进入截图编辑并显示箭头工具栏和 ColorPicker。0.0.10 最终前台独立测试输出 SMOKE PASS、正常退出，无 panic；三轮实际截图 / 编辑 / 取消含拖尾显示与贴图 / 设置 / 窗口复用通过。最后测量中开发版首轮编辑根节点创建 534ms，复用后 84 / 80ms，整轮（含采集、纹理与展示等待）1254 / 928 / 844ms；这是带编辑器的 Debug 探测，不与旧版仅遮罩探测直接作速度比较，也不声称 Release FPS 达标。组合后台测试命令曾被自动审批拦截，改为独立前台原生命令后完成了最终验证。原始日志保留本地 verification/v0010-final-smoke.log。
+
+设置窗口通过 Notification 显示保存、更新、冲突与恢复，更新通知使用固定 id 避免进度堆叠；打开设置可重看当前注册错误。失败快捷键每 5 秒重试，成功项不重复注销 / 注册；退出时停止重试。贴图边框和编辑颜色都使用 ColorPicker。完整多屏、长时间运行、全部弹层和跨应用物理按键组合仍需更多实机回归。

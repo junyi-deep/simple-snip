@@ -3,7 +3,9 @@ use gpui_kit::prelude::*;
 use gpui_kit::{
     component::{
         button::*,
+        color_picker::{ColorPicker, ColorPickerState},
         input::{Input, InputState},
+        notification::Notification,
         switch::Switch,
         *,
     },
@@ -11,6 +13,7 @@ use gpui_kit::{
 };
 use snip_core::config::{Config, ProxyMode, UpdateConfig};
 
+struct UpdateNotification;
 pub struct Settings {
     section: usize,
     screenshot_key: Entity<InputState>,
@@ -20,7 +23,7 @@ pub struct Settings {
     gif_width: Entity<InputState>,
     trail_width: Entity<InputState>,
     trail_life: Entity<InputState>,
-    pin_border_color: Entity<InputState>,
+    pin_border_color: Entity<ColorPickerState>,
     pin_border_width: Entity<InputState>,
     pin_shadow: bool,
     proxy_mode: ProxyMode,
@@ -29,13 +32,17 @@ pub struct Settings {
     proxy_password: Entity<InputState>,
     update_busy: bool,
     update_status: String,
+    notified_status: String,
     update_release: Option<snip_update::Release>,
     optional: Vec<(String, Entity<InputState>)>,
 }
 impl Settings {
     pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
+        Self::build(cx).map(|(handle, _)| handle)
+    }
+    fn build(cx: &mut App) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
         let bounds = Bounds::centered(None, size(px(900.), px(660.)), cx);
-        let (h, _) = gpui_kit::open_window(
+        let (h, view) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
@@ -84,7 +91,6 @@ impl Settings {
                 let gif_width = input(config.gif.max_width.to_string());
                 let trail_width = input(config.trail.width.to_string());
                 let trail_life = input(config.trail.lifetime_ms.to_string());
-                let pin_border_color = input(config.pin.border_color.clone());
                 let pin_border_width = input(config.pin.border_width.to_string());
                 let proxy_url = input(config.updates.proxy_url.clone());
                 let proxy_username = input(config.updates.proxy_username.clone());
@@ -97,6 +103,9 @@ impl Settings {
                         )
                     })
                     .collect();
+                let pin_color = config.pin.color().unwrap_or(0x1688ff);
+                let pin_border_color =
+                    cx.new(|cx| ColorPickerState::new(w, cx).default_value(rgb(pin_color)));
                 let proxy_password = cx.new(|cx| InputState::new(w, cx).masked(true));
                 cx.new(|_| Self {
                     section: 0,
@@ -115,6 +124,7 @@ impl Settings {
                     proxy_username,
                     proxy_password,
                     update_busy: false,
+                    notified_status: String::new(),
                     update_status: match std::fs::read_to_string(
                         Config::path()
                             .with_file_name("updates")
@@ -133,9 +143,9 @@ impl Settings {
                 })
             },
         )?;
-        Ok(h)
+        Ok((h, view))
     }
-    fn save(&self, cx: &mut App) {
+    fn save(&self, window: &mut Window, cx: &mut App) {
         let result = (|| -> anyhow::Result<Config> {
             let mut c = cx.global::<Runtime>().config.clone();
             c.save_directory = self.save_path.read(cx).value().to_string().into();
@@ -159,24 +169,22 @@ impl Settings {
             c.gif.max_width = self.gif_width.read(cx).value().parse()?;
             c.trail.width = self.trail_width.read(cx).value().parse()?;
             c.trail.lifetime_ms = self.trail_life.read(cx).value().parse()?;
-            c.pin.border_color = self.pin_border_color.read(cx).value().trim().to_string();
+            if let Some(color) = self.pin_border_color.read(cx).value() {
+                let c_rgb = color.to_rgb();
+                c.pin.border_color = format!(
+                    "#{:02X}{:02X}{:02X}",
+                    (c_rgb.r * 255.).round() as u8,
+                    (c_rgb.g * 255.).round() as u8,
+                    (c_rgb.b * 255.).round() as u8
+                );
+            }
             c.pin.border_width = self.pin_border_width.read(cx).value().parse()?;
             c.pin.shadow = self.pin_shadow;
             c.updates = self.proxy_config(cx);
             snip_update::validate_proxy(&c.updates)?;
             c.validate()?;
-            if let Some(keys) = cx.global_mut::<Runtime>().hotkeys.as_mut() {
-                keys.apply(&c)?;
-            }
-            if let Err(error) = c.save(&Config::path()) {
-                let old = cx.global::<Runtime>().config.clone();
-                if let Some(keys) = cx.global_mut::<Runtime>().hotkeys.as_mut()
-                    && let Err(e) = keys.apply(&old)
-                {
-                    tracing::error!("恢复旧快捷键失败: {e}");
-                }
-                return Err(error);
-            }
+            crate::hotkeys::validate(&c)?;
+            c.save(&Config::path())?;
             Ok(c)
         })();
         match result {
@@ -198,9 +206,27 @@ impl Settings {
                     crate::effects::stop(cx);
                     crate::effects::start(cx);
                 }
-                app::status(cx, "设置已保存；快捷键和拖尾参数已生效");
+                let config = cx.global::<Runtime>().config.clone();
+                let result = cx
+                    .global_mut::<Runtime>()
+                    .hotkeys
+                    .as_mut()
+                    .map(|keys| keys.apply(&config));
+                match result {
+                    Some(Err(error)) => window.push_notification(
+                        Notification::warning(format!("设置已保存；{error}")),
+                        cx,
+                    ),
+                    Some(Ok(())) => {
+                        window.push_notification(Notification::success("设置已保存"), cx)
+                    }
+                    None => window.push_notification(
+                        Notification::warning("设置已保存；快捷键服务暂不可用，每 5 秒重试"),
+                        cx,
+                    ),
+                }
             }
-            Err(e) => app::status(cx, format!("设置未保存: {e}")),
+            Err(e) => window.push_notification(Notification::error(format!("设置未保存: {e}")), cx),
         }
     }
     fn proxy_config(&self, cx: &App) -> UpdateConfig {
@@ -338,7 +364,16 @@ fn row(title: &str, description: &str, control: impl IntoElement) -> Div {
         .child(div().flex_shrink_0().child(control))
 }
 impl Render for Settings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.notified_status != self.update_status {
+            if !self.notified_status.is_empty() {
+                window.push_notification(
+                    Notification::info(self.update_status.clone()).id::<UpdateNotification>(),
+                    cx,
+                );
+            }
+            self.notified_status = self.update_status.clone();
+        }
         let config = cx.global::<Runtime>().config.clone();
         let names = [
             "通用",
@@ -447,7 +482,7 @@ impl Render for Settings {
                         "#RRGGBB，默认蓝色；未选中时不显示",
                         div()
                             .w_40()
-                            .child(Input::new(&self.pin_border_color).aria_label("贴图边框颜色")),
+                            .child(ColorPicker::new(&self.pin_border_color).label("边框颜色")),
                     ))
                     .child(row(
                         "选中边框粗细",
@@ -696,7 +731,6 @@ impl Render for Settings {
                                 )
                             }),
                     )
-                    .child(div().text_sm().child(self.update_status.clone()))
                     .child(
                         Button::new("github-releases")
                             .ghost()
@@ -744,19 +778,52 @@ impl Render for Settings {
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .text_xs()
-                            .child(cx.global::<Runtime>().status.clone()),
-                    )
-                    .child(
                         Button::new("save-settings")
                             .primary()
                             .label("保存设置")
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                            .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Runtime, Settings};
+    use gpui_kit::TestAppContext;
+    use gpui_kit::component::WindowExt;
+    #[gpui_kit::test]
+    fn failed_save_uses_notification_without_writing_configuration(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (tx, _) = async_channel::bounded(8);
+        cx.set_global(crate::app::Runtime {
+            recordings: vec![],
+            config: snip_core::config::Config::default(),
+            status: String::new(),
+            tx,
+            pins: Default::default(),
+            next_pin: 1,
+            overlays: vec![],
+            capture_busy: false,
+            permission_prompt: false,
+            settings: None,
+            hotkeys: None,
+            tray: None,
+            trails: vec![],
+            annotation_toolbar: None,
+            capture_task: None,
+        });
+        cx.update(|cx| cx.global_mut::<Runtime>().config.gif.max_seconds = 0);
+        let (handle, settings) = cx.update(|cx| Settings::build(cx).unwrap());
+        cx.update(|cx| {
+            handle
+                .update(cx, |_, w, cx| {
+                    let _ = w.draw(cx);
+                    settings.update(cx, |v, cx| v.save(w, cx));
+                    assert_eq!(w.notifications(cx).len(), 1);
+                    let _ = w.draw(cx);
+                })
+                .unwrap()
+        });
     }
 }

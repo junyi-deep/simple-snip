@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "simple-snip"
-version = "0.0.9"
+version = "0.0.10"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
@@ -45,3 +45,8 @@ strip = true
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 embed-resource = "3"
+
+# Optimize application widget builders even in development to avoid enormous
+# unoptimized GPUI composition frames and improve interactive latency.
+[profile.dev.package.simple-snip]
+opt-level = 1

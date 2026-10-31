@@ -58,7 +58,7 @@ impl Overlay {
         if d.contains(cursor) {
             cx.activate(true);
         }
-        let (handle, _) = crate::window_pool::open(
+        let (handle, view) = crate::window_pool::open(
             crate::window_pool::Role::Capture,
             options,
             cx,
@@ -87,6 +87,31 @@ impl Overlay {
                 })
             },
         )?;
+        if std::env::args().any(|a| a == "--smoke-test") {
+            handle.update(cx, |_, w, cx| {
+                view.update(cx, |v, cx| {
+                    let width = v.display.image.width() as f32;
+                    let height = v.display.image.height() as f32;
+                    if width > 0. && height > 0. {
+                        v.selection = Some(Rect::new(
+                            width * 0.1,
+                            height * 0.1,
+                            width * 0.5,
+                            height * 0.5,
+                        ));
+                        v.begin_edit(w, cx);
+                        if let Some(editor) = &v.editor {
+                            editor.update(cx, |v, cx| {
+                                v.choose_tool(snip_core::annotation::Tool::Arrow, w, cx)
+                            });
+                        }
+                        tracing::info!(
+                            "SMOKE entered screenshot editor with arrow toolbar and ColorPicker"
+                        );
+                    }
+                })
+            })?;
+        }
         Ok(handle)
     }
     fn begin_edit(&mut self, w: &mut Window, cx: &mut Context<Self>) {

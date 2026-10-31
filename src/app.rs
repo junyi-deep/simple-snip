@@ -89,6 +89,8 @@ pub struct Runtime {
     pub annotation_toolbar: Option<(AnyWindowHandle, Entity<crate::editor::FloatingToolbar>)>,
     pub capture_task: Option<AnyWindowHandle>,
 }
+struct HotkeyRetryControl(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Global for HotkeyRetryControl {}
 impl Global for Runtime {}
 gpui_kit::actions!(
     simple_snip,
@@ -123,7 +125,15 @@ pub fn command(cx: &App, command: Command) {
 pub fn status(cx: &mut App, message: impl Into<String>) {
     let message = message.into();
     tracing::info!("{message}");
-    cx.global_mut::<Runtime>().status = message;
+    cx.global_mut::<Runtime>().status = message.clone();
+    if let Some(handle) = cx.global::<Runtime>().settings {
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, w, cx| {
+                use gpui_kit::component::{WindowExt, notification::Notification};
+                w.push_notification(Notification::info(message), cx);
+            });
+        });
+    }
     cx.refresh_windows();
     refresh_tray(cx);
 }
@@ -273,8 +283,67 @@ pub fn start(cx: &mut App, smoke_test: bool) {
             Err(error) => status(cx, format!("全局滚轮不可用：{error}")),
         }
     }
+    if !smoke_test {
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cx.set_global(HotkeyRetryControl(stopped.clone()));
+        cx.spawn(async move |cx| {
+            let mut previous = String::new();
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                cx.update(|cx| {
+                    let config = cx.global::<Runtime>().config.clone();
+                    if cx.global::<Runtime>().hotkeys.is_none() {
+                        let tx = cx.global::<Runtime>().tx.clone();
+                        match HotkeyManager::new(tx) {
+                            Ok(manager) => cx.global_mut::<Runtime>().hotkeys = Some(manager),
+                            Err(error) => {
+                                tracing::warn!("快捷键服务重试失败: {error}");
+                                return;
+                            }
+                        }
+                    }
+                    let result = cx
+                        .global_mut::<Runtime>()
+                        .hotkeys
+                        .as_mut()
+                        .unwrap()
+                        .apply(&config);
+                    let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+                    if message != previous {
+                        let recovered = message.is_empty() && !previous.is_empty();
+                        previous = message.clone();
+                        if let Some(handle) = cx.global::<Runtime>().settings {
+                            let _ = handle.update(cx, |_, w, cx| {
+                                use gpui_kit::component::{WindowExt, notification::Notification};
+                                w.push_notification(
+                                    if recovered {
+                                        Notification::success("快捷键已恢复注册")
+                                    } else {
+                                        Notification::warning(message.clone())
+                                    },
+                                    cx,
+                                );
+                            });
+                        }
+                        if !message.is_empty() {
+                            tracing::warn!("{message}");
+                        }
+                    }
+                });
+            }
+        })
+        .detach();
+    }
     cx.set_activation_policy(ActivationPolicy::Accessory);
     cx.on_app_quit(|cx| {
+        if let Some(control) = cx.try_global::<HotkeyRetryControl>() {
+            control.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         #[cfg(target_os = "windows")]
         snip_platform::stop_pin_wheel();
         let controls = cx.global::<Runtime>().recordings.clone();
@@ -740,10 +809,22 @@ pub(crate) fn close_pin(id: u64, cx: &mut App) {
     }
 }
 
+fn notify_hotkey_conflicts(w: &mut Window, cx: &mut App) {
+    if let Some(message) = cx
+        .global::<Runtime>()
+        .hotkeys
+        .as_ref()
+        .and_then(|k| k.registration_error())
+        .map(str::to_string)
+    {
+        use gpui_kit::component::{WindowExt, notification::Notification};
+        w.push_notification(Notification::warning(message), cx);
+    }
+}
 pub fn open_settings(cx: &mut App) {
     cx.activate(true);
     if let Some(h) = cx.global::<Runtime>().settings
-        && h.update(cx, |_, w, _| {
+        && h.update(cx, |_, w, cx| {
             if let Ok(raw) = raw(w) {
                 let _ = snip_platform::style_window(
                     raw,
@@ -756,6 +837,7 @@ pub fn open_settings(cx: &mut App) {
                 let _ = snip_platform::show_window(raw, true);
             }
             w.activate_window();
+            notify_hotkey_conflicts(w, cx);
         })
         .is_ok()
     {
@@ -763,7 +845,10 @@ pub fn open_settings(cx: &mut App) {
         return;
     }
     match Settings::open(cx) {
-        Ok(h) => cx.global_mut::<Runtime>().settings = Some(h),
+        Ok(h) => {
+            cx.global_mut::<Runtime>().settings = Some(h);
+            let _ = h.update(cx, |_, w, cx| notify_hotkey_conflicts(w, cx));
+        }
         Err(e) => status(cx, e.to_string()),
     }
     crate::effects::raise(cx);

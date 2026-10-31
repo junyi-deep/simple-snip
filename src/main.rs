@@ -21,6 +21,22 @@ fn main() {
         )
         .init();
     let config_path = snip_core::config::Config::path();
+    let panic_path = config_path.with_file_name("panic.log");
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        if let Some(parent) = panic_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::File::create(&panic_path) {
+            let _ = writeln!(
+                file,
+                "{info}\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        previous_hook(info);
+    }));
     let smoke_test = std::env::args().any(|arg| arg == "--smoke-test");
     if let Some(dir) = config_path.parent() {
         let _ = std::fs::create_dir_all(dir);

@@ -123,10 +123,44 @@ fn mac_keycode(key: global_hotkey::hotkey::Code) -> Option<u32> {
 }
 use snip_core::config::Config;
 use std::collections::HashMap;
-/// Registration is transactional: failed replacements restore the old bindings.
+pub fn validate(config: &Config) -> Result<()> {
+    parse(config).map(|_| ())
+}
+fn parse(config: &Config) -> Result<Vec<(HotKey, Command)>> {
+    let commands = HashMap::from([
+        ("screenshot", Command::Capture),
+        ("paste_image", Command::Paste),
+        ("long_capture", Command::LongCapture),
+        ("gif", Command::Gif),
+        ("ocr", Command::Ocr),
+        ("mouse_trail", Command::Trail),
+        ("settings", Command::Settings),
+    ]);
+    let mut parsed = vec![];
+    for (name, value) in &config.hotkeys {
+        if value.is_empty() {
+            continue;
+        }
+        let command = commands
+            .get(name.as_str())
+            .context(format!("未知快捷键动作: {name}"))?;
+        let key = value
+            .parse::<HotKey>()
+            .with_context(|| format!("无法解析 {name} 的快捷键 {value}"))?;
+        ensure!(
+            !parsed.iter().any(|(k, _)| *k == key),
+            "快捷键冲突: {value}"
+        );
+        parsed.push((key, *command));
+    }
+    Ok(parsed)
+}
+
+/// Retain successful registrations and retry only missing bindings.
 pub struct HotkeyManager {
     manager: Backend,
     registered: Vec<(HotKey, Command)>,
+    last_error: Option<String>,
 }
 impl HotkeyManager {
     pub fn new(tx: async_channel::Sender<Event>) -> Result<Self> {
@@ -147,56 +181,55 @@ impl HotkeyManager {
         Ok(Self {
             manager,
             registered: vec![],
+            last_error: None,
         })
     }
     pub fn apply(&mut self, config: &Config) -> Result<()> {
-        let commands = HashMap::from([
-            ("screenshot", Command::Capture),
-            ("paste_image", Command::Paste),
-            ("long_capture", Command::LongCapture),
-            ("gif", Command::Gif),
-            ("ocr", Command::Ocr),
-            ("mouse_trail", Command::Trail),
-            ("settings", Command::Settings),
-        ]);
-        let mut parsed = vec![];
-        for (name, value) in &config.hotkeys {
-            if value.is_empty() {
+        let result = self.reconcile(config);
+        self.last_error = result.as_ref().err().map(ToString::to_string);
+        result
+    }
+    pub fn registration_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+    fn reconcile(&mut self, config: &Config) -> Result<()> {
+        let parsed = parse(config)?;
+        let removed: Vec<_> = self
+            .registered
+            .iter()
+            .filter(|(key, _)| !parsed.iter().any(|(wanted, _)| wanted == key))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in removed {
+            self.manager.unregister(key)?;
+            self.registered.retain(|(k, _)| *k != key);
+        }
+        let mut failures = vec![];
+        for (key, command) in parsed {
+            if let Some((_, registered_command)) =
+                self.registered.iter_mut().find(|(k, _)| *k == key)
+            {
+                *registered_command = command;
                 continue;
             }
-            let command = commands
-                .get(name.as_str())
-                .context(format!("未知快捷键动作: {name}"))?;
-            let key = value
-                .parse::<HotKey>()
-                .with_context(|| format!("无法解析 {name} 的快捷键 {value}"))?;
-            ensure!(
-                !parsed.iter().any(|(k, _)| *k == key),
-                "快捷键冲突: {value}"
-            );
-            parsed.push((key, *command));
-        }
-        for (key, _) in &self.registered {
-            self.manager.unregister(*key)?;
-        }
-        let mut added = vec![];
-        for (key, _) in &parsed {
-            if let Err(error) = self.manager.register(*key) {
-                for k in added {
-                    let _ = self.manager.unregister(k);
+            match self.manager.register(key) {
+                Ok(()) => self.registered.push((key, command)),
+                Err(error) => {
+                    let label = config
+                        .hotkeys
+                        .iter()
+                        .find(|(_, v)| v.parse::<HotKey>().ok() == Some(key))
+                        .map(|(name, value)| format!("{name}: {value}"))
+                        .unwrap_or_else(|| format!("{key:?}"));
+                    failures.push(format!("{label} 注册失败：{error}"));
                 }
-                for (k, _) in &self.registered {
-                    if let Err(e) = self.manager.register(*k) {
-                        tracing::error!("restoring hotkey failed: {e}");
-                    }
-                }
-                anyhow::bail!(
-                    "快捷键 {key:?} 注册失败：{error}。macOS 上请检查 Fn/Globe 和系统功能键设置，或改用其他组合键。"
-                );
             }
-            added.push(*key);
         }
-        self.registered = parsed;
+        ensure!(
+            failures.is_empty(),
+            "{}。每 5 秒自动重试；系统未提供占用应用信息，可关闭冲突应用或更换快捷键。",
+            failures.join("；")
+        );
         Ok(())
     }
     pub fn command(&self, id: u32) -> Option<Command> {
@@ -225,5 +258,38 @@ mod tests {
         assert!(custom.mods.contains(Modifiers::META | Modifiers::SHIFT));
         assert_eq!(super::mac_keycode(custom.key), Some(1));
         assert_eq!(super::mac_keycode(Code::MediaStop), None);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod registration_tests {
+    use super::*;
+    #[test]
+    fn retries_conflicts_without_discarding_working_bindings() {
+        let owner = GlobalHotKeyManager::new().unwrap();
+        let blocked = "Control+Alt+Shift+F24".parse::<HotKey>().unwrap();
+        owner.register(blocked).unwrap();
+        let (tx, _) = async_channel::bounded(8);
+        let mut keys = HotkeyManager::new(tx).unwrap();
+        let mut config = Config::default();
+        config.hotkeys.clear();
+        config
+            .hotkeys
+            .insert("screenshot".into(), "Control+Alt+Shift+F24".into());
+        config
+            .hotkeys
+            .insert("paste_image".into(), "Control+Alt+Shift+F23".into());
+        let error = keys.apply(&config).unwrap_err().to_string();
+        assert!(error.contains("Control+Alt+Shift+F24"));
+        assert!(keys.registration_error().is_some());
+        let working = "Control+Alt+Shift+F23".parse::<HotKey>().unwrap();
+        assert!(matches!(keys.command(working.id()), Some(Command::Paste)));
+        owner.unregister(blocked).unwrap();
+        keys.apply(&config).unwrap();
+        assert!(keys.registration_error().is_none());
+        assert!(matches!(keys.command(blocked.id()), Some(Command::Capture)));
+        config.hotkeys.remove("paste_image");
+        keys.apply(&config).unwrap();
+        assert!(keys.command(working.id()).is_none());
     }
 }

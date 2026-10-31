@@ -301,6 +301,16 @@ impl Document {
             redo: vec![],
         }
     }
+    /// Rendering does not need expensive undo/redo history snapshots.
+    pub fn render_snapshot(&self) -> Self {
+        Self {
+            original: self.original.clone(),
+            font: self.font.clone(),
+            objects: self.objects.clone(),
+            undo: vec![],
+            redo: vec![],
+        }
+    }
     pub fn checkpoint(&mut self) {
         if self.undo.len() >= 100 {
             self.undo.remove(0);
@@ -581,6 +591,25 @@ mod reframe_tests {
             }
             assert!(original.pixels().all(|p| p.0 == [255; 4]));
         }
+    }
+
+    #[test]
+    fn render_snapshot_excludes_history_but_keeps_pixels_and_annotations() {
+        let mut doc = Document::new(Arc::new(RgbaImage::new(100, 100)));
+        doc.add(Annotation {
+            tool: Tool::Rectangle,
+            points: vec![Point::new(10., 10.), Point::new(90., 90.)],
+            color: [255, 0, 0, 255],
+            width: 3.,
+            text: String::new(),
+            arrow_style: ArrowStyle::default(),
+        });
+        let mut snapshot = doc.render_snapshot();
+        assert_eq!(snapshot.flatten(), doc.flatten());
+        snapshot.undo();
+        assert_eq!(snapshot.objects.len(), 1);
+        doc.undo();
+        assert!(doc.objects.is_empty());
     }
 
     #[test]

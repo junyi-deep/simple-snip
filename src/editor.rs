@@ -2,6 +2,7 @@ use crate::app::{self, Event, Runtime};
 use gpui_kit::{
     component::{
         button::*,
+        color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
         input::{Input, InputEvent, InputState},
         menu::*,
         *,
@@ -64,6 +65,8 @@ pub struct EditorView {
     texture: Arc<RenderImage>,
     tool: Tool,
     color: [u8; 4],
+    color_picker: Entity<ColorPickerState>,
+    _color_subscription: Subscription,
     width: f32,
     arrow_style: ArrowStyle,
     pointer: Option<Point<Pixels>>,
@@ -154,6 +157,28 @@ impl EditorView {
                 v.set_size(size, cx);
             }
         });
+        let color_picker = cx.new(|cx| {
+            ColorPickerState::new(w, cx).default_value(rgba(u32::from_be_bytes(style.color)))
+        });
+        let color_subscription =
+            cx.subscribe(&color_picker, |v, _, event: &ColorPickerEvent, cx| {
+                if let ColorPickerEvent::Change(Some(color)) = event {
+                    let color = color.to_rgb();
+                    v.color = [
+                        (color.r * 255.).round() as u8,
+                        (color.g * 255.).round() as u8,
+                        (color.b * 255.).round() as u8,
+                        (color.a * 255.).round() as u8,
+                    ];
+                    v.remember_fields(cx, 2);
+                    if let Some(i) = v.selected.filter(|i| *i < v.doc.objects.len()) {
+                        v.doc.checkpoint();
+                        v.doc.objects[i].color = v.color;
+                        v.refresh(cx);
+                    }
+                    cx.notify();
+                }
+            });
         let next_number = doc
             .objects
             .iter()
@@ -177,6 +202,8 @@ impl EditorView {
             texture: app::texture(&initial),
             tool: preferences.tool,
             color: style.color,
+            color_picker,
+            _color_subscription: color_subscription,
             width: style.width,
             arrow_style: style.arrow,
             pointer: None,
@@ -246,7 +273,7 @@ impl EditorView {
             }
         }
     }
-    fn choose_tool(&mut self, tool: Tool, w: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn choose_tool(&mut self, tool: Tool, w: &mut Window, cx: &mut Context<Self>) {
         self.commit_text(cx);
         self.finish_path(cx);
         self.preferences = cx.global::<PreferencesStore>().value.clone();
@@ -256,6 +283,9 @@ impl EditorView {
         self.width = style.width;
         self.color = style.color;
         self.arrow_style = style.arrow;
+        self.color_picker.update(cx, |v, cx| {
+            v.set_value(rgba(u32::from_be_bytes(style.color)), w, cx)
+        });
         self.clear_ocr();
         self.message.clear();
         self.sync_size(w, cx);
@@ -573,23 +603,26 @@ impl EditorView {
         }
         self.rendering = true;
         let source = self.doc.original.clone();
-        let mut doc = self.doc.clone();
+        let mut doc = self.doc.render_snapshot();
         if let Some(i) = self.text_index.filter(|i| *i < doc.objects.len()) {
             doc.objects.remove(i);
         }
         let transform = self.transform;
-        let render = cx
-            .background_executor()
-            .spawn(async move { render_document(doc, transform) });
+        let render = cx.background_executor().spawn(async move {
+            render_document(doc, transform).map(|(doc, image)| {
+                let texture = app::texture(&image);
+                (doc, image, texture)
+            })
+        });
         cx.spawn(async move |this, cx| {
             let result = render.await;
             let _ = this.update(cx, |v, cx| {
                 v.rendering = false;
                 if Arc::ptr_eq(&v.doc.original, &source) {
                     match result {
-                        Ok((doc, image)) => {
+                        Ok((doc, image, texture)) => {
                             v.doc.font = doc.font;
-                            v.texture = app::texture(&image);
+                            v.texture = texture;
                             v.rendered = image;
                         }
                         Err(e) => v.message = e.to_string(),
@@ -608,7 +641,11 @@ impl EditorView {
     pub fn export(&mut self, action: u8, cx: &mut Context<Self>) {
         self.commit_text(cx);
         self.finish_path(cx);
-        let doc = self.doc.clone();
+        let doc = if action == 3 {
+            self.doc.clone()
+        } else {
+            self.doc.render_snapshot()
+        };
         let transform = self.transform;
         let host = self.host;
         let placement = self.pin_placement();
@@ -690,7 +727,7 @@ impl EditorView {
         self.ocr_busy = true;
         self.cancel = Cancellation::default();
         let cancel = self.cancel.clone();
-        let document = self.doc.clone();
+        let document = self.doc.render_snapshot();
         let generation = self.generation;
         self.message = "正在本地识别…".into();
         cx.spawn(async move |this, cx| {
@@ -776,6 +813,9 @@ impl EditorView {
                     self.width = self.doc.objects[i].width;
                     self.color = self.doc.objects[i].color;
                     self.arrow_style = self.doc.objects[i].arrow_style;
+                    self.color_picker.update(cx, |picker, cx| {
+                        picker.set_value(rgba(u32::from_be_bytes(self.color)), w, cx)
+                    });
                     if e.click_count == 2 && self.doc.objects[i].tool == Tool::Text {
                         self.begin_text(p, Some(i), w, cx);
                         return;
@@ -806,7 +846,14 @@ impl EditorView {
                 if e.click_count == 2 {
                     self.finish_path(cx);
                 } else if let Some(draft) = &mut self.draft {
-                    draft.points.push(p);
+                    if draft.points.len() < 8192
+                        && draft
+                            .points
+                            .last()
+                            .is_none_or(|last| (p.x - last.x).hypot(p.y - last.y) >= 1.)
+                    {
+                        draft.points.push(p);
+                    }
                 } else {
                     self.draft = Some(Annotation {
                         tool: self.tool,
@@ -949,7 +996,12 @@ impl EditorView {
                     .map(|b| f32::from(b.origin.x + b.size.width))
                     .fold(f32::NEG_INFINITY, f32::max);
                 let width = (right - left).ceil();
-                if width.is_finite() && width > 0. {
+                if width.is_finite()
+                    && width > 0.
+                    && weak
+                        .upgrade()
+                        .is_some_and(|v| (v.read(cx).toolbar_rows[index] - width).abs() > 1.)
+                {
                     let weak = weak.clone();
                     cx.defer(move |cx| {
                         let _ = weak.update(cx, |v, cx| {
@@ -985,38 +1037,7 @@ impl EditorView {
             .flex_nowrap()
             .overflow_x_scroll();
         if let Some((display, rect)) = self.capture_context.clone() {
-            strip = strip.child(
-                Button::new("capture-mode")
-                    .xsmall()
-                    .flex_shrink_0()
-                    .label("截图 ▾")
-                    .dropdown_menu(move |menu, _, _| {
-                        let long_display = display.clone();
-                        let gif_display = display.clone();
-                        menu.item(PopupMenuItem::new("长截图 [L]").on_click(move |_, _, cx| {
-                            app::send(
-                                cx,
-                                Event::Selection(
-                                    long_display.clone(),
-                                    rect,
-                                    crate::overlay::CaptureMode::Long,
-                                ),
-                            )
-                        }))
-                        .item(
-                            PopupMenuItem::new("录制 GIF [G]").on_click(move |_, _, cx| {
-                                app::send(
-                                    cx,
-                                    Event::Selection(
-                                        gif_display.clone(),
-                                        rect,
-                                        crate::overlay::CaptureMode::Gif,
-                                    ),
-                                )
-                            }),
-                        )
-                    }),
-            );
+            strip = strip.child(capture_mode_button(display, rect));
         }
         for (i, (label, tool)) in tools.into_iter().enumerate() {
             strip = strip.child(
@@ -1062,38 +1083,7 @@ impl EditorView {
             );
         }
         let editor = cx.entity().downgrade();
-        strip = strip.child(
-            Button::new("toast-options")
-                .xsmall()
-                .label("提示 ▾")
-                .dropdown_menu(move |menu, _, _| {
-                    let mut menu = menu;
-                    for (label, enabled, delay) in [
-                        ("关闭提示", false, 2000),
-                        ("提示 1 秒", true, 1000),
-                        ("提示 2 秒", true, 2000),
-                        ("提示 3 秒", true, 3000),
-                        ("提示 5 秒", true, 5000),
-                    ] {
-                        let editor = editor.clone();
-                        menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                            let _ = editor.update(cx, |v, cx| {
-                                v.preferences.toast_enabled = enabled;
-                                v.preferences.toast_delay_ms = delay;
-                                v.toast_visible = false;
-                                let store = cx.global_mut::<PreferencesStore>();
-                                store.value.toast_enabled = enabled;
-                                store.value.toast_delay_ms = delay;
-                                if let Some(writer) = &store.writer {
-                                    let _ = writer.send(store.value.clone());
-                                }
-                                cx.notify();
-                            });
-                        }));
-                    }
-                    menu
-                }),
-        );
+        strip = strip.child(toast_options_button(editor));
         let actions = [
             ("撤销", "undo"),
             ("重做", "redo"),
@@ -1302,47 +1292,7 @@ impl EditorView {
                             })),
                     );
             }
-            for (i, (label, color)) in [
-                ("红色", [240, 60, 70, 255]),
-                ("黄色", [255, 180, 30, 255]),
-                ("绿色", [30, 180, 110, 255]),
-                ("蓝色", [30, 130, 240, 255]),
-                ("白色", [255, 255, 255, 255]),
-                ("黑色", [20, 20, 20, 255]),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                options = options.child(
-                    Button::new(("color", i))
-                        .xsmall()
-                        .flex_shrink_0()
-                        .ghost()
-                        .child(
-                            div()
-                                .size(px(12.))
-                                .rounded_full()
-                                .bg(rgb(((color[0] as u32) << 16)
-                                    | ((color[1] as u32) << 8)
-                                    | color[2] as u32))
-                                .border_1()
-                                .border_color(rgb(0x7b8790)),
-                        )
-                        .accessibility_label(label)
-                        .tooltip(label)
-                        .selected(self.color == color)
-                        .on_click(cx.listener(move |v, _, _, cx| {
-                            v.color = color;
-                            v.remember_fields(cx, 2);
-                            if let Some(i) = v.selected.filter(|i| *i < v.doc.objects.len()) {
-                                v.doc.checkpoint();
-                                v.doc.objects[i].color = color;
-                                v.refresh(cx);
-                            }
-                            cx.notify();
-                        })),
-                );
-            }
+            options = options.child(ColorPicker::new(&self.color_picker).small().label("颜色"));
             options = options
                 .child(
                     Button::new("size-minus")
@@ -1410,46 +1360,10 @@ impl EditorView {
             panel = panel.child(options);
             if self.option_tool() == Tool::Arrow {
                 let editor = cx.entity().downgrade();
-                let styles = div().on_children_prepainted(row_measure(2)).h_flex().child(
-                    Button::new("arrow-style-menu")
-                        .xsmall()
-                        .label("箭头样式 ▾")
-                        .dropdown_menu(move |menu, _, _| {
-                            let mut menu = menu;
-                            for (label, style) in [
-                                ("燕尾", ArrowStyle::Swallow),
-                                ("实心三角", ArrowStyle::TriangleFilled),
-                                ("空心三角", ArrowStyle::TriangleHollow),
-                                ("实心圆点", ArrowStyle::CircleFilled),
-                                ("空心圆点", ArrowStyle::CircleHollow),
-                                ("实心菱形", ArrowStyle::DiamondFilled),
-                                ("空心菱形", ArrowStyle::DiamondHollow),
-                                ("头尾等宽", ArrowStyle::Uniform),
-                                ("头宽尾细", ArrowStyle::HeadWide),
-                                ("头细尾宽", ArrowStyle::TailWide),
-                            ] {
-                                let editor = editor.clone();
-                                menu = menu.item(PopupMenuItem::new(label).on_click(
-                                    move |_, _, cx| {
-                                        let _ = editor.update(cx, |v, cx| {
-                                            v.arrow_style = style;
-                                            v.remember_fields(cx, 4);
-                                            if let Some(i) = v.selected.filter(|i| {
-                                                *i < v.doc.objects.len()
-                                                    && v.doc.objects[*i].tool == Tool::Arrow
-                                            }) {
-                                                v.doc.checkpoint();
-                                                v.doc.objects[i].arrow_style = style;
-                                                v.refresh(cx);
-                                            }
-                                            cx.notify();
-                                        });
-                                    },
-                                ));
-                            }
-                            menu
-                        }),
-                );
+                let styles = div()
+                    .on_children_prepainted(row_measure(2))
+                    .h_flex()
+                    .child(arrow_style_button(editor));
                 panel = panel.child(styles);
             }
         }
@@ -1888,6 +1802,116 @@ impl Render for EditorView {
             }))
     }
 }
+#[inline(never)]
+fn capture_mode_button(display: CapturedDisplay, rect: Rect) -> AnyElement {
+    Button::new("capture-mode")
+        .xsmall()
+        .flex_shrink_0()
+        .label("截图 ▾")
+        .dropdown_menu(move |menu, _, _| {
+            let long_display = display.clone();
+            let gif_display = display.clone();
+            menu.item(PopupMenuItem::new("长截图 [L]").on_click(move |_, _, cx| {
+                app::send(
+                    cx,
+                    Event::Selection(
+                        long_display.clone(),
+                        rect,
+                        crate::overlay::CaptureMode::Long,
+                    ),
+                )
+            }))
+            .item(
+                PopupMenuItem::new("录制 GIF [G]").on_click(move |_, _, cx| {
+                    app::send(
+                        cx,
+                        Event::Selection(
+                            gif_display.clone(),
+                            rect,
+                            crate::overlay::CaptureMode::Gif,
+                        ),
+                    )
+                }),
+            )
+        })
+        .into_any_element()
+}
+
+#[inline(never)]
+fn toast_options_button(editor: WeakEntity<EditorView>) -> AnyElement {
+    Button::new("toast-options")
+        .xsmall()
+        .label("提示 ▾")
+        .dropdown_menu(move |menu, _, _| {
+            let mut menu = menu;
+            for (label, enabled, delay) in [
+                ("关闭提示", false, 2000),
+                ("提示 1 秒", true, 1000),
+                ("提示 2 秒", true, 2000),
+                ("提示 3 秒", true, 3000),
+                ("提示 5 秒", true, 5000),
+            ] {
+                let editor = editor.clone();
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    let _ = editor.update(cx, |v, cx| {
+                        v.preferences.toast_enabled = enabled;
+                        v.preferences.toast_delay_ms = delay;
+                        v.toast_visible = false;
+                        let store = cx.global_mut::<PreferencesStore>();
+                        store.value.toast_enabled = enabled;
+                        store.value.toast_delay_ms = delay;
+                        if let Some(writer) = &store.writer {
+                            let _ = writer.send(store.value.clone());
+                        }
+                        cx.notify();
+                    });
+                }));
+            }
+            menu
+        })
+        .into_any_element()
+}
+
+#[inline(never)]
+fn arrow_style_button(editor: WeakEntity<EditorView>) -> AnyElement {
+    Button::new("arrow-style-menu")
+        .xsmall()
+        .label("箭头样式 ▾")
+        .dropdown_menu(move |menu, _, _| {
+            let mut menu = menu;
+            for (label, style) in [
+                ("燕尾", ArrowStyle::Swallow),
+                ("实心三角", ArrowStyle::TriangleFilled),
+                ("空心三角", ArrowStyle::TriangleHollow),
+                ("实心圆点", ArrowStyle::CircleFilled),
+                ("空心圆点", ArrowStyle::CircleHollow),
+                ("实心菱形", ArrowStyle::DiamondFilled),
+                ("空心菱形", ArrowStyle::DiamondHollow),
+                ("头尾等宽", ArrowStyle::Uniform),
+                ("头宽尾细", ArrowStyle::HeadWide),
+                ("头细尾宽", ArrowStyle::TailWide),
+            ] {
+                let editor = editor.clone();
+                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    let _ = editor.update(cx, |v, cx| {
+                        v.arrow_style = style;
+                        v.remember_fields(cx, 4);
+                        if let Some(i) = v.selected.filter(|i| {
+                            *i < v.doc.objects.len() && v.doc.objects[*i].tool == Tool::Arrow
+                        }) {
+                            v.doc.checkpoint();
+                            v.doc.objects[i].arrow_style = style;
+                            v.refresh(cx);
+                        }
+                        cx.notify();
+                    });
+                }));
+            }
+            menu
+        })
+        .into_any_element()
+}
+
 fn svg_icon(path: &str) -> Icon {
     Icon::default().data(format!("<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.65' stroke-linecap='round' stroke-linejoin='round'>{path}</svg>").as_bytes())
 }
@@ -2339,6 +2363,38 @@ mod tests {
                     assert!(!editor.read(cx).toast_visible);
                 })
                 .unwrap()
+        });
+    }
+
+    #[gpui_kit::test]
+    fn color_picker_changes_persist_and_update_selected_annotation(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.choose_tool(super::Tool::Arrow, w, cx);
+                        v.doc.add(super::Annotation {
+                            tool: super::Tool::Arrow,
+                            points: vec![ImagePoint::new(10., 10.), ImagePoint::new(100., 70.)],
+                            color: v.color,
+                            width: 9.,
+                            text: String::new(),
+                            arrow_style: v.arrow_style,
+                        });
+                        v.selected = Some(0);
+                        v.color_picker.update(cx, |picker, cx| {
+                            picker.select_color(gpui_kit::rgb(0x123456).into(), w, cx)
+                        });
+                    })
+                })
+                .unwrap()
+        });
+        cx.update(|cx| {
+            let v = editor.read(cx);
+            assert_eq!(v.color, [0x12, 0x34, 0x56, 255]);
+            assert_eq!(v.doc.objects[0].color, v.color);
+            assert_eq!(v.preferences.style(super::Tool::Arrow).color, v.color);
         });
     }
 
