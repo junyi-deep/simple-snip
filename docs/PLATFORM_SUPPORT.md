@@ -46,3 +46,5 @@ CI 仅配置 windows-2022 AMD64 和 macos-15 ARM64，并在任务中断言真实
 Windows ZIP 中的程序实际导入 VCRUNTIME140.dll；首次运行前需安装微软官方 x64 Visual C++ v14 运行库（https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist ）。当前 ZIP 不捆绑该运行库。另导入系统 icuuc.dll，Windows 10 早于 1703 不满足这一依赖；该下界来自 DLL/API，不能替代完整最低系统真机验收。
 
 2026-11-01：自动保存逻辑为共享 GPUI / Rust 实现，macOS 实际窗口验证通过；Windows 实际桌面交互仍需独立验收。macOS 正式分发增加 Developer ID / 公证 / staple / Gatekeeper 自动流程，凭据缺失，因此本次仅未公证测试包，未执行 Apple 公证验收。
+
+[v0.0.14 标签构建](https://github.com/junyi-deep/simple-snip/actions/runs/41320304485) 的 Windows AMD64 / macOS ARM64 原生 runner 均通过全部常规检查、测试和 Release 打包（分别 97 / 93 项测试，分别 3 项 ignored）；公开下载包已核验架构与完整性。Windows 桌面手工验收和正式 Apple 公证仍不计完成。

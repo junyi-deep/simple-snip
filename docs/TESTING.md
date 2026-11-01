@@ -336,4 +336,12 @@ README 仅保留核心优势和六项功能，配图通过电脑操作技能在�
 
 可复现：打开偏好设置 → 修改任意输入，停顿约半秒 → 重开确认；删除数值或输入无效字符确认错误与原配置保持；修正后确认保存成功；输入后立即关闭设置确认内容保留。快捷键冲突查看「快捷键」注册状态，默认绑定仍仅 F1 / F3。
 
-当前 Windows 本机交互未执行。维护者选择无证书先发未公证测试包；本机有效签名身份为 0，无法执行正式公证包验收。v0.0.14 标签 CI / Release / 下载包校验结果将在实际完成后追加。
+当前 Windows 本机交互未执行。维护者选择无证书先发未公证测试包；本机有效签名身份为 0，无法执行正式公证包验收。标签 CI / Release / 下载包核验结果见下节。
+
+## 2026-11-02：v0.0.14 发布核验
+
+已推送 main 与注释标签 `v0.0.14`，标签源码为 `1990f926a4a606222b4e36c6f7c316d8c7a7e5e1`。[标签流水线](https://github.com/junyi-deep/simple-snip/actions/runs/41320304485) 的 Windows AMD64、macOS ARM64 和 Release job 全部成功；实际日志为 Windows 97 项、macOS 93 项 Rust 测试通过，各有 3 项系统测试 ignored，未计通过。macOS 原生 ARM64 runner 的断言通过；额外 6 项公证流程命令替身测试通过。两平台 fmt / check / Clippy / Release / 打包均通过。
+
+[v0.0.14 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.14) 已公开，非草稿、非预发布。实际下载 Windows ZIP、macOS ZIP / DMG 与 SHA256SUMS：所有下载文件匹配 GitHub 资产 digest，三个包同时匹配 SHA256SUMS；两个 ZIP 完整性检查、DMG CRC32 校验通过。Windows PE 为 AMD64 / PE32+ / GUI subsystem；macOS Mach-O 为 ARM64，下载应用的两个版本号均为 0.0.14、最低系统为 15.0，ad-hoc 签名完整性校验通过。
+
+未执行下载的 Windows 程序，不代表 Windows 桌面验收。所有 macOS 发行资产本轮仍为 `_unsigned`，没有 Developer ID / Apple 公证；不得把签名完整性或命令替身测试称作 Gatekeeper / 公证通过。独立本地 Release 打包也已通过，Mach-O minos 为 15.0；原授权包保持未覆盖。
