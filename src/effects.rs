@@ -2,8 +2,9 @@ use crate::app::{self, Runtime};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use snip_core::{
+    config::{TrailAnimation, TrailColorMode, TrailConfig},
     geometry::Point as ImagePoint,
-    trail::{Trail, rainbow},
+    trail::Trail,
 };
 use std::time::{Duration, Instant};
 pub struct TrailView {
@@ -11,7 +12,7 @@ pub struct TrailView {
     visible: bool,
     capture_excluded: bool,
     start: Instant,
-    width: f32,
+    config: TrailConfig,
 }
 pub fn start(cx: &mut App) {
     if !cx.global::<Runtime>().trails.is_empty() {
@@ -57,7 +58,7 @@ pub fn start(cx: &mut App) {
                     visible: true,
                     capture_excluded,
                     start: Instant::now(),
-                    width: config.width,
+                    config: config.clone(),
                 });
                 let weak = view.downgrade();
                 let fps = config.fps;
@@ -184,56 +185,164 @@ impl TrailView {
 }
 impl Render for TrailView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let ribbon = self.trail.ribbon();
-        let time = self.start.elapsed().as_secs_f64();
-        let life = self.trail.lifetime;
-        let width = self.width;
-        canvas(
-            move |_, _, _| (),
-            move |_, _, window, _| {
-                for pair in ribbon.windows(2) {
-                    let color = |time_at: f64, opacity: f32| {
-                        let fade = (1. - (time - time_at) / life).clamp(0., 1.) as f32;
-                        let [r, g, b] = rainbow((time_at / life + time * 0.15) as f32);
-                        rgba(
-                            ((r as u32) << 24)
-                                | ((g as u32) << 16)
-                                | ((b as u32) << 8)
-                                | ((fade * opacity * 255.) as u32),
+        trail_canvas(
+            &self.trail,
+            self.start.elapsed().as_secs_f64(),
+            self.config.clone(),
+        )
+    }
+}
+/// Settings preview uses the same geometry and painter as the desktop overlay.
+pub fn preview(config: TrailConfig) -> impl IntoElement {
+    let life = config.lifetime_ms as f64 / 1000.;
+    let mut trail = Trail::new(life);
+    for i in 0..48 {
+        let t = i as f32 / 47.;
+        trail.update(
+            ImagePoint::new(24. + t * 440., 78. + (t * 8.).sin() * 28.),
+            t as f64 * life,
+        );
+    }
+    div()
+        .w_full()
+        .h(px(160.))
+        .rounded_md()
+        .overflow_hidden()
+        .bg(rgb(0x101c30))
+        .child(trail_canvas(&trail, life, config))
+}
+fn trail_canvas(trail: &Trail, time: f64, config: TrailConfig) -> impl IntoElement {
+    let ribbon = if matches!(
+        config.animation,
+        TrailAnimation::Ribbon | TrailAnimation::Comet
+    ) {
+        trail.ribbon()
+    } else {
+        Vec::new()
+    };
+    let points: Vec<_> = trail.points.iter().copied().collect();
+    let life = trail.lifetime;
+    let width = config.width;
+    canvas(
+        move |_, _, _| (),
+        move |bounds, _, window, _| {
+            let color = |time_at: f64, opacity: f32| {
+                let fade = (1. - (time - time_at) / life).clamp(0., 1.) as f32;
+                let phase = if config.color_mode == TrailColorMode::Gradient {
+                    fade
+                } else {
+                    (time_at / life + time * 0.15).rem_euclid(1.) as f32
+                };
+                let [r, g, b, alpha] = config.color_at(phase);
+                rgba(
+                    ((r as u32) << 24)
+                        | ((g as u32) << 16)
+                        | ((b as u32) << 8)
+                        | ((fade * opacity * alpha as f32) as u32),
+                )
+            };
+            let at = |p: ImagePoint| bounds.origin + point(px(p.x), px(p.y));
+            if config.animation == TrailAnimation::Particles {
+                for (index, p) in points.iter().enumerate().rev().step_by(2).take(64) {
+                    let age = ((time - p.time) / life).clamp(0., 1.) as f32;
+                    let origin = at(ImagePoint::new(
+                        p.point.x + (index as f32 * 2. + age * 12.).sin() * age * width * 0.75,
+                        p.point.y - age * width * 2.,
+                    ));
+                    let radius = (width * 0.3 * (1. - age) + 0.5).max(0.5);
+                    for (r, opacity) in [(radius * 2.5, 0.1), (radius, 0.9)] {
+                        window.paint_quad(
+                            fill(
+                                Bounds::new(
+                                    origin - point(px(r), px(r)),
+                                    size(px(r * 2.), px(r * 2.)),
+                                ),
+                                color(p.time, opacity),
+                            )
+                            .corner_radii(px(r)),
+                        );
+                    }
+                }
+                return;
+            }
+            if config.animation == TrailAnimation::Ripple {
+                for p in points
+                    .iter()
+                    .rev()
+                    .step_by((points.len() / 8).max(1))
+                    .take(8)
+                {
+                    let age = ((time - p.time) / life).clamp(0., 1.) as f32;
+                    let radius = width * (0.5 + age * 3.);
+                    let origin = at(p.point);
+                    window.paint_quad(
+                        outline(
+                            Bounds::new(
+                                origin - point(px(radius), px(radius)),
+                                size(px(radius * 2.), px(radius * 2.)),
+                            ),
+                            color(p.time, (1. - age) * 0.8),
+                            BorderStyle::Solid,
                         )
-                    };
-                    for (thickness, opacity) in [(width * 2., 0.08), (width, 0.8)] {
-                        let edge = |p: &snip_core::trail::RibbonPoint, sign: f32| {
-                            let fade = (1. - (time - p.time) / life).clamp(0., 1.) as f32;
-                            point(
+                        .border_widths(px((width * 0.12).max(1.)))
+                        .corner_radii(px(radius)),
+                    );
+                }
+                return;
+            }
+            for pair in ribbon.windows(2) {
+                for (thickness, opacity) in [(width * 2., 0.08), (width, 0.8)] {
+                    let edge = |p: &snip_core::trail::RibbonPoint, sign: f32| {
+                        let fade = (1. - (time - p.time) / life).clamp(0., 1.) as f32;
+                        let fade = if config.animation == TrailAnimation::Comet {
+                            fade * fade
+                        } else {
+                            fade
+                        };
+                        bounds.origin
+                            + point(
                                 px(p.point.x + p.normal.x * sign * thickness * fade / 2.),
                                 px(p.point.y + p.normal.y * sign * thickness * fade / 2.),
                             )
-                        };
-                        let mut path = PathBuilder::fill();
-                        path.move_to(edge(&pair[0], 1.));
-                        path.line_to(edge(&pair[1], 1.));
-                        path.line_to(edge(&pair[1], -1.));
-                        path.line_to(edge(&pair[0], -1.));
-                        path.close();
-                        if let Ok(path) = path.build() {
-                            let a = point(px(pair[0].point.x), px(pair[0].point.y));
-                            let b = point(px(pair[1].point.x), px(pair[1].point.y));
-                            let gradient = ribbon_gradient(
-                                path.bounds,
-                                a,
-                                b,
-                                color(pair[0].time, opacity),
-                                color(pair[1].time, opacity),
-                            );
-                            window.paint_path(path, gradient);
-                        }
+                    };
+                    let mut path = PathBuilder::fill();
+                    path.move_to(edge(&pair[0], 1.));
+                    path.line_to(edge(&pair[1], 1.));
+                    path.line_to(edge(&pair[1], -1.));
+                    path.line_to(edge(&pair[0], -1.));
+                    path.close();
+                    if let Ok(path) = path.build() {
+                        let gradient = ribbon_gradient(
+                            path.bounds,
+                            at(pair[0].point),
+                            at(pair[1].point),
+                            color(pair[0].time, opacity),
+                            color(pair[1].time, opacity),
+                        );
+                        window.paint_path(path, gradient);
                     }
                 }
-            },
-        )
-        .size_full()
-    }
+            }
+            if config.animation == TrailAnimation::Comet
+                && let Some(p) = points.last()
+            {
+                let fade = (1. - (time - p.time) / life).clamp(0., 1.) as f32;
+                let radius = width * 0.65 * fade;
+                let origin = at(p.point);
+                window.paint_quad(
+                    fill(
+                        Bounds::new(
+                            origin - point(px(radius), px(radius)),
+                            size(px(radius * 2.), px(radius * 2.)),
+                        ),
+                        color(p.time, 0.95),
+                    )
+                    .corner_radii(px(radius)),
+                );
+            }
+        },
+    )
+    .size_full()
 }
 
 // Match GPUI's gradient projection so both ends of adjoining ribbon pieces
@@ -272,8 +381,50 @@ fn ribbon_gradient(
 
 #[cfg(test)]
 mod tests {
-    use super::{ImagePoint, Instant, Trail, TrailView};
+    use super::{ImagePoint, Instant, Trail, TrailConfig, TrailView};
     use gpui_kit::{AppContext, TestAppContext};
+    #[gpui_kit::test]
+    fn every_animation_and_palette_uses_the_actual_preview_painter(cx: &mut TestAppContext) {
+        use gpui_kit::*;
+        struct Preview(TrailConfig);
+        impl Render for Preview {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                super::preview(self.0.clone())
+            }
+        }
+        cx.update(gpui_kit::init);
+        let (handle, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(|_| Preview(TrailConfig::default()))
+            })
+            .unwrap()
+        });
+        for animation in [
+            super::TrailAnimation::Ribbon,
+            super::TrailAnimation::Comet,
+            super::TrailAnimation::Particles,
+            super::TrailAnimation::Ripple,
+        ] {
+            for color in [
+                snip_core::config::TrailColorMode::Rainbow,
+                snip_core::config::TrailColorMode::Solid,
+                snip_core::config::TrailColorMode::Gradient,
+            ] {
+                cx.update(|cx| {
+                    handle
+                        .update(cx, |_, w, cx| {
+                            view.update(cx, |v, cx| {
+                                v.0.animation = animation;
+                                v.0.color_mode = color;
+                                cx.notify();
+                            });
+                            let _ = w.draw(cx);
+                        })
+                        .unwrap()
+                });
+            }
+        }
+    }
 
     #[gpui_kit::test]
     fn capture_exclusion_keeps_trail_visible_during_screenshot(cx: &mut TestAppContext) {
@@ -282,7 +433,7 @@ mod tests {
             visible: true,
             capture_excluded: true,
             start: Instant::now(),
-            width: 9.,
+            config: TrailConfig::default(),
         });
         view.update(cx, |v, cx| {
             v.trail.update(ImagePoint::new(20., 30.), 0.);
@@ -299,7 +450,7 @@ mod tests {
             visible: true,
             capture_excluded: false,
             start: Instant::now(),
-            width: 9.,
+            config: TrailConfig::default(),
         });
         view.update(cx, |v, cx| {
             v.trail.update(ImagePoint::new(20., 30.), 0.);

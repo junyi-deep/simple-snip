@@ -11,7 +11,28 @@ use gpui_kit::{
     },
     *,
 };
-use snip_core::config::{Config, ProxyMode, UpdateConfig};
+use snip_core::config::{
+    Config, ProxyMode, TrailAnimation, TrailColorMode, TrailConfig, UpdateConfig,
+};
+
+fn picker_hex(picker: &Entity<ColorPickerState>, cx: &App) -> String {
+    let color = picker
+        .read(cx)
+        .value()
+        .unwrap_or(rgb(0xff5a8a).into())
+        .to_rgb();
+    let rgb = format!(
+        "#{:02X}{:02X}{:02X}",
+        (color.r * 255.).round() as u8,
+        (color.g * 255.).round() as u8,
+        (color.b * 255.).round() as u8
+    );
+    if color.a < 0.999 {
+        format!("{rgb}{:02X}", (color.a * 255.).round() as u8)
+    } else {
+        rgb
+    }
+}
 
 struct UpdateNotification;
 pub struct Settings {
@@ -23,6 +44,11 @@ pub struct Settings {
     gif_width: Entity<InputState>,
     trail_width: Entity<InputState>,
     trail_life: Entity<InputState>,
+    trail_animation: TrailAnimation,
+    trail_color_mode: TrailColorMode,
+    trail_primary: Entity<ColorPickerState>,
+    trail_secondary: Entity<ColorPickerState>,
+    _trail_observers: Vec<Subscription>,
     pin_border_color: Entity<ColorPickerState>,
     pin_border_width: Entity<InputState>,
     pin_shadow: bool,
@@ -41,7 +67,14 @@ impl Settings {
         Self::build(cx).map(|(handle, _)| handle)
     }
     fn build(cx: &mut App) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
-        let bounds = Bounds::centered(None, size(px(900.), px(660.)), cx);
+        let bounds = Bounds::centered(
+            None,
+            size(
+                px(900.),
+                px(if crate::is_docs_demo() { 800. } else { 660. }),
+            ),
+            cx,
+        );
         let (h, view) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -106,44 +139,165 @@ impl Settings {
                 let pin_color = config.pin.color().unwrap_or(0x1688ff);
                 let pin_border_color =
                     cx.new(|cx| ColorPickerState::new(w, cx).default_value(rgb(pin_color)));
+                let color = |text: &str| {
+                    let color = TrailConfig::parse_color(text).unwrap_or([255, 90, 138, 255]);
+                    rgba(u32::from_be_bytes(color))
+                };
+                let trail_primary = cx.new(|cx| {
+                    ColorPickerState::new(w, cx).default_value(color(&config.trail.primary_color))
+                });
+                let trail_secondary = cx.new(|cx| {
+                    ColorPickerState::new(w, cx).default_value(color(&config.trail.secondary_color))
+                });
                 let proxy_password = cx.new(|cx| InputState::new(w, cx).masked(true));
-                cx.new(|_| Self {
-                    section: 0,
-                    screenshot_key,
-                    paste_key,
-                    save_path,
-                    gif_seconds,
-                    gif_width,
-                    trail_width,
-                    trail_life,
-                    pin_border_color,
-                    pin_border_width,
-                    pin_shadow: config.pin.shadow,
-                    proxy_mode: config.updates.proxy_mode,
-                    proxy_url,
-                    proxy_username,
-                    proxy_password,
-                    update_busy: false,
-                    notified_status: String::new(),
-                    update_status: match std::fs::read_to_string(
-                        Config::path()
-                            .with_file_name("updates")
-                            .join("last-install.txt"),
-                    )
-                    .as_deref()
-                    {
-                        Ok("ok") => "上次升级安装完成；可检查新版本。".into(),
-                        Ok("failed") => {
-                            "上次升级失败，已尝试恢复原版本；请检查安装目录中的升级日志。".into()
-                        }
-                        _ => "手动检查 GitHub Release；截图和识别内容不会发送。".into(),
-                    },
-                    update_release: None,
-                    optional,
+                cx.new(|cx| {
+                    let trail_observers = vec![
+                        cx.observe(&trail_primary, |_: &mut Self, _, cx| cx.notify()),
+                        cx.observe(&trail_secondary, |_, _, cx| cx.notify()),
+                        cx.observe(&trail_width, |_, _, cx| cx.notify()),
+                        cx.observe(&trail_life, |_, _, cx| cx.notify()),
+                    ];
+                    Self {
+                        section: 0,
+                        screenshot_key,
+                        paste_key,
+                        save_path,
+                        gif_seconds,
+                        gif_width,
+                        trail_width,
+                        trail_life,
+                        trail_animation: config.trail.animation,
+                        trail_color_mode: config.trail.color_mode,
+                        trail_primary,
+                        trail_secondary,
+                        _trail_observers: trail_observers,
+                        pin_border_color,
+                        pin_border_width,
+                        pin_shadow: config.pin.shadow,
+                        proxy_mode: config.updates.proxy_mode,
+                        proxy_url,
+                        proxy_username,
+                        proxy_password,
+                        update_busy: false,
+                        notified_status: String::new(),
+                        update_status: match std::fs::read_to_string(
+                            Config::path()
+                                .with_file_name("updates")
+                                .join("last-install.txt"),
+                        )
+                        .as_deref()
+                        {
+                            Ok("ok") => "上次升级安装完成；可检查新版本。".into(),
+                            Ok("failed") => {
+                                "上次升级失败，已尝试恢复原版本；请检查安装目录中的升级日志。"
+                                    .into()
+                            }
+                            _ => "手动检查 GitHub Release；截图和识别内容不会发送。".into(),
+                        },
+                        update_release: None,
+                        optional,
+                    }
                 })
             },
         )?;
         Ok((h, view))
+    }
+    #[cfg(debug_assertions)]
+    pub(crate) fn open_section(section: usize, cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
+        let (handle, view) = Self::build(cx)?;
+        view.update(cx, |v, cx| {
+            v.section = section;
+            cx.notify();
+        });
+        Ok(handle)
+    }
+    #[inline(never)]
+    fn trail_options(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mut options = div()
+            .v_flex()
+            .gap_3()
+            .child(div().text_sm().child("动画效果"));
+        let mut styles = div().h_flex().gap_2().flex_wrap();
+        for (label, style) in [
+            ("柔光丝带", TrailAnimation::Ribbon),
+            ("彗星", TrailAnimation::Comet),
+            ("光点", TrailAnimation::Particles),
+            ("涟漪", TrailAnimation::Ripple),
+        ] {
+            styles = styles.child(
+                Button::new(label)
+                    .label(label)
+                    .selected(self.trail_animation == style)
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        v.trail_animation = style;
+                        cx.notify();
+                    })),
+            );
+        }
+        options = options
+            .child(styles)
+            .child(div().text_sm().child("配色模式"));
+        let mut modes = div().h_flex().gap_2();
+        for (label, mode) in [
+            ("彩虹", TrailColorMode::Rainbow),
+            ("单色", TrailColorMode::Solid),
+            ("渐变", TrailColorMode::Gradient),
+        ] {
+            modes = modes.child(
+                Button::new(label)
+                    .label(label)
+                    .selected(self.trail_color_mode == mode)
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        v.trail_color_mode = mode;
+                        cx.notify();
+                    })),
+            );
+        }
+        options = options.child(modes);
+        if self.trail_color_mode != TrailColorMode::Rainbow {
+            let mut colors =
+                div()
+                    .h_flex()
+                    .gap_3()
+                    .child(ColorPicker::new(&self.trail_primary).label(
+                        if self.trail_color_mode == TrailColorMode::Solid {
+                            "拖尾颜色"
+                        } else {
+                            "起始色"
+                        },
+                    ));
+            if self.trail_color_mode == TrailColorMode::Gradient {
+                colors = colors.child(ColorPicker::new(&self.trail_secondary).label("结束色"));
+            }
+            options = options.child(colors);
+        }
+        let mut config = cx.global::<Runtime>().config.trail.clone();
+        config.animation = self.trail_animation;
+        config.color_mode = self.trail_color_mode;
+        config.primary_color = picker_hex(&self.trail_primary, cx);
+        config.secondary_color = picker_hex(&self.trail_secondary, cx);
+        config.width = self
+            .trail_width
+            .read(cx)
+            .value()
+            .parse::<f32>()
+            .unwrap_or(9.)
+            .clamp(1., 60.);
+        config.lifetime_ms = self
+            .trail_life
+            .read(cx)
+            .value()
+            .parse::<u32>()
+            .unwrap_or(300)
+            .clamp(100, 3000);
+        options
+            .child(crate::effects::preview(config))
+            .child(
+                div()
+                    .text_xs()
+                    .child("效果预览 · 保存设置后应用到桌面，颜色和动画会自动记住"),
+            )
+            .into_any_element()
     }
     fn save(&self, window: &mut Window, cx: &mut App) {
         let result = (|| -> anyhow::Result<Config> {
@@ -169,6 +323,10 @@ impl Settings {
             c.gif.max_width = self.gif_width.read(cx).value().parse()?;
             c.trail.width = self.trail_width.read(cx).value().parse()?;
             c.trail.lifetime_ms = self.trail_life.read(cx).value().parse()?;
+            c.trail.animation = self.trail_animation;
+            c.trail.color_mode = self.trail_color_mode;
+            c.trail.primary_color = picker_hex(&self.trail_primary, cx);
+            c.trail.secondary_color = picker_hex(&self.trail_secondary, cx);
             if let Some(color) = self.pin_border_color.read(cx).value() {
                 let c_rgb = color.to_rgb();
                 c.pin.border_color = format!(
@@ -184,7 +342,9 @@ impl Settings {
             snip_update::validate_proxy(&c.updates)?;
             c.validate()?;
             crate::hotkeys::validate(&c)?;
-            c.save(&Config::path())?;
+            if !crate::is_docs_demo() {
+                c.save(&Config::path())?;
+            }
             Ok(c)
         })();
         match result {
@@ -207,24 +367,13 @@ impl Settings {
                     crate::effects::start(cx);
                 }
                 let config = cx.global::<Runtime>().config.clone();
-                let result = cx
-                    .global_mut::<Runtime>()
-                    .hotkeys
-                    .as_mut()
-                    .map(|keys| keys.apply(&config));
-                match result {
-                    Some(Err(error)) => window.push_notification(
-                        Notification::warning(format!("设置已保存；{error}")),
-                        cx,
-                    ),
-                    Some(Ok(())) => {
-                        window.push_notification(Notification::success("设置已保存"), cx)
-                    }
-                    None => window.push_notification(
-                        Notification::warning("设置已保存；快捷键服务暂不可用，每 5 秒重试"),
-                        cx,
-                    ),
+                if let Some(keys) = cx.global_mut::<Runtime>().hotkeys.as_mut()
+                    && let Err(error) = keys.apply(&config)
+                {
+                    tracing::warn!("{error}");
                 }
+                window.push_notification(Notification::success("设置已保存"), cx);
+                cx.refresh_windows();
             }
             Err(e) => window.push_notification(Notification::error(format!("设置未保存: {e}")), cx),
         }
@@ -579,8 +728,8 @@ impl Render for Settings {
             6 => {
                 content = content
                     .child(row(
-                        "彩虹鼠标拖尾",
-                        "独立透明穿透窗口；截图时隐藏",
+                        "鼠标拖尾",
+                        "独立透明穿透窗口；支持动画与自定义配色",
                         Switch::new("trail")
                             .checked(!cx.global::<Runtime>().trails.is_empty())
                             .on_click(|_, _, cx| app::command(cx, Command::Trail)),
@@ -594,10 +743,26 @@ impl Render for Settings {
                         "生命周期（毫秒）",
                         "100–3000，静止时自然消失",
                         div().w_24().child(Input::new(&self.trail_life)),
-                    ));
+                    ))
+                    .child(self.trail_options(cx));
             }
             7 => {
+                let registration = match cx.global::<Runtime>().hotkeys.as_ref() {
+                    Some(keys) => keys
+                        .registration_error()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "快捷键注册正常".into()),
+                    None => "快捷键服务暂未就绪，后台每 5 秒自动重试".into(),
+                };
                 content = content
+                    .child(
+                        div()
+                            .text_sm()
+                            .p_3()
+                            .rounded_md()
+                            .bg(cx.theme().muted)
+                            .child(registration),
+                    )
                     .child(row(
                         "区域截图",
                         "留空禁用。例：F1、Alt+Shift+S",
