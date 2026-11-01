@@ -1,5 +1,13 @@
 # 实际测试记录
 
+## 2026-11-01：本地 Debug 录屏授权身份修复
+
+用户反馈当前 Debug `.app` 已添加录屏开关但仍被拒绝。本机只读检查确认代码签名有效、签名方式为 ad-hoc；系统 tccd 日志明确显示 `Failed to match existing code requirement`，旧授权记录绑定的 cdhash 与当前构建不一致。不能将开关 on 当作当前代码已经获得授权，也不是通过绕过预检修复。
+
+取得用户明确授权后，仅执行 `tccutil reset ScreenCapture dev.simplesnip.desktop`，系统返回成功；没有重置其他应用或其他隐私服务。启动已有的 `dist/Simple Snip.app`（0.0.12），通过截图入口进入系统设置。触控 ID 验证、最终添加应用和开启权限由用户手动完成；文件选择器中曾停留在尚未提交的阶段，选中当前应用并点击「打开」后才写入新授权。系统随后重开了应用。
+
+保持该应用构建和签名不变，实际截图已显示冻结桌面的 Overlay，可用 Esc 取消；系统 tccd 日志确认当前 cdhash 校验 `status: 0`，`kTCCServiceScreenCapture` 返回 `Allowed (System Set)`。这是当前构建 / 单显示器的授权恢复验证，不代表 ad-hoc 授权跨重新编译稳定。未保存、上传桌面图像或提交系统原始日志，未修改 Rust 源码、重新签名或构建应用。调试及身份失配排查步骤补充在 BUILD.md。
+
 ## 2026-10-30：v0.0.6 发布复核
 
 已推送注释标签 `v0.0.6`，目标提交 `6666f571f376a986fa0a6e42d8ff220bcd3b1d00`。[流水线 40913442851](https://github.com/junyi-deep/simple-snip/actions/runs/40913442851) 的 Windows、macOS、Release job 全部成功；实际日志为 Windows 54 项、macOS 53 项自动测试通过，两平台各另有 3 项系统测试默认 ignored。两个原生目标均通过 fmt / check / Clippy / Release / 打包和资产上传。
