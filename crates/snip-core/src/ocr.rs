@@ -37,6 +37,33 @@ pub trait OcrEngine {
     fn recognize(&self, image: &RgbaImage, cancel: &Cancellation) -> Result<OcrResult>;
 }
 impl OcrResult {
+    /// Native engines usually return whole words. Expose character-sized units
+    /// so selection can start/end inside a word; preserve the engine's text.
+    pub fn selection_units(mut self) -> Self {
+        for line in &mut self.lines {
+            line.words = line
+                .words
+                .iter()
+                .flat_map(|word| {
+                    let count = word.text.chars().count().max(1) as f32;
+                    word.text
+                        .chars()
+                        .enumerate()
+                        .map(move |(index, ch)| OcrWord {
+                            text: ch.to_string(),
+                            bounds: Rect::new(
+                                word.bounds.x + index as f32 * word.bounds.width / count,
+                                word.bounds.y,
+                                word.bounds.width / count,
+                                word.bounds.height,
+                            ),
+                            confidence: word.confidence,
+                        })
+                })
+                .collect();
+        }
+        self
+    }
     pub fn text(&self) -> String {
         self.lines
             .iter()
@@ -53,6 +80,31 @@ impl OcrResult {
             }
         }
         None
+    }
+    /// Continue a text drag through whitespace and beyond the first/last glyph.
+    pub fn nearest_hit(&self, p: Point) -> Option<(usize, usize)> {
+        let distance = |r: Rect| {
+            let dy = (r.y - p.y).max(0.).max(p.y - r.bottom());
+            let dx = (r.x - p.x).max(0.).max(p.x - r.right());
+            (dy, dx)
+        };
+        let (line, row) = self
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.words.is_empty())
+            .min_by(|(_, a), (_, b)| {
+                let a = distance(a.bounds);
+                let b = distance(b.bounds);
+                a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+            })?;
+        let word = row
+            .words
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| distance(a.bounds).1.total_cmp(&distance(b.bounds).1))?
+            .0;
+        Some((line, word))
     }
     pub fn selected_text(&self, a: (usize, usize), b: (usize, usize)) -> String {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
@@ -143,5 +195,49 @@ mod tests {
         };
         assert_eq!(r.selected_text((1, 0), (0, 0)), "0\n1");
         assert_eq!(r.hit(Point::new(2., 12.)), Some((1, 0)));
+    }
+    #[test]
+    fn character_selection_crosses_gaps_and_clamps_outside_lines() {
+        let result = OcrResult {
+            lines: vec![
+                OcrLine {
+                    text: "Hello world".into(),
+                    bounds: Rect::new(10., 20., 120., 16.),
+                    words: vec![
+                        OcrWord {
+                            text: "Hello".into(),
+                            bounds: Rect::new(10., 20., 50., 16.),
+                            confidence: None,
+                        },
+                        OcrWord {
+                            text: "world".into(),
+                            bounds: Rect::new(80., 20., 50., 16.),
+                            confidence: None,
+                        },
+                    ],
+                    confidence: None,
+                    language: None,
+                },
+                OcrLine {
+                    text: "中文".into(),
+                    bounds: Rect::new(10., 60., 32., 16.),
+                    words: vec![OcrWord {
+                        text: "中文".into(),
+                        bounds: Rect::new(10., 60., 32., 16.),
+                        confidence: None,
+                    }],
+                    confidence: None,
+                    language: None,
+                },
+            ],
+        }
+        .selection_units();
+        assert_eq!(result.lines[0].words.len(), 10);
+        assert_eq!(result.selected_text((0, 1), (0, 3)), "ell");
+        assert_eq!(result.selected_text((0, 0), (0, 9)), "Hello world");
+        assert_eq!(result.nearest_hit(Point::new(68., 27.)), Some((0, 4)));
+        assert_eq!(result.nearest_hit(Point::new(300., 64.)), Some((1, 1)));
+        assert_eq!(result.nearest_hit(Point::new(-100., -100.)), Some((0, 0)));
+        assert_eq!(result.selected_text((1, 1), (0, 3)), "lo world\n中文");
     }
 }

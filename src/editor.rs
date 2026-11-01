@@ -82,12 +82,13 @@ pub struct EditorView {
     host: EditorHost,
     rendered: Arc<RgbaImage>,
     texture: Arc<RenderImage>,
+    texture_window: AnyWindowHandle,
     tool: Tool,
     color: [u8; 4],
     color_picker: Entity<ColorPickerState>,
     _color_subscription: Subscription,
     _color_observer: Subscription,
-    pending_text: Vec<(Annotation, u64)>,
+    pending_annotations: Vec<(Annotation, u64)>,
     popup_open: bool,
     width: f32,
     arrow_style: ArrowStyle,
@@ -116,7 +117,7 @@ pub struct EditorView {
     generation: u64,
     rendering: bool,
     dirty: bool,
-    ocr: Option<OcrResult>,
+    ocr: Option<Arc<OcrResult>>,
     ocr_start: Option<(usize, usize)>,
     ocr_end: Option<(usize, usize)>,
     ocr_hover: Option<(usize, usize)>,
@@ -228,7 +229,8 @@ impl EditorView {
             color_picker,
             _color_subscription: color_subscription,
             _color_observer: color_observer,
-            pending_text: vec![],
+            pending_annotations: vec![],
+            texture_window: w.window_handle(),
             popup_open: false,
             width: style.width,
             arrow_style: style.arrow,
@@ -476,6 +478,8 @@ impl EditorView {
                 draft.points.dedup();
             }
             if draft.points.len() > 1 {
+                self.pending_annotations
+                    .push((draft.clone(), self.generation + 1));
                 self.doc.add(draft);
                 self.refresh(cx);
             }
@@ -523,11 +527,12 @@ impl EditorView {
     ) {
         self.commit_text(cx);
         self.clear_ocr();
-        self.pending_text.clear();
+        self.pending_annotations.clear();
         self.doc.reframe(image.clone(), dx, dy);
         self.transform = identity(&image);
         self.rendered = image.clone();
-        self.texture = app::texture(&image);
+        let old = std::mem::replace(&mut self.texture, app::texture(&image));
+        app::retire_texture(self.texture_window, old, cx);
         self.origin = bounds.origin;
         self.view_size = bounds.size;
         self.scale = f32::from(bounds.size.width) / image.width() as f32;
@@ -609,7 +614,8 @@ impl EditorView {
                 text,
                 arrow_style: ArrowStyle::default(),
             };
-            self.pending_text.push((a.clone(), self.generation + 1));
+            self.pending_annotations
+                .push((a.clone(), self.generation + 1));
             if let Some(i) = index.filter(|i| *i < self.doc.objects.len()) {
                 self.doc.checkpoint();
                 self.doc.objects[i] = a;
@@ -767,12 +773,13 @@ impl EditorView {
             let result = render.await;
             let _ = this.update(cx, |v, cx| {
                 v.rendering = false;
-                if Arc::ptr_eq(&v.doc.original, &source) {
+                if Arc::ptr_eq(&v.doc.original, &source) && generation == v.generation {
                     match result {
                         Ok((doc, image, texture)) => {
                             v.doc.font = doc.font;
-                            v.texture = texture;
-                            v.pending_text
+                            let old = std::mem::replace(&mut v.texture, texture);
+                            app::retire_texture(v.texture_window, old, cx);
+                            v.pending_annotations
                                 .retain(|(_, revision)| *revision > generation);
                             v.rendered = image;
                         }
@@ -904,7 +911,7 @@ impl EditorView {
                 match result {
                     Ok(ocr) => {
                         v.message = format!("{} 行文字 · 拖动选择后复制", ocr.lines.len());
-                        v.ocr = Some(ocr);
+                        v.ocr = Some(Arc::new(ocr.selection_units()));
                         v.ocr_start = None;
                         v.ocr_end = None;
                         v.tool = Tool::Select;
@@ -952,7 +959,7 @@ impl EditorView {
             return;
         }
         if let Some(ocr) = &self.ocr {
-            if let Some(hit) = ocr.hit(p) {
+            if let Some(hit) = ocr.nearest_hit(p) {
                 self.ocr_start = Some(hit);
                 self.ocr_end = Some(hit);
                 self.ocr_drag = true;
@@ -1061,19 +1068,22 @@ impl EditorView {
         } else {
             None
         };
-        cx.notify();
         let p = self.image_point(e.position);
         if let Some(ocr) = &self.ocr {
-            self.ocr_hover = ocr.hit(p);
-            if self.ocr_drag
-                && e.dragging()
-                && let Some(hit) = self.ocr_hover
-            {
-                self.ocr_end = Some(hit);
+            let hover = ocr.hit(p);
+            let end = if self.ocr_drag && e.dragging() {
+                ocr.nearest_hit(p)
+            } else {
+                self.ocr_end
+            };
+            if self.ocr_hover != hover || self.ocr_end != end {
+                self.ocr_hover = hover;
+                self.ocr_end = end;
+                cx.notify();
             }
-            cx.notify();
             return;
         }
+        cx.notify();
         if let Some(draft) = &mut self.draft
             && draft.tool == Tool::Polyline
         {
@@ -1381,7 +1391,7 @@ impl EditorView {
                             cx.listener(|v, _, _, cx| {
                                 let index = v.ocr_start.map_or(0, |(line, _)| line);
                                 if let Some(ocr) = &mut v.ocr
-                                    && let Some(line) = ocr.lines.get_mut(index)
+                                    && let Some(line) = Arc::make_mut(ocr).lines.get_mut(index)
                                 {
                                     let text = v.text.read(cx).value().to_string();
                                     if !text.is_empty() {
@@ -1550,7 +1560,17 @@ impl Render for EditorView {
         let weak = cx.entity().downgrade();
         let scale = self.scale;
         let transform = self.transform;
-        let draft = self.draft.clone();
+        let drafts: Vec<_> = self
+            .draft
+            .iter()
+            .cloned()
+            .chain(
+                self.pending_annotations
+                    .iter()
+                    .filter(|(a, _)| a.tool != Tool::Text && a.tool != Tool::Number)
+                    .map(|(a, _)| a.clone()),
+            )
+            .collect();
         let ocr = self.ocr.clone();
         let selection = self.ocr_start.zip(self.ocr_end);
         let hover = self.ocr_hover;
@@ -1578,7 +1598,7 @@ impl Render for EditorView {
                     let p = transform.forward(p);
                     bounds.origin + point(px(p.x * scale), px(p.y * scale))
                 };
-                if let Some(a) = &draft {
+                for a in &drafts {
                     let mut points = a.path_points();
                     let r = a.bounds();
                     if a.tool == Tool::Rectangle {
@@ -1606,7 +1626,11 @@ impl Render for EditorView {
                             let mut path = if fill {
                                 PathBuilder::fill()
                             } else {
-                                PathBuilder::stroke(px(a.width * scale))
+                                PathBuilder::stroke(px(if a.tool == Tool::Highlight {
+                                    a.width * 5.
+                                } else {
+                                    a.width
+                                } * scale))
                             };
                             if let Some(first) = points.first() {
                                 path.move_to(map(*first));
@@ -1624,7 +1648,11 @@ impl Render for EditorView {
                     let mut path = if a.tool == Tool::Arrow {
                         PathBuilder::fill()
                     } else {
-                        PathBuilder::stroke(px(a.width * scale))
+                        PathBuilder::stroke(px(if a.tool == Tool::Highlight {
+                            a.width * 5.
+                        } else {
+                            a.width
+                        } * scale))
                     };
                     if let Some(p) = points.first() {
                         path.move_to(map(*p));
@@ -1641,7 +1669,11 @@ impl Render for EditorView {
                                     ((a.color[0] as u32) << 24)
                                         | ((a.color[1] as u32) << 16)
                                         | ((a.color[2] as u32) << 8)
-                                        | a.color[3] as u32,
+                                        | if a.tool == Tool::Highlight {
+                                            70
+                                        } else {
+                                            a.color[3] as u32
+                                        },
                                 ),
                             );
                         }
@@ -1691,6 +1723,9 @@ impl Render for EditorView {
                             } else {
                                 rgba(0x00000000)
                             };
+                            if !selected && hover != Some((i, j)) {
+                                continue;
+                            }
                             window.paint_quad(fill(
                                 Bounds::new(
                                     point(a.x.min(b.x), a.y.min(b.y)),
@@ -1766,46 +1801,62 @@ impl Render for EditorView {
                         return;
                     }
                     if let Some(a) = v.draft.take() {
+                        v.pending_annotations.push((a.clone(), v.generation + 1));
                         v.doc.add(a);
                         v.refresh(cx);
                     }
                     cx.notify();
                 }),
             )
-            .children(self.pending_text.iter().map(|(a, _)| {
-                let p = self.transform.forward(a.points[0]);
-                let font = (a.width * 6. + 12.) * self.scale;
-                div()
-                    .absolute()
-                    .left(px(p.x * self.scale))
-                    .top(px(p.y * self.scale))
-                    .text_size(px(font))
-                    .line_height(px(font * 1.3))
-                    .text_color(rgba(u32::from_be_bytes(a.color)))
-                    .child(a.text.clone())
-            }))
+            .children(
+                self.pending_annotations
+                    .iter()
+                    .filter(|(a, _)| a.tool == Tool::Text)
+                    .map(|(a, _)| {
+                        let p = self.transform.forward(a.points[0]);
+                        let font = (a.width * 6. + 12.) * self.scale;
+                        div()
+                            .absolute()
+                            .left(px(p.x * self.scale))
+                            .top(px(p.y * self.scale))
+                            .font_family(annotation_font_family())
+                            .text_size(px(font))
+                            .line_height(px(font * 1.3))
+                            .text_color(rgba(u32::from_be_bytes(a.color)))
+                            .child(a.text.clone())
+                    }),
+            )
             .children(self.cursor_indicator())
             .children(self.text_anchor.map(|p| {
                 let p = self.transform.forward(p);
                 let font = (self.width * 6. + 12.) * self.scale;
-                let content_width = self
-                    .text
-                    .read(cx)
-                    .value()
-                    .chars()
-                    .map(|c| if c.is_ascii() { 0.7 } else { 1.0 })
-                    .sum::<f32>()
-                    * font;
+                let value = self.text.read(cx).value();
+                let mut text_font = w.text_style().font();
+                text_font.family = annotation_font_family().into();
+                let content_width = f32::from(
+                    w.text_system()
+                        .shape_line(
+                            value.clone(),
+                            px(font),
+                            &[TextRun {
+                                len: value.len(),
+                                font: text_font,
+                                ..Default::default()
+                            }],
+                            None,
+                        )
+                        .width,
+                );
                 div()
                     .id("image-text-input")
                     .absolute()
                     .left(px(p.x * self.scale))
                     .top(px(p.y * self.scale))
-                    .w(px((content_width + font).max(48.)))
+                    .w(px((content_width + 6.).max(16.)))
+                    .h(px(font * 1.3))
+                    .font_family(annotation_font_family())
                     .text_size(px(font))
                     .line_height(px(font * 1.3))
-                    .border_1()
-                    .border_color(rgb(0x1688ff))
                     .bg(transparent_black())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
@@ -1815,6 +1866,7 @@ impl Render for EditorView {
                             .appearance(false)
                             .bordered(false)
                             .p_0()
+                            .font_family(annotation_font_family())
                             .text_size(px(font))
                             .h(px(font * 1.3))
                             .line_height(px(font * 1.3))
@@ -1832,11 +1884,17 @@ impl Render for EditorView {
                     gpui_kit::canvas(
                         move |_, _, _| (),
                         move |_, _, w, cx| {
+                            if let Some(text_bounds) = text_frame_bounds(input.read(cx)) {
+                                w.paint_quad(
+                                    outline(text_bounds, rgb(0x1688ff), BorderStyle::Solid)
+                                        .border_widths(px(1.)),
+                                );
+                            }
                             if input.read(cx).focus_handle(cx).is_focused(w)
                                 && let Some((bounds, _)) = input.read(cx).cursor_layout()
                             {
                                 let origin = bounds.origin;
-                                let height = bounds.size.height.max(px(10.));
+                                let height = bounds.size.height.max(px(1.));
                                 w.paint_quad(fill(
                                     Bounds::new(
                                         origin - point(px(1.), px(0.)),
@@ -1904,6 +1962,22 @@ impl Render for EditorView {
             .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| v.key_down(e, w, cx, true)))
     }
 }
+fn annotation_font_family() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Microsoft YaHei"
+    } else {
+        "Arial Unicode MS"
+    }
+}
+fn text_frame_bounds(input: &InputState) -> Option<Bounds<Pixels>> {
+    let content = input.input_bounds();
+    let caret = input.cursor_layout()?.0;
+    Some(Bounds::new(
+        point(content.left(), caret.top()),
+        size(content.size.width, caret.size.height),
+    ))
+}
+
 #[inline(never)]
 fn capture_mode_button(display: CapturedDisplay, rect: Rect) -> AnyElement {
     Button::new("capture-mode")
@@ -2274,8 +2348,16 @@ pub fn open_toolbar(
             app::apply_style(w, snip_platform::WindowStyle::default());
             cx.new(|cx| {
                 let subscription = cx.observe(&editor, |_, _, cx| cx.notify());
-                cx.observe_window_activation(w, |_, _, cx| cx.refresh_windows())
-                    .detach();
+                cx.observe_window_activation(w, |v: &mut FloatingToolbar, w, cx| {
+                    if !w.is_window_active()
+                        && let Some(editor) = &v.editor
+                        && let EditorHost::Pin(id) = editor.read(cx).host
+                    {
+                        crate::pin::schedule_blur(id, cx);
+                    }
+                    cx.refresh_windows();
+                })
+                .detach();
                 FloatingToolbar {
                     focus: cx.focus_handle(),
                     editor: Some(editor),
@@ -2557,11 +2639,11 @@ mod tests {
                         v.text
                             .update(cx, |t, cx| t.set_value("continuous text", w, cx));
                         v.commit_text(cx);
-                        assert_eq!(v.pending_text.len(), 1);
-                        assert_eq!(v.pending_text[0].0.text, "continuous text");
+                        assert_eq!(v.pending_annotations.len(), 1);
+                        assert_eq!(v.pending_annotations[0].0.text, "continuous text");
                         v.choose_tool(super::Tool::Arrow, w, cx);
                         assert_eq!(
-                            v.pending_text.len(),
+                            v.pending_annotations.len(),
                             1,
                             "text must stay visible until raster result is ready"
                         );
@@ -2579,7 +2661,7 @@ mod tests {
                 .update(cx, |_, w, cx| {
                     editor.update(cx, |v, _| {
                         v.host = EditorHost::Capture;
-                        v.ocr = Some(super::OcrResult {
+                        v.ocr = Some(Arc::new(super::OcrResult {
                             lines: vec![snip_core::ocr::OcrLine {
                                 text: "Hello world".into(),
                                 bounds: super::Rect::new(0., 0., 120., 20.),
@@ -2598,7 +2680,7 @@ mod tests {
                                     },
                                 ],
                             }],
-                        });
+                        }));
                         v.ocr_start = Some((0, 0));
                         v.ocr_end = Some((0, 1));
                     });
@@ -2620,6 +2702,99 @@ mod tests {
                 cx.read_from_clipboard().and_then(|c| c.text()),
                 Some("Hello world".into())
             )
+        });
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.ocr = Some(Arc::new(
+                            (**v.ocr.as_ref().unwrap()).clone().selection_units(),
+                        ));
+                        v.focus_canvas(w, cx);
+                    });
+                    let _ = w.draw(cx);
+                })
+                .unwrap()
+        });
+        let recognized = cx.update(|cx| editor.read(cx).ocr.clone().unwrap());
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(
+            point(px(451.), px(655.)),
+            gpui_kit::MouseButton::Left,
+            Default::default(),
+        );
+        visual.simulate_mouse_move(
+            point(px(474.), px(655.)),
+            Some(gpui_kit::MouseButton::Left),
+            Default::default(),
+        );
+        cx.update(|cx| {
+            assert_eq!(
+                editor.read(cx).ocr_end,
+                Some((0, 4)),
+                "drag must cross whitespace"
+            )
+        });
+        visual.simulate_mouse_move(
+            point(px(600.), px(670.)),
+            Some(gpui_kit::MouseButton::Left),
+            Default::default(),
+        );
+        visual.simulate_mouse_up(
+            point(px(600.), px(670.)),
+            gpui_kit::MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|cx| {
+            let v = editor.read(cx);
+            assert_eq!(v.ocr_end, Some((0, 9)));
+            assert!(!v.ocr_drag);
+            assert!(Arc::ptr_eq(v.ocr.as_ref().unwrap(), &recognized));
+        });
+        cx.simulate_keystrokes(window, copy);
+        cx.update(|cx| {
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|c| c.text()),
+                Some("Hello world".into())
+            )
+        });
+    }
+
+    #[gpui_kit::test]
+    fn submitted_shape_stays_in_preview_until_the_matching_raster_is_ready(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, _, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.draft = Some(super::Annotation {
+                            tool: super::Tool::Rectangle,
+                            points: vec![ImagePoint::new(20., 20.), ImagePoint::new(120., 90.)],
+                            width: 4.,
+                            color: [255, 0, 0, 255],
+                            text: String::new(),
+                            arrow_style: Default::default(),
+                        });
+                        v.finish_path(cx);
+                        assert!(v.draft.is_none());
+                        assert_eq!(v.doc.objects.len(), 1);
+                        assert_eq!(v.pending_annotations.len(), 1);
+                        assert_eq!(v.pending_annotations[0].0.tool, super::Tool::Rectangle);
+                        // Queue a second change while the first render is in flight.
+                        v.refresh(cx);
+                        assert_eq!(v.pending_annotations.len(), 1);
+                    })
+                })
+                .unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let v = editor.read(cx);
+            assert!(v.pending_annotations.is_empty());
+            assert_eq!(v.rendered.get_pixel(20, 40)[0], 255);
+            assert_eq!(v.rendered.get_pixel(20, 40)[1], 0);
         });
     }
 
@@ -2984,7 +3159,7 @@ mod tests {
         cx.update(|cx| {
             editor.update(cx, |v, _| {
                 let original = v.doc.original.clone();
-                v.ocr = Some(super::OcrResult::default());
+                v.ocr = Some(Arc::new(super::OcrResult::default()));
                 let height = v.toolbar_height();
                 v.message = "已复制".into();
                 assert_eq!(v.toolbar_height(), height);
@@ -3028,7 +3203,24 @@ mod tests {
         });
         cx.simulate_input(window, "hello");
         cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    let _ = w.draw(cx);
+                })
+                .unwrap();
             assert_eq!(editor.read(cx).text.read(cx).value().as_str(), "hello");
+            let v = editor.read(cx);
+            let input = v.text.read(cx);
+            let bounds = super::text_frame_bounds(input).unwrap();
+            let caret = input.cursor_layout().unwrap().0;
+            assert!(
+                caret.right() <= bounds.right() + px(1.),
+                "caret {caret:?} outside blue frame {bounds:?}"
+            );
+            assert!(
+                (caret.size.height - bounds.size.height).abs() <= px(1.),
+                "caret {caret:?} and blue frame {bounds:?} disagree"
+            );
         });
         cx.simulate_keystrokes(window, "enter");
         cx.update(|cx| {

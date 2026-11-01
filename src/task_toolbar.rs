@@ -241,9 +241,16 @@ impl TaskToolbar {
         self.watch = false;
         self.auto = false;
         self.generation += 1;
-        if self.busy {
-            self.finish_requested = true;
-            self.message = "正在完成当前帧…".into();
+        self.finish_requested = true;
+        self.message = "正在采集最后一帧…".into();
+        if !self.busy {
+            self.sample(cx);
+        }
+        cx.notify();
+    }
+    fn export_long_capture(&mut self, cx: &mut Context<Self>) {
+        if self.stitch.as_ref().is_none_or(|s| s.frames < 2) {
+            self.message = "尚未拼接到新内容；请在选区内缓慢滚动，或使用自动滚动后再完成".into();
         } else if let Some(stitch) = self.stitch.take() {
             app::send(cx, Event::Edit(Arc::new(stitch.image)));
             self.close(cx);
@@ -555,7 +562,7 @@ impl TaskToolbar {
                 }
                 if v.finish_requested {
                     v.finish_requested = false;
-                    v.finish_long_capture(cx);
+                    v.export_long_capture(cx);
                 }
                 cx.notify();
             });
@@ -878,12 +885,20 @@ impl Render for TaskToolbar {
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
                 if v.rate_input.read(cx).focus_handle(cx).is_focused(w)
+                    && !v.recording
                     && e.keystroke.key != "escape"
                 {
                     if e.keystroke.key == "enter" {
                         v.focus.focus(w, cx);
                         cx.stop_propagation();
                     }
+                    return;
+                }
+                if e.is_held
+                    || e.keystroke.modifiers.control
+                    || e.keystroke.modifiers.platform
+                    || e.keystroke.modifiers.alt
+                {
                     return;
                 }
                 match e.keystroke.key.as_str() {
@@ -914,8 +929,9 @@ impl Render for TaskToolbar {
                     "2" if !v.gif => v.monitor(true, cx),
                     "3" if !v.gif => v.sample(cx),
                     "4" if !v.gif => v.finish_long_capture(cx),
-                    _ => {}
+                    _ => return,
                 }
+                cx.stop_propagation();
                 cx.notify();
             }))
             .size_full()
@@ -959,7 +975,10 @@ pub fn closed(cx: &mut App) {
     restore_trails(cx);
 }
 
-fn save_gif_file(source: &std::path::Path, destination: &std::path::Path) -> anyhow::Result<()> {
+pub(crate) fn save_gif_file(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> anyhow::Result<()> {
     use std::io::Write;
     let parent = destination
         .parent()
@@ -999,7 +1018,7 @@ impl Render for GifPreview {
             .when(!self.message.is_empty(), |d| d.child(self.message.clone()))
     }
 }
-type PreviewFrame = Result<(Arc<RenderImage>, Duration), String>;
+type PreviewFrame = crate::animation::FrameResult;
 fn preview_stream(
     path: PathBuf,
     temporary: Option<Arc<tempfile::TempDir>>,
@@ -1008,41 +1027,9 @@ fn preview_stream(
     Arc<std::sync::atomic::AtomicBool>,
     std::thread::JoinHandle<()>,
 ) {
-    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stop = stopped.clone();
-    let (tx, rx) = async_channel::bounded(1);
-    let keep = temporary.clone();
-    let worker = std::thread::spawn(move || {
-        use image::AnimationDecoder;
-        let _keep = keep;
-        while !stop.load(Ordering::Relaxed) && !tx.is_closed() {
-            let result = (|| -> anyhow::Result<()> {
-                let reader = std::io::BufReader::new(std::fs::File::open(&path)?);
-                let decoder = image::codecs::gif::GifDecoder::new(reader)?;
-                let mut count = 0;
-                for frame in decoder.into_frames() {
-                    if stop.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    let frame = frame?;
-                    let (n, d) = frame.delay().numer_denom_ms();
-                    let delay = Duration::from_millis((u64::from(n) / u64::from(d.max(1))).max(10));
-                    let texture = app::texture(frame.buffer());
-                    count += 1;
-                    if tx.send_blocking(Ok((texture, delay))).is_err() {
-                        return Ok(());
-                    }
-                }
-                anyhow::ensure!(count > 0, "GIF 没有帧");
-                Ok(())
-            })();
-            if let Err(error) = result {
-                let _ = tx.send_blocking(Err(error.to_string()));
-                break;
-            }
-        }
-    });
-    (rx, stopped, worker)
+    let (receiver, stopped, _, _, worker) =
+        crate::animation::stream(crate::animation::Source { path, temporary });
+    (receiver, stopped, worker)
 }
 fn open_preview(
     path: PathBuf,
@@ -1098,15 +1085,20 @@ fn open_preview(
                     w.scale_factor(),
                 );
             }
+            let preview_handle = w.window_handle();
             cx.new(|cx| {
                 let receiver = rx.clone();
                 cx.spawn(async move |this, cx| {
                     while let Ok(result) = rx.recv().await {
                         let delay = match result {
-                            Ok((texture, delay)) => {
+                            Ok(frame) => {
+                                let delay = frame.delay;
+                                let texture = frame.texture;
                                 if this
                                     .update(cx, |v: &mut GifPreview, cx| {
-                                        v.texture = Some(texture);
+                                        if let Some(old) = v.texture.replace(texture) {
+                                            app::retire_texture(preview_handle, old, cx);
+                                        }
                                         cx.notify();
                                     })
                                     .is_err()
@@ -1242,12 +1234,12 @@ mod tests {
             }
         }
         let (receiver, stopped, worker) = super::preview_stream(path, Some(temporary));
-        let (first, delay) = receiver.recv_blocking().unwrap().unwrap();
-        assert_eq!(delay.as_millis(), 40);
-        assert_eq!(&first.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
-        let (second, delay) = receiver.recv_blocking().unwrap().unwrap();
-        assert_eq!(delay.as_millis(), 80);
-        assert_eq!(&second.as_bytes(0).unwrap()[..4], &[255, 0, 0, 255]);
+        let first = receiver.recv_blocking().unwrap().unwrap();
+        assert_eq!(first.delay.as_millis(), 40);
+        assert_eq!(&first.texture.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
+        let second = receiver.recv_blocking().unwrap().unwrap();
+        assert_eq!(second.delay.as_millis(), 80);
+        assert_eq!(&second.texture.as_bytes(0).unwrap()[..4], &[255, 0, 0, 255]);
         stopped.store(true, std::sync::atomic::Ordering::Relaxed);
         receiver.close();
         worker.join().unwrap();
@@ -1257,7 +1249,7 @@ mod tests {
     fn gif_shortcuts_pause_and_stop_without_saving(cx: &mut gpui_kit::TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(crate::window_pool::init);
-        let (tx, _) = async_channel::bounded(8);
+        let (tx, rx) = async_channel::bounded(8);
         cx.set_global(crate::app::Runtime {
             recordings: vec![],
             config: snip_core::config::Config::default(),
@@ -1296,7 +1288,12 @@ mod tests {
         cx.update(|cx| {
             handle
                 .update(cx, |_, w, cx| {
-                    view.update(cx, |v, _| v.recording = true);
+                    view.update(cx, |v, cx| {
+                        v.recording = true;
+                        // Clicking Start after editing FPS leaves the input's
+                        // focus handle active even though it becomes readonly.
+                        v.rate_input.update(cx, |i, cx| i.focus(w, cx));
+                    });
                     let _ = w.draw(cx);
                 })
                 .unwrap()
@@ -1315,6 +1312,25 @@ mod tests {
             let v = view.read(cx);
             assert!(v.control.stop.load(std::sync::atomic::Ordering::Relaxed));
             assert!(v.path.is_none());
+        });
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.gif = false;
+                v.stitch = Some(
+                    snip_core::stitch::Stitcher::new(image::RgbaImage::new(4, 4), 4096).unwrap(),
+                );
+                v.export_long_capture(cx);
+                assert!(v.message.contains("尚未拼接"));
+                assert!(rx.try_recv().is_err());
+                let stitch = v.stitch.as_mut().unwrap();
+                stitch.image = image::RgbaImage::new(4, 8);
+                stitch.frames = 2;
+                v.export_long_capture(cx);
+                let Ok(crate::app::Event::Edit(image)) = rx.try_recv() else {
+                    panic!("joined image was not exported");
+                };
+                assert_eq!(image.dimensions(), (4, 8));
+            });
         });
     }
 

@@ -4,11 +4,13 @@
     all(target_os = "windows", target_arch = "x86_64")
 )))]
 compile_error!("Simple Snip supports only macos-arm64 and win-amd64");
+mod animation;
 mod app;
 mod editor;
 mod effects;
 mod hotkeys;
 mod overlay;
+mod perf_probe;
 mod pin;
 mod settings;
 mod task_toolbar;
@@ -38,6 +40,7 @@ fn main() {
         previous_hook(info);
     }));
     let smoke_test = std::env::args().any(|arg| arg == "--smoke-test");
+    let perf_test = std::env::args().any(|arg| arg == "--perf-test");
     if let Some(dir) = config_path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -46,7 +49,13 @@ fn main() {
         .truncate(false)
         .read(true)
         .write(true)
-        .open(config_path.with_extension(if smoke_test { "smoke.lock" } else { "lock" }));
+        .open(config_path.with_extension(if perf_test {
+            "perf.lock"
+        } else if smoke_test {
+            "smoke.lock"
+        } else {
+            "lock"
+        }));
     let _instance = match instance {
         Ok(file) => {
             if file.try_lock().is_err() {
@@ -66,12 +75,15 @@ fn main() {
     application.on_reopen(app::open_settings);
     application.run(move |cx| {
         gpui_kit::init(cx);
-        app::start(cx, smoke_test);
+        app::start(cx, smoke_test || perf_test);
         if std::env::args().any(|arg| arg == "--permission-dialog-test") {
             app::send(cx, app::Event::ScreenPermissionDenied);
         }
         if smoke_test {
             app::smoke_test(cx);
+        }
+        if perf_test {
+            perf_probe::run(cx);
         }
     });
 }

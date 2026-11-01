@@ -40,6 +40,7 @@ pub enum Event {
     ),
     Selection(CapturedDisplay, Rect, CaptureMode),
     Pin(PreparedImage, Option<Bounds<Pixels>>),
+    AnimatedPin(PreparedImage, crate::animation::Source),
     Edit(Arc<image::RgbaImage>),
     ApplyPin(
         u64,
@@ -48,6 +49,7 @@ pub enum Event {
         snip_core::ocr::Cancellation,
     ),
     ClosePinEditor(u64),
+    FinishPinEditor(u64),
     ClosePin(u64),
     CloseTask(AnyWindowHandle),
     FocusPinToolbar(u64),
@@ -64,9 +66,40 @@ pub struct PreparedImage {
 }
 impl PreparedImage {
     pub fn new(pixels: Arc<image::RgbaImage>) -> Self {
-        let texture = texture(&pixels);
+        let scale = (680. / pixels.width() as f32)
+            .min(500. / pixels.height() as f32)
+            .min(1.);
+        // Cheap first preview; PinView prepares the final physical-size
+        // texture with high quality filtering on a background worker.
+        let texture = if scale < 0.99 {
+            texture(&image::imageops::resize(
+                pixels.as_ref(),
+                (pixels.width() as f32 * scale).round().max(1.) as u32,
+                (pixels.height() as f32 * scale).round().max(1.) as u32,
+                image::imageops::FilterType::Nearest,
+            ))
+        } else {
+            texture(&pixels)
+        };
         Self { pixels, texture }
     }
+}
+pub fn texture_scaled(image: &image::RgbaImage, scale: f32) -> Arc<RenderImage> {
+    if scale >= 0.99 {
+        return texture(image);
+    }
+    let small = image::imageops::resize(
+        image,
+        (image.width() as f32 * scale).round().max(1.) as u32,
+        (image.height() as f32 * scale).round().max(1.) as u32,
+        image::imageops::FilterType::Triangle,
+    );
+    texture(&small)
+}
+pub fn retire_texture(handle: AnyWindowHandle, image: Arc<RenderImage>, cx: &mut App) {
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, w, _| w.drop_image(image));
+    });
 }
 pub struct PinRecord {
     pub handle: AnyWindowHandle,
@@ -541,6 +574,7 @@ fn handle(event: Event, cx: &mut App) {
                     .map(|p| (p.handle, p.view.clone()))
                     .collect();
                 for (handle, view) in records {
+                    view.update(cx, |v, _| v.set_visible(!matches!(cmd, Command::HidePins)));
                     if matches!(cmd, Command::HidePins) {
                         view.update(cx, |v, cx| v.close_editor(cx));
                     }
@@ -679,6 +713,19 @@ fn handle(event: Event, cx: &mut App) {
                 Err(e) => status(cx, e.to_string()),
             }
         }
+        Event::AnimatedPin(image, source) => {
+            let id = cx.global::<Runtime>().next_pin;
+            cx.global_mut::<Runtime>().next_pin += 1;
+            match PinView::open_prepared(id, image, false, None, cx) {
+                Ok((handle, view)) => {
+                    view.update(cx, |v, cx| v.play_gif(source, cx));
+                    cx.global_mut::<Runtime>()
+                        .pins
+                        .insert(id, PinRecord { handle, view });
+                }
+                Err(e) => status(cx, e.to_string()),
+            }
+        }
         Event::ClosePin(id) => close_pin(id, cx),
         Event::CloseTask(handle) => {
             if cx.global::<Runtime>().capture_task == Some(handle) {
@@ -715,6 +762,11 @@ fn handle(event: Event, cx: &mut App) {
         Event::ClosePinEditor(id) => {
             if let Some(view) = cx.global::<Runtime>().pins.get(&id).map(|p| p.view.clone()) {
                 view.update(cx, |v, cx| v.close_editor(cx));
+            }
+        }
+        Event::FinishPinEditor(id) => {
+            if let Some(view) = cx.global::<Runtime>().pins.get(&id).map(|p| p.view.clone()) {
+                view.update(cx, |v, cx| v.finish_editor(cx));
             }
         }
         Event::Edit(image) => open_editor(image, cx),
@@ -885,6 +937,41 @@ pub fn open_editor(image: Arc<image::RgbaImage>, cx: &mut App) {
         }
         Err(e) => status(cx, e.to_string()),
     }
+}
+pub fn save_gif(source: crate::animation::Source, pin: u64, cx: &mut App) {
+    let directory = cx.global::<Runtime>().config.save_directory.clone();
+    let picker = cx.prompt_for_new_path(&directory, Some("Snip.gif"));
+    cx.spawn(async move |cx| {
+        let Ok(Ok(Some(mut path))) = picker.await else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("gif");
+        }
+        if !path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+        {
+            cx.update(|cx| send(cx, Event::PinNotice(pin, "请选择 .gif 文件".into())));
+            return;
+        }
+        let destination = path.clone();
+        let result = cx
+            .background_executor()
+            .spawn(async move {
+                let _keep = source.temporary;
+                crate::task_toolbar::save_gif_file(&source.path, &destination)
+            })
+            .await;
+        cx.update(|cx| {
+            let message = match result {
+                Ok(()) => format!("GIF 已保存：{}", path.display()),
+                Err(e) => format!("保存失败：{e}"),
+            };
+            send(cx, Event::PinNotice(pin, message));
+        });
+    })
+    .detach();
 }
 pub fn save_image(image: Arc<image::RgbaImage>, cx: &App) {
     let directory = cx.global::<Runtime>().config.save_directory.clone();
@@ -1211,6 +1298,15 @@ fn screen_permission_dialog(cx: &mut App) {
 
 #[cfg(test)]
 mod texture_tests {
+    #[test]
+    fn display_texture_scales_without_resizing_export_pixels() {
+        let source = image::RgbaImage::from_pixel(200, 100, image::Rgba([10, 20, 30, 255]));
+        let converted = super::texture_scaled(&source, 0.25);
+        assert_eq!(converted.as_bytes(0).unwrap().len(), 50 * 25 * 4);
+        assert_eq!(&converted.as_bytes(0).unwrap()[..4], &[30, 20, 10, 255]);
+        assert_eq!(source.dimensions(), (200, 100));
+        assert_eq!(source.get_pixel(50, 50).0, [10, 20, 30, 255]);
+    }
     #[test]
     fn swizzle_preserves_alpha_source_and_odd_chunk_boundaries() {
         for (width, height) in [(3, 1), (2049, 1025)] {

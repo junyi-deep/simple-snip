@@ -665,13 +665,23 @@ impl Render for Settings {
                                 let path = path.clone();
                                 let tx = cx.global::<Runtime>().tx.clone();
                                 std::thread::spawn(move || {
-                                    let event = match image::open(path) {
-                                        Ok(i) => app::Event::Pin(
-                                            app::PreparedImage::new(std::sync::Arc::new(
-                                                i.into_rgba8(),
-                                            )),
-                                            None,
-                                        ),
+                                    let event = match image::open(&path) {
+                                        Ok(i) => {
+                                            let prepared = app::PreparedImage::new(
+                                                std::sync::Arc::new(i.into_rgba8()),
+                                            );
+                                            if path
+                                                .extension()
+                                                .is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+                                            {
+                                                app::Event::AnimatedPin(
+                                                    prepared,
+                                                    crate::animation::Source::file(path),
+                                                )
+                                            } else {
+                                                app::Event::Pin(prepared, None)
+                                            }
+                                        }
                                         Err(e) => app::Event::Status(e.to_string()),
                                     };
                                     let _ = tx.send_blocking(event);

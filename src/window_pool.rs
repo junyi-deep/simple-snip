@@ -9,6 +9,7 @@ pub enum Role {
     Capture,
     Task,
     Preview,
+    Menu,
     Trail,
 }
 #[derive(Default)]

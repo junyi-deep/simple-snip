@@ -78,7 +78,20 @@ impl Stitcher {
         if expanded {
             let mut out = RgbaImage::new(width, height);
             imageops::replace(&mut out, &self.image, -left, -top);
-            imageops::replace(&mut out, next, nx - left, ny - top);
+            for (x, y, pixel) in next.enumerate_pixels() {
+                let (gx, gy) = (nx + i64::from(x), ny + i64::from(y));
+                let (ox, oy) = ((gx - left) as u32, (gy - top) as u32);
+                // Keep accepted overlap, including its original header. Only
+                // append newly exposed pixels or fill previously unvisited holes.
+                if gx < 0
+                    || gy < 0
+                    || gx >= i64::from(self.image.width())
+                    || gy >= i64::from(self.image.height())
+                    || out.get_pixel(ox, oy)[3] == 0
+                {
+                    out.put_pixel(ox, oy, *pixel);
+                }
+            }
             self.image = out;
             self.frames += 1;
         }
@@ -105,31 +118,27 @@ pub fn find_motion(previous: &RgbaImage, next: &RgbaImage) -> Option<(i32, i32)>
     if previous == next {
         return Some((0, 0));
     }
-    if score(previous, next, 0, 0).is_some_and(|s| s < 1.) {
-        return Some((0, 0));
-    }
-    let mut candidates = Vec::new();
-    for horizontal in [false, true] {
-        let length = if horizontal {
-            next.width()
-        } else {
-            next.height()
-        } as i32;
-        let limit = length - (length / 5).max(8);
-        let step = (length / 256).max(1);
-        let mut coarse = Vec::new();
-        for delta in (-limit..=limit).step_by(step as usize) {
-            let (x, y) = if horizontal { (delta, 0) } else { (0, delta) };
-            if let Some(s) = score(previous, next, x, y) {
-                coarse.push((s, delta));
-            }
-        }
-        coarse.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for (_, center) in coarse.into_iter().take(8) {
-            for delta in (center - step).max(-limit)..=(center + step).min(limit) {
-                let (x, y) = if horizontal { (delta, 0) } else { (0, delta) };
-                if let Some(s) = score(previous, next, x, y) {
-                    candidates.push((s, x, y));
+    let samples = edge_samples(previous);
+    let mut candidates = motion_candidates(&samples, next);
+    let factor = previous.width().max(previous.height()).div_ceil(384);
+    if factor > 1 {
+        let (w, h) = (previous.width() / factor, previous.height() / factor);
+        if w >= 8 && h >= 8 {
+            let a = imageops::resize(previous, w, h, imageops::FilterType::Triangle);
+            let b = imageops::resize(next, w, h, imageops::FilterType::Triangle);
+            // Low resolution scores are only search seeds. Always verify at
+            // original resolution, including odd-pixel scroll displacements.
+            for (_, x, y) in motion_candidates(&edge_samples(&a), &b)
+                .into_iter()
+                .take(16)
+            {
+                let horizontal = x != 0;
+                let center = if horizontal { x } else { y } * factor as i32;
+                for delta in center - factor as i32 * 2..=center + factor as i32 * 2 {
+                    let (x, y) = if horizontal { (delta, 0) } else { (0, delta) };
+                    if let Some(cost) = score(&samples, next, x, y) {
+                        candidates.push((cost, x, y));
+                    }
                 }
             }
         }
@@ -146,34 +155,119 @@ pub fn find_motion(previous: &RgbaImage, next: &RgbaImage) -> Option<(i32, i32)>
         None
     }
 }
-fn score(previous: &RgbaImage, next: &RgbaImage, dx: i32, dy: i32) -> Option<f64> {
-    let (w, h) = (next.width() as i32, next.height() as i32);
-    let (x0, x1) = ((-dx).max(0), (w - dx).min(w));
-    let (y0, y1) = ((-dy).max(0), (h - dy).min(h));
-    if x1 <= x0 || y1 <= y0 {
-        return None;
-    }
-    let mut error = 0u64;
-    let (mut low, mut high) = (255u16, 0u16);
-    for gy in 0..16 {
-        let y = y0 + (y1 - y0) * (gy * 2 + 1) / 32;
-        for gx in 0..24 {
-            let x = x0 + (x1 - x0) * (gx * 2 + 1) / 48;
-            let a = previous.get_pixel((x + dx) as u32, (y + dy) as u32);
-            let b = next.get_pixel(x as u32, y as u32);
-            for i in 0..3 {
-                error += a[i].abs_diff(b[i]) as u64;
+fn motion_candidates(samples: &[(i32, i32, [u8; 3])], next: &RgbaImage) -> Vec<(f64, i32, i32)> {
+    let mut candidates = Vec::new();
+    for horizontal in [false, true] {
+        let length = if horizontal {
+            next.width()
+        } else {
+            next.height()
+        } as i32;
+        let limit = length - (length / 5).max(8);
+        let step = (length / 512).max(1);
+        let mut coarse = Vec::new();
+        for delta in (-limit..=limit).step_by(step as usize) {
+            let (x, y) = if horizontal { (delta, 0) } else { (0, delta) };
+            if let Some(s) = score(samples, next, x, y) {
+                coarse.push((s, delta));
             }
-            let luma = (b[0] as u16 * 3 + b[1] as u16 * 6 + b[2] as u16) / 10;
-            low = low.min(luma);
-            high = high.max(luma);
+        }
+        coarse.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, center) in coarse.into_iter().take(8) {
+            for delta in (center - step).max(-limit)..=(center + step).min(limit) {
+                let (x, y) = if horizontal { (delta, 0) } else { (0, delta) };
+                if let Some(s) = score(samples, next, x, y) {
+                    candidates.push((s, x, y));
+                }
+            }
         }
     }
-    if high - low < 16 {
-        None
-    } else {
-        Some(error as f64 / (16. * 24. * 3.))
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    candidates.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2);
+    candidates
+}
+// Select high contrast points once, rather than letting blank page margins
+// dominate every candidate. Spatial tiles keep a fixed header from consuming
+// the whole feature budget. At most 2 * 32 * 48 samples, with bounded tile scans.
+fn edge_samples(image: &RgbaImage) -> Vec<(i32, i32, [u8; 3])> {
+    let mut samples = Vec::new();
+    let (w, h) = image.dimensions();
+    for row in 0..48u32 {
+        for col in 0..32u32 {
+            let (left, right) = (col * w / 32, (col + 1) * w / 32);
+            let (top, bottom) = (row * h / 48, (row + 1) * h / 48);
+            if top < h / 8 || bottom > h - h / 16 || left < w / 32 || right > w - w / 32 {
+                continue;
+            }
+            let mut best = (0u16, left, top);
+            for y in (top..bottom.min(h - 1)).step_by(((bottom - top) / 12).max(1) as usize) {
+                for x in (left..right.min(w - 1)).step_by(((right - left) / 12).max(1) as usize) {
+                    let p = image.get_pixel(x, y);
+                    let rx = image.get_pixel(x + 1, y);
+                    let by = image.get_pixel(x, y + 1);
+                    let contrast = (0..3)
+                        .map(|i| u16::from(p[i].abs_diff(rx[i])) + u16::from(p[i].abs_diff(by[i])))
+                        .sum::<u16>();
+                    if contrast > best.0 {
+                        best = (contrast, x, y);
+                    }
+                }
+            }
+            if best.0 >= 48 {
+                let p = image.get_pixel(best.1, best.2);
+                samples.push((best.1 as i32, best.2 as i32, [p[0], p[1], p[2]]));
+                let (x, y) = if (0..3)
+                    .map(|i| p[i].abs_diff(image.get_pixel(best.1 + 1, best.2)[i]) as u16)
+                    .sum::<u16>()
+                    >= (0..3)
+                        .map(|i| p[i].abs_diff(image.get_pixel(best.1, best.2 + 1)[i]) as u16)
+                        .sum::<u16>()
+                {
+                    (best.1 + 1, best.2)
+                } else {
+                    (best.1, best.2 + 1)
+                };
+                let q = image.get_pixel(x, y);
+                samples.push((x as i32, y as i32, [q[0], q[1], q[2]]));
+            }
+        }
     }
+    samples
+}
+fn score(samples: &[(i32, i32, [u8; 3])], next: &RgbaImage, dx: i32, dy: i32) -> Option<f64> {
+    let mut errors = [0u32; 256];
+    let mut count = 0;
+    for &(x, y, a) in samples {
+        let (x, y) = (x - dx, y - dy);
+        if x < next.width() as i32 / 32
+            || y < next.height() as i32 / 8
+            || x >= next.width() as i32 - next.width() as i32 / 32
+            || y >= next.height() as i32 - next.height() as i32 / 16
+        {
+            continue;
+        }
+        let b = next.get_pixel(x as u32, y as u32);
+        let error = (0..3).map(|i| u16::from(a[i].abs_diff(b[i]))).sum::<u16>() / 3;
+        errors[error as usize] += 1;
+        count += 1;
+    }
+    if count < (samples.len() as u32 / 12).max(16) {
+        return None;
+    }
+    // Ignore the worst 15%: sticky headers, scrollbars and a blinking caret
+    // are not part of the scrolling document. Keep the ambiguity rejection.
+    let retained = count * 85 / 100;
+    let mut remaining = retained;
+    let mut sum = 0u64;
+    for (error, n) in errors.into_iter().enumerate() {
+        let n = n.min(remaining);
+        sum += error as u64 * u64::from(n);
+        remaining -= n;
+        if remaining == 0 {
+            break;
+        }
+    }
+    Some(sum as f64 / f64::from(retained))
 }
 /// Compatibility helper for vertical append callers.
 pub fn find_overlap(previous: &RgbaImage, next: &RgbaImage) -> Option<u32> {
@@ -267,5 +361,49 @@ mod tests {
         });
         let b = RgbaImage::from_fn(100, 160, |x, y| *a.get_pixel(x, (y + 8) % 160));
         assert!(find_motion(&a, &b).is_none());
+    }
+
+    #[test]
+    fn sparse_text_scrolls_past_fixed_header_and_scrollbar() {
+        let page = RgbaImage::from_fn(360, 900, |x, y| {
+            let line = y / 29;
+            let glyph = x / 9;
+            let ink = x > 45
+                && x < 100 + (line * 37 % 210)
+                && y % 29 > 10
+                && y % 29 < 21
+                && x % 9 < 6
+                && ((glyph.wrapping_mul(73856093) ^ line.wrapping_mul(19349663))
+                    .rotate_left(y % 29)
+                    >> (x % 9))
+                    & 1
+                    == 1;
+            image::Rgba(if ink {
+                [30, 30, 30, 255]
+            } else {
+                [255, 255, 255, 255]
+            })
+        });
+        let viewport = |top, height| {
+            let mut out = imageops::crop_imm(&page, 0, top, 360, height).to_image();
+            for y in 0..26 {
+                for x in 0..360 {
+                    out.put_pixel(x, y, image::Rgba([80 + (x % 130) as u8, 100, 140, 255]));
+                }
+            }
+            for y in 26..height {
+                out.put_pixel(355, y, image::Rgba([100, 100, 100, 255]));
+            }
+            out
+        };
+        for height in [260, 620] {
+            let mut stitch = Stitcher::new(viewport(0, height), 8_000_000).unwrap();
+            assert!(stitch.append(&viewport(67, height)).unwrap());
+            assert_eq!(stitch.last_motion, Some((0, 67)));
+            assert_eq!(stitch.image.height(), height + 67);
+            assert!(stitch.append(&viewport(132, height)).unwrap());
+            assert_eq!(stitch.image.height(), height + 132);
+            assert_eq!(*stitch.image.get_pixel(50, 70), *page.get_pixel(50, 70));
+        }
     }
 }

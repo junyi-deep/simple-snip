@@ -24,8 +24,98 @@ pub struct PinView {
     generation: u64,
     notice: Option<String>,
     notice_id: u64,
+    border_visible: bool,
+    shadow_override: Option<bool>,
+    animation: Option<crate::animation::Playback>,
+    display_scale: f32,
+    display_revision: u64,
+}
+pub fn schedule_blur(id: u64, cx: &mut App) {
+    let Some(view) = cx
+        .global::<Runtime>()
+        .pins
+        .get(&id)
+        .map(|p| p.view.downgrade())
+    else {
+        return;
+    };
+    let timer = cx
+        .background_executor()
+        .timer(std::time::Duration::from_millis(100));
+    cx.spawn(async move |cx| {
+        timer.await;
+        let _ = view.update(cx, |v, cx| v.finish_if_inactive(cx));
+    })
+    .detach();
 }
 impl PinView {
+    fn update_display_texture(&mut self, w: &Window, cx: &mut Context<Self>) {
+        let scale = (self.scale * w.scale_factor()).clamp(0.01, 1.);
+        if let Some(animation) = &self.animation {
+            animation
+                .display_scale
+                .store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        if self.editor.is_some() || (scale - self.display_scale).abs() < 0.01 {
+            return;
+        }
+        self.display_scale = scale;
+        self.display_revision += 1;
+        let revision = self.display_revision;
+        let source = self.shown.clone();
+        let image = source.clone();
+        let worker = cx
+            .background_executor()
+            .spawn(async move { app::texture_scaled(&image, scale) });
+        cx.spawn(async move |this, cx| {
+            let texture = worker.await;
+            let _ = this.update(cx, |v, cx| {
+                if revision == v.display_revision
+                    && Arc::ptr_eq(&source, &v.shown)
+                    && v.animation.is_none()
+                {
+                    let old = std::mem::replace(&mut v.texture, texture);
+                    app::retire_texture(v.handle, old, cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+    pub fn set_visible(&self, visible: bool) {
+        if let Some(animation) = &self.animation {
+            animation
+                .paused
+                .store(!visible, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn frame_config(&self, cx: &App) -> snip_core::config::PinConfig {
+        let mut config = cx.global::<Runtime>().config.pin.clone();
+        if let Some(shadow) = self.shadow_override {
+            config.shadow = shadow;
+        }
+        if !self.border_visible {
+            config.border_width = 0.;
+        }
+        config
+    }
+    fn toggle_shadow(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        let before = self.frame_config(cx);
+        self.shadow_override = Some(!before.shadow);
+        let offset = before.margin() - self.frame_config(cx).margin();
+        let origin = w.bounds().origin + point(px(offset), px(offset));
+        self.refresh_frame(w, cx);
+        if let Ok(raw) = app::raw(w) {
+            let _ = snip_platform::move_window(
+                raw,
+                f32::from(origin.x),
+                f32::from(origin.y),
+                w.scale_factor(),
+            );
+        }
+        cx.notify();
+    }
     pub fn open(
         id: u64,
         image: Arc<RgbaImage>,
@@ -146,6 +236,8 @@ impl PinView {
                         }
                         if w.is_window_active() {
                             cx.defer(crate::effects::raise);
+                        } else if v.editor.is_some() {
+                            schedule_blur(v.id, cx);
                         }
                         cx.notify();
                     })
@@ -168,6 +260,11 @@ impl PinView {
                         generation: 0,
                         notice: None,
                         notice_id: 0,
+                        border_visible: true,
+                        shadow_override: None,
+                        animation: None,
+                        display_scale: 0.,
+                        display_revision: 0,
                     }
                 })
             },
@@ -188,8 +285,32 @@ impl PinView {
         }
     }
     fn is_selected(&self, w: &Window, cx: &App) -> bool {
-        !self.click_through
-            && (w.is_window_active() || self.toolbar.is_some_and(|h| Some(h) == cx.active_window()))
+        !self.click_through && (w.is_window_active() || self.owns_focus(cx))
+    }
+    fn owns_focus(&self, cx: &App) -> bool {
+        cx.active_window() == Some(self.handle)
+            || self.toolbar.is_some_and(|h| Some(h) == cx.active_window())
+            || cx
+                .try_global::<PinMenuWindow>()
+                .and_then(|m| m.0)
+                .is_some_and(|(id, h)| id == self.id && Some(h) == cx.active_window())
+    }
+    fn open_menu(&self, position: Point<Pixels>, w: &Window, cx: &mut Context<Self>) {
+        let (id, owner, handle, position) = (
+            self.id,
+            cx.entity().downgrade(),
+            self.handle,
+            w.bounds().origin + position,
+        );
+        // Menu construction reads this pin's checked states. Wait until the
+        // mouse listener has released its mutable entity borrow.
+        cx.defer(move |cx| {
+            if let Ok(Err(error)) =
+                handle.update(cx, |_, w, cx| open_pin_menu(id, owner, position, w, cx))
+            {
+                app::status(cx, error.to_string());
+            }
+        });
     }
     fn remove_toolbar(&mut self, cx: &mut App) -> bool {
         self.toolbar = None;
@@ -236,7 +357,7 @@ impl PinView {
         cx.notify();
     }
     pub fn refresh_frame(&self, w: &mut Window, cx: &mut Context<Self>) {
-        let margin = cx.global::<Runtime>().config.pin.margin();
+        let margin = self.frame_config(cx).margin();
         app::resize_pin(
             w,
             size(
@@ -275,9 +396,9 @@ impl PinView {
                 w,
                 size(
                     px(self.shown.width() as f32 * self.scale
-                        + cx.global::<Runtime>().config.pin.margin() * 2.),
+                        + self.frame_config(cx).margin() * 2.),
                     px(self.shown.height() as f32 * self.scale
-                        + cx.global::<Runtime>().config.pin.margin() * 2.),
+                        + self.frame_config(cx).margin() * 2.),
                 ),
                 cx,
             );
@@ -294,13 +415,22 @@ impl PinView {
             flip_y: self.flip_y,
         }
     }
+    fn freeze_animation(&mut self) {
+        if self.animation.take().is_some() {
+            self.doc = Document::new(self.shown.clone());
+            self.rotation = 0;
+            self.flip_x = false;
+            self.flip_y = false;
+        }
+    }
     fn edit(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         tracing::debug!(pin = self.id, "enter pin annotation");
+        self.freeze_animation();
         let transform = self.transform();
         let doc = self.doc.clone();
         let image = self.shown.clone();
         let id = self.id;
-        let margin = cx.global::<Runtime>().config.pin.margin();
+        let margin = self.frame_config(cx).margin();
         #[cfg(target_os = "windows")]
         snip_platform::pin_wheel_target(self.id, false);
         self.editor = Some(cx.new(|cx| {
@@ -328,12 +458,48 @@ impl PinView {
             .then(|| self.editor.clone())
             .flatten()
     }
+    pub fn play_gif(&mut self, source: crate::animation::Source, cx: &mut Context<Self>) {
+        let playback = crate::animation::Playback::new(source);
+        let receiver = playback.receiver.clone();
+        self.animation = Some(playback);
+        cx.spawn(async move |this, cx| {
+            while let Ok(frame) = receiver.recv().await {
+                let started = std::time::Instant::now();
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        let _ = this.update(cx, |v, cx| v.show_notice(error, cx));
+                        break;
+                    }
+                };
+                let delay = frame.delay;
+                if this
+                    .update(cx, |v, cx| {
+                        v.shown = frame.pixels;
+                        let old = std::mem::replace(&mut v.texture, frame.texture);
+                        app::retire_texture(v.handle, old, cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(delay.saturating_sub(started.elapsed()))
+                    .await;
+            }
+        })
+        .detach();
+    }
     pub fn apply_document(&mut self, doc: Document, image: Arc<RgbaImage>, cx: &mut Context<Self>) {
         self.doc = doc;
         self.shown = image;
-        self.texture = app::texture(&self.shown);
+        self.display_scale = 0.;
+        let old = std::mem::replace(&mut self.texture, app::texture(&self.shown));
+        app::retire_texture(self.handle, old, cx);
         self.editor = None;
-        if self.remove_toolbar(cx) {
+        let own_focus = self.owns_focus(cx);
+        if self.remove_toolbar(cx) && own_focus {
             self.restore_focus(cx);
         }
         cx.notify();
@@ -344,6 +510,21 @@ impl PinView {
             self.restore_focus(cx);
         }
         cx.notify();
+    }
+    fn finish_if_inactive(&mut self, cx: &mut Context<Self>) {
+        if self.owns_focus(cx) {
+            return;
+        }
+        if self.editor.is_some() && self.toolbar.is_some() {
+            self.remove_toolbar(cx);
+            app::send(cx, Event::FinishPinEditor(self.id));
+            cx.notify();
+        }
+    }
+    pub fn finish_editor(&self, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |v, cx| v.export(3, cx));
+        }
     }
     fn transformed(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
@@ -362,12 +543,13 @@ impl PinView {
                     Ok((doc, image)) => {
                         v.doc = doc;
                         v.shown = image;
-                        v.texture = app::texture(&v.shown);
+                        v.display_scale = 0.;
+                        let old = std::mem::replace(&mut v.texture, app::texture(&v.shown));
+                        app::retire_texture(v.handle, old, cx);
                         let dimensions = size(
-                            px(v.shown.width() as f32 * v.scale
-                                + cx.global::<Runtime>().config.pin.margin() * 2.),
+                            px(v.shown.width() as f32 * v.scale + v.frame_config(cx).margin() * 2.),
                             px(v.shown.height() as f32 * v.scale
-                                + cx.global::<Runtime>().config.pin.margin() * 2.),
+                                + v.frame_config(cx).margin() * 2.),
                         );
                         let _ = handle.update(cx, |_, w, cx| app::resize_pin(w, dimensions, cx));
                     }
@@ -381,11 +563,11 @@ impl PinView {
 }
 impl Render for PinView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let config = cx.global::<Runtime>().config.pin.clone();
+        self.update_display_texture(window, cx);
+        let config = self.frame_config(cx);
         let margin = config.margin();
         let border = config.color().unwrap_or(0x1688ff);
         let selected = self.is_selected(window, cx);
-        let pin_id = self.id;
         let content = if let Some(editor) = &self.editor {
             editor.clone().into_any_element()
         } else {
@@ -439,11 +621,10 @@ impl Render for PinView {
                     app::send(cx, Event::ClosePin(v.id));
                     cx.stop_propagation();
                 }))
-                .context_menu(move |menu, _, _| {
-                    menu.item(PopupMenuItem::new("关闭贴图").on_click(move |_, _, cx| {
-                        app::send(cx, Event::ClosePin(pin_id));
-                    }))
-                })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|v, e: &MouseDownEvent, w, cx| v.open_menu(e.position, w, cx)),
+                )
                 .into_any_element();
         }
         let notice = self.notice.clone();
@@ -515,17 +696,6 @@ impl Render for PinView {
                     }
                 }),
             )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|v, _, w, cx| {
-                    if !w.is_window_active() {
-                        cx.activate(true);
-                        w.activate_window();
-                    }
-                    v.focus.focus(w, cx);
-                    cx.notify();
-                }),
-            )
             .on_action(cx.listener(|v, _: &app::CloseSelectedPin, _, cx| {
                 app::send(cx, Event::ClosePin(v.id));
                 cx.stop_propagation();
@@ -554,14 +724,17 @@ impl Render for PinView {
                     }
                     "space" => v.edit(w, cx),
                     "1" => {
+                        v.freeze_animation();
                         v.rotation = (v.rotation + 1) % 4;
                         v.transformed(cx);
                     }
                     "2" => {
+                        v.freeze_animation();
                         v.flip_x = !v.flip_x;
                         v.transformed(cx);
                     }
                     "3" => {
+                        v.freeze_animation();
                         v.flip_y = !v.flip_y;
                         v.transformed(cx);
                     }
@@ -571,6 +744,7 @@ impl Render for PinView {
                         app::status(cx, "穿透贴图可从托盘「恢复全部贴图交互」恢复");
                     }
                     "h" => {
+                        v.set_visible(false);
                         if let Ok(raw) = app::raw(w) {
                             let _ = snip_platform::show_window(raw, false);
                         }
@@ -593,13 +767,173 @@ impl Render for PinView {
                 }
                 cx.notify();
             }))
-            .context_menu(move |menu, _, _| {
-                menu.item(PopupMenuItem::new("关闭贴图").on_click(move |_, _, cx| {
-                    app::send(cx, Event::ClosePin(pin_id));
-                }))
-            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|v, e: &MouseDownEvent, w, cx| v.open_menu(e.position, w, cx)),
+            )
             .into_any_element()
     }
+}
+
+#[inline(never)]
+fn pin_menu(menu: PopupMenu, owner: WeakEntity<PinView>, cx: &App) -> PopupMenu {
+    let Some(view) = owner.upgrade() else {
+        return menu;
+    };
+    let border = view.read(cx).border_visible;
+    let shadow = view.read(cx).frame_config(cx).shadow;
+    let border_owner = owner.clone();
+    let shadow_owner = owner.clone();
+    let save_owner = owner.clone();
+    menu.item(
+        PopupMenuItem::new("显示边框")
+            .checked(border)
+            .on_click(move |_, _, cx| {
+                let _ = border_owner.update(cx, |v, cx| {
+                    v.border_visible = !v.border_visible;
+                    cx.notify();
+                });
+            }),
+    )
+    .item(
+        PopupMenuItem::new("显示阴影")
+            .checked(shadow)
+            .on_click(move |_, _, cx| {
+                if let Some(view) = shadow_owner.upgrade() {
+                    let handle = view.read(cx).handle;
+                    let _ = handle.update(cx, |_, w, cx| {
+                        view.update(cx, |v, cx| v.toggle_shadow(w, cx))
+                    });
+                }
+            }),
+    )
+    .item(PopupMenuItem::new("另存为…").on_click(move |_, _, cx| {
+        let _ = save_owner.update(cx, |v, cx| {
+            if let Some(editor) = &v.editor {
+                editor.update(cx, |v, cx| v.export(1, cx));
+            } else if let Some(animation) = &v.animation {
+                app::save_gif(animation.source.clone(), v.id, cx);
+            } else {
+                app::save_image(v.shown.clone(), cx);
+            }
+        });
+    }))
+    .separator()
+    .item(PopupMenuItem::new("关闭贴图").on_click(move |_, _, cx| {
+        let _ = owner.update(cx, |v, cx| app::send(cx, Event::ClosePin(v.id)));
+    }))
+}
+
+struct PinMenuWindow(Option<(u64, AnyWindowHandle)>);
+impl Global for PinMenuWindow {}
+struct PinMenuRoot {
+    menu: Entity<PopupMenu>,
+    _dismiss: Subscription,
+}
+impl Render for PinMenuRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .bg(transparent_black())
+            .child(self.menu.clone())
+    }
+}
+fn close_pin_menu(handle: AnyWindowHandle, restore: Option<WeakEntity<PinView>>, cx: &mut App) {
+    if cx
+        .try_global::<PinMenuWindow>()
+        .and_then(|m| m.0)
+        .is_none_or(|(_, h)| h != handle)
+    {
+        return;
+    }
+    let had_focus = cx.active_window() == Some(handle);
+    cx.global_mut::<PinMenuWindow>().0 = None;
+    let _ = handle.update(cx, |_, w, cx| {
+        crate::window_pool::park(crate::window_pool::Role::Menu, w, cx)
+    });
+    if had_focus && let Some(owner) = restore {
+        let _ = owner.update(cx, |v, cx| {
+            if v.editor.is_some() {
+                v.focus_canvas(cx);
+            } else {
+                v.restore_focus(cx);
+            }
+        });
+    }
+}
+fn open_pin_menu(
+    id: u64,
+    owner: WeakEntity<PinView>,
+    position: Point<Pixels>,
+    pin_window: &Window,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    if let Some((_, old)) = cx.try_global::<PinMenuWindow>().and_then(|m| m.0) {
+        close_pin_menu(old, None, cx);
+    }
+    let screen = pin_window
+        .display(cx)
+        .map(|d| d.bounds())
+        .unwrap_or(pin_window.bounds());
+    let origin = point(
+        position.x.clamp(
+            screen.left() + px(4.),
+            (screen.right() - px(214.)).max(screen.left() + px(4.)),
+        ),
+        position.y.clamp(
+            screen.top() + px(4.),
+            (screen.bottom() - px(176.)).max(screen.top() + px(4.)),
+        ),
+    );
+    let (handle, _) = crate::window_pool::open(
+        crate::window_pool::Role::Menu,
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                origin,
+                size(px(210.), px(172.)),
+            ))),
+            titlebar: None,
+            kind: WindowKind::PopUp,
+            focus: true,
+            is_resizable: false,
+            is_movable: false,
+            window_background: WindowBackgroundAppearance::Transparent,
+            display_id: pin_window.display(cx).map(|d| d.id()),
+            ..Default::default()
+        },
+        cx,
+        |w, cx| {
+            app::apply_style(w, snip_platform::WindowStyle::default());
+            let handle = w.window_handle();
+            let menu_owner = owner.clone();
+            let menu = PopupMenu::build(w, cx, move |menu, _, cx| pin_menu(menu, menu_owner, cx));
+            menu.focus_handle(cx).focus(w, cx);
+            cx.new(|cx| {
+                let dismiss_owner = owner.clone();
+                let subscription = cx.subscribe(
+                    &menu,
+                    move |_: &mut PinMenuRoot, _, _: &DismissEvent, cx| {
+                        let owner = dismiss_owner.clone();
+                        cx.defer(move |cx| close_pin_menu(handle, Some(owner), cx));
+                    },
+                );
+                cx.observe_window_activation(w, move |_: &mut PinMenuRoot, w, cx| {
+                    if !w.is_window_active() {
+                        cx.defer(move |cx| close_pin_menu(handle, None, cx));
+                        schedule_blur(id, cx);
+                    }
+                })
+                .detach();
+                PinMenuRoot {
+                    menu,
+                    _dismiss: subscription,
+                }
+            })
+        },
+    )?;
+    let _ = handle.update(cx, |_, w, cx| crate::window_pool::transparent_root(w, cx));
+    cx.set_global(PinMenuWindow(Some((id, handle))));
+    Ok(())
 }
 
 impl Drop for PinView {
@@ -797,6 +1131,96 @@ mod tests {
                 editor.entity_id()
             );
             assert_eq!(cx.global::<Runtime>().pins.len(), 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn switching_between_pin_and_tools_keeps_editing_but_other_window_finishes_without_refocus(
+        cx: &mut TestAppContext,
+    ) {
+        let rx = setup(cx);
+        let (window, view) = pin(cx, 1, true);
+        cx.update(|cx| {
+            view.update(cx, |v, cx| v.focus_toolbar(cx));
+            view.update(cx, |v, cx| v.finish_if_inactive(cx));
+            assert!(view.read(cx).toolbar.is_some());
+            assert!(rx.try_recv().is_err());
+        });
+        let (other, _) = pin(cx, 2, false);
+        cx.update(|cx| {
+            other.update(cx, |_, w, _| w.activate_window()).unwrap();
+            view.update(cx, |v, cx| v.finish_if_inactive(cx));
+            assert!(view.read(cx).toolbar.is_none());
+            assert!(matches!(rx.try_recv(), Ok(Event::FinishPinEditor(1))));
+            let image = view.read(cx).shown.clone();
+            let doc = view.read(cx).doc.clone();
+            view.update(cx, |v, cx| v.apply_document(doc, image, cx));
+            assert_eq!(cx.active_window(), Some(other));
+            assert!(view.read(cx).editor.is_none());
+            assert_ne!(cx.active_window(), Some(window));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn pin_frame_menu_overrides_are_independent_and_do_not_change_pixels(cx: &mut TestAppContext) {
+        setup(cx);
+        let (window, first) = pin(cx, 1, false);
+        let (_, second) = pin(cx, 2, false);
+        cx.update(|cx| {
+            let image = first.read(cx).shown.clone();
+            let default_shadow = cx.global::<Runtime>().config.pin.shadow;
+            window
+                .update(cx, |_, w, cx| {
+                    first.update(cx, |v, cx| {
+                        v.border_visible = false;
+                        v.toggle_shadow(w, cx);
+                        assert_eq!(v.frame_config(cx).border_width, 0.);
+                        assert_eq!(v.frame_config(cx).shadow, !default_shadow);
+                        assert!(Arc::ptr_eq(&v.shown, &image));
+                        assert_eq!(v.doc.original.dimensions(), image.dimensions());
+                    })
+                })
+                .unwrap();
+            assert!(second.read(cx).frame_config(cx).border_width > 0.);
+            assert_eq!(second.read(cx).frame_config(cx).shadow, default_shadow);
+            assert_eq!(cx.global::<Runtime>().config.pin.shadow, default_shadow);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn small_pin_uses_a_separate_menu_surface_and_keeps_editing_while_menu_is_active(
+        cx: &mut TestAppContext,
+    ) {
+        setup(cx);
+        let (window, view) = pin(cx, 1, true);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    w.resize(gpui_kit::size(px(60.), px(40.)));
+                    view.update(cx, |v, cx| v.open_menu(point(px(5.), px(5.)), w, cx));
+                })
+                .unwrap();
+        });
+        let menu = cx.update(|cx| {
+            let menu = cx.global::<super::PinMenuWindow>().0.unwrap().1;
+            menu.update(cx, |_, w, cx| {
+                w.activate_window();
+                let _ = w.draw(cx);
+                assert!(w.viewport_size().width >= px(200.));
+                assert!(w.viewport_size().height >= px(160.));
+            })
+            .unwrap();
+            view.update(cx, |v, cx| v.finish_if_inactive(cx));
+            assert!(view.read(cx).toolbar.is_some());
+            assert!(view.read(cx).border_visible);
+            menu
+        });
+        cx.simulate_keystrokes(menu, "down enter");
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(!view.read(cx).border_visible);
+            assert!(cx.global::<super::PinMenuWindow>().0.is_none());
+            assert_eq!(cx.active_window(), Some(window));
         });
     }
 
