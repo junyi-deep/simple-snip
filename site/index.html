@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101012" />
+    <title>Simple Snip — 截住灵感，贴近你的工作</title>
+    <meta
+      name="description"
+      content="开源、本地处理的 Windows 与 macOS 截图工具。截图、贴图、标注、OCR、长截图、GIF 录制与多彩鼠标拖尾，让想法留在工作现场。"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Simple Snip — 截住灵感，贴近你的工作" />
+    <meta
+      property="og:description"
+      content="截图、贴图、标注、长截图与 GIF 录制。一套顺手的本地桌面工具。"
+    />
+    <meta
+      property="og:url"
+      content="https://junyi-deep.github.io/simple-snip/"
+    />
+    <meta
+      property="og:image"
+      content="https://junyi-deep.github.io/simple-snip/assets/screenshots/annotation.jpg"
+    />
+    <link rel="canonical" href="https://junyi-deep.github.io/simple-snip/" />
+    <link rel="icon" type="image/svg+xml" href="assets/icons/app.svg" />
+    <link rel="stylesheet" href="style.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <header class="header">
+      <nav class="nav wrap" aria-label="主导航">
+        <a href="#" class="brand" aria-label="Simple Snip 首页"
+          ><img
+            src="assets/icons/app.svg"
+            alt=""
+            width="30"
+            height="30"
+          />Simple Snip</a
+        >
+        <div class="nav-links">
+          <a href="#features">功能</a><a href="#why">为什么选择</a
+          ><a href="#shortcuts">快捷键</a
+          ><a
+            href="https://github.com/junyi-deep/simple-snip"
+            class="github-link"
+            >GitHub <span aria-hidden="true">↗</span></a
+          >
+        </div>
+        <a class="button button-small" href="#download"
+          >免费下载 <span aria-hidden="true">↓</span></a
+        >
+      </nav>
+    </header>
+    <main id="main">
+      <section class="hero wrap" aria-labelledby="hero-title">
+        <a
+          class="eyebrow release-link"
+          href="https://github.com/junyi-deep/simple-snip/releases/latest"
+          ><span class="live-dot"></span>开源 · 本地处理 · 为专注而生
+          <span aria-hidden="true">↗</span></a
+        >
+        <h1 id="hero-title">截住灵感。<br /><span>贴近你的工作。</span></h1>
+        <p class="hero-copy">
+          把屏幕上的一瞬间，变成手边的好帮手。<br />截图、标注、贴图，一气呵成。
+        </p>
+        <div class="hero-actions">
+          <a href="#download" class="button"
+            >免费下载 <span aria-hidden="true">↓</span></a
+          ><a class="text-button" href="#features"
+            >探索全部功能 <span aria-hidden="true">↗</span></a
+          >
+        </div>
+        <p class="platforms">
+          Windows AMD64 <span>·</span> macOS Apple Silicon
+        </p>
+        <div class="showcase">
+          <div class="hero-glow" aria-hidden="true"></div>
+          <div class="product-window">
+            <div class="window-top">
+              <span class="window-dots" aria-hidden="true"
+                ><i></i><i></i><i></i></span
+              ><span id="showcase-label">区域截图 · 原位进入标注</span
+              ><span class="window-meta">SIMPLE SNIP</span>
+            </div>
+            <img
+              id="showcase-image"
+              src="assets/screenshots/capture.jpg"
+              alt="实际截图界面：框选区域和紧贴选区的标注工具栏"
+              width="1440"
+              height="960"
+              fetchpriority="high"
+            />
+          </div>
+          <div class="floating-key" aria-hidden="true">
+            <kbd>F1</kbd><span>想记下，就截下。</span
+            ><span class="key-arrow">↗</span>
+          </div>
+        </div>
+        <div class="demo-tabs" role="group" aria-label="切换产品界面预览">
+          <button type="button" data-demo="capture" aria-pressed="true">
+            <span aria-hidden="true">⌗</span>截图
+          </button>
+          <button type="button" data-demo="pin" aria-pressed="false">
+            <span aria-hidden="true">▣</span>贴图
+          </button>
+          <button type="button" data-demo="annotation" aria-pressed="false">
+            <span aria-hidden="true">↗</span>标注
+          </button>
+          <button type="button" data-demo="long-capture" aria-pressed="false">
+            <span aria-hidden="true">↕</span>长截图
+          </button>
+          <button type="button" data-demo="gif" aria-pressed="false">
+            <span aria-hidden="true">◉</span>GIF 录制
+          </button>
+          <button type="button" data-demo="trail" aria-pressed="false">
+            <span aria-hidden="true">✧</span>鼠标拖尾
+          </button>
+        </div>
+        <p class="demo-note" id="demo-note" aria-live="polite">
+          实际应用界面 · 使用本地示例内容
+        </p>
+      </section>
+
+      <section class="workflow wrap" aria-label="截图工作流">
+        <div><kbd>F1</kbd><span>捕捉屏幕</span></div>
+        <span class="flow-arrow" aria-hidden="true">→</span>
+        <div>
+          <span class="flow-icon" aria-hidden="true">↗</span
+          ><span>标出重点</span>
+        </div>
+        <span class="flow-arrow" aria-hidden="true">→</span>
+        <div><kbd>F3</kbd><span>留在手边</span></div>
+        <span class="workflow-end">思路，继续。</span>
+      </section>
+
+      <section
+        id="features"
+        class="features wrap section-space"
+        aria-labelledby="features-title"
+      >
+        <div class="section-heading">
+          <div>
+            <p class="overline">SMALL TOOL. BIG FLOW.</p>
+            <h2 id="features-title">屏幕里的想法，<br />都有一个好去处。</h2>
+          </div>
+          <p>从快速记录到完整演示，<br />常用的图像工具，就在指尖。</p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card card-wide card-capture">
+            <div class="card-copy">
+              <span class="feature-index">01 / CAPTURE</span>
+              <h3>看到，就截到。</h3>
+              <p>
+                自由框选、窗口吸附、边缘微调。选完直接标注，复制、保存或贴回桌面。
+              </p>
+              <span class="feature-chip"><kbd>F1</kbd> 区域截图</span>
+            </div>
+            <button
+              class="screenshot-button capture-visual"
+              data-image="capture"
+              aria-label="放大查看截图界面"
+            >
+              <img
+                src="assets/screenshots/capture.jpg"
+                alt="自由框选区域后显示标注工具栏"
+                width="1440"
+                height="960"
+                loading="lazy"
+              />
+            </button>
+          </article>
+          <article class="feature-card card-pin">
+            <div class="card-copy">
+              <span class="feature-index">02 / PIN</span>
+              <h3>参考资料，随手可见。</h3>
+              <p>
+                把图片固定在桌面，一边参考，一边工作。拖动、缩放、调透明度，或者开启鼠标穿透。
+              </p>
+              <span class="feature-chip"><kbd>F3</kbd> 剪贴板贴图</span>
+            </div>
+            <button
+              class="screenshot-button pin-visual"
+              data-image="pin"
+              aria-label="放大查看贴图及右键菜单"
+            >
+              <img
+                src="assets/screenshots/pin.jpg"
+                alt="独立贴图窗口与边框、阴影、另存为右键菜单"
+                width="704"
+                height="477"
+                loading="lazy"
+              />
+            </button>
+          </article>
+          <article class="feature-card card-annotation">
+            <div class="card-copy">
+              <span class="feature-index">03 / ANNOTATE</span>
+              <h3>让重点，一目了然。</h3>
+              <p>
+                箭头、形状、文本、序号、高亮与马赛克。记住你常用的样式；OCR
+                在原图上选字，直接复制。
+              </p>
+            </div>
+            <button
+              class="screenshot-button annotation-visual"
+              data-image="annotation"
+              aria-label="放大查看标注界面"
+            >
+              <img
+                src="assets/screenshots/annotation.jpg"
+                alt="在原图上添加矩形和箭头标注"
+                width="1440"
+                height="960"
+                loading="lazy"
+              />
+            </button>
+          </article>
+          <article class="feature-card card-long">
+            <div class="card-copy">
+              <span class="feature-index">04 / SCROLL</span>
+              <h3>长内容，完整留下。</h3>
+              <p>
+                滚动拼接连续内容，支持暂停、继续和自动向下滚动。完成后，还能接着标注。
+              </p>
+            </div>
+            <div class="long-scene">
+              <div class="scroll-guide" aria-hidden="true">
+                <span>向下滚动</span><i>↓</i><span>完整拼接</span>
+              </div>
+              <button
+                class="screenshot-button long-visual"
+                data-image="long-capture"
+                aria-label="放大查看长截图拼接结果"
+              >
+                <img
+                  src="assets/screenshots/long-capture.jpg"
+                  alt="四段连续内容拼接成一张完整长截图"
+                  width="474"
+                  height="824"
+                  loading="lazy"
+                />
+              </button>
+            </div>
+          </article>
+          <article class="feature-card card-gif">
+            <div class="card-copy">
+              <span class="feature-index">05 / RECORD</span>
+              <h3>把过程，变成演示。</h3>
+              <p>
+                选区录制
+                GIF，随时暂停、继续。停止后在原区域预览，再选择保存位置。
+              </p>
+              <span class="record-chip"><i></i> 每一个步骤，都能看清</span>
+            </div>
+            <button
+              class="screenshot-button gif-visual"
+              data-image="gif"
+              aria-label="放大查看 GIF 录制界面"
+            >
+              <img
+                src="assets/screenshots/gif.jpg"
+                alt="GIF 录制区域边框和紧贴下方的控制栏"
+                width="1440"
+                height="960"
+                loading="lazy"
+              />
+            </button>
+          </article>
+          <article class="feature-card card-wide card-trail">
+            <div class="card-copy">
+              <span class="feature-index">06 / MOUSE TRAIL</span>
+              <h3>让指针，多一点表现力。</h3>
+              <p>
+                柔光丝带、彗星、光点、涟漪。彩虹、单色、双色渐变，自定义颜色、透明度、宽度和消失时间。
+              </p>
+              <a class="inline-link" href="#download"
+                >找到你的配色 <span aria-hidden="true">↗</span></a
+              >
+            </div>
+            <div class="trail-visual">
+              <svg
+                class="trail-art"
+                viewBox="0 0 650 260"
+                fill="none"
+                aria-hidden="true"
+              >
+                <defs>
+                  <linearGradient id="ribbon">
+                    <stop stop-color="#ff5469" stop-opacity="0" />
+                    <stop offset=".4" stop-color="#ff61b7" />
+                    <stop offset=".7" stop-color="#bb86ff" />
+                    <stop offset="1" stop-color="#61dcff" />
+                  </linearGradient>
+                  <filter id="glow">
+                    <feGaussianBlur stdDeviation="10" />
+                  </filter>
+                </defs>
+                <path
+                  d="M15 210C190 210 125 20 310 65S400 240 610 94"
+                  stroke="url(#ribbon)"
+                  stroke-width="24"
+                  filter="url(#glow)"
+                />
+                <path
+                  class="trail-line"
+                  d="M15 210C190 210 125 20 310 65S400 240 610 94"
+                  stroke="url(#ribbon)"
+                  stroke-width="7"
+                  stroke-linecap="round"
+                />
+                <path
+                  d="m610 84 5 25 6-9 10-1Z"
+                  fill="white"
+                  stroke="#151525"
+                  stroke-width="2"
+                /></svg
+              ><button
+                class="trail-settings"
+                data-image="trail"
+                aria-label="查看实际拖尾设置截图"
+              >
+                <span class="color-orbs" aria-hidden="true"
+                  ><i></i><i></i><i></i><i></i></span
+                >四种动画 · 自由配色 <span>↗</span></button
+              ><span class="illustration-note"
+                >效果示意 · 点击查看实际设置</span
+              >
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section
+        id="why"
+        class="why wrap section-space"
+        aria-labelledby="why-title"
+      >
+        <p class="overline">BUILT AROUND YOUR FLOW</p>
+        <h2 id="why-title">
+          把注意力，<br /><span class="muted-heading">留给手头的事。</span>
+        </h2>
+        <div class="benefits">
+          <article>
+            <div class="benefit-symbol" aria-hidden="true">⌘</div>
+            <h3>按键，就位。</h3>
+            <p>快捷键优先，操作紧贴图片。截图到贴图，减少来回切换。</p>
+          </article>
+          <article>
+            <div class="benefit-symbol local-symbol" aria-hidden="true">◎</div>
+            <h3>资料，留在本机。</h3>
+            <p>截图、OCR、拼接和 GIF 编码在本地完成，记录无需上传。</p>
+          </article>
+          <article>
+            <div class="benefit-symbol" aria-hidden="true">◒</div>
+            <h3>顺手，而且记得。</h3>
+            <p>工具颜色、粗细、尺寸和箭头样式自动记忆，下次接着用。</p>
+          </article>
+          <article>
+            <div class="benefit-symbol source-symbol" aria-hidden="true">
+              &lt;/&gt;
+            </div>
+            <h3>开源，保持透明。</h3>
+            <p>Rust 与原生桌面界面。源代码、版本记录和问题反馈都在 GitHub。</p>
+          </article>
+        </div>
+        <a class="inline-link" href="https://github.com/junyi-deep/simple-snip"
+          >到 GitHub 了解项目 <span aria-hidden="true">↗</span></a
+        >
+      </section>
+
+      <section
+        id="shortcuts"
+        class="shortcuts wrap section-space"
+        aria-labelledby="shortcuts-title"
+      >
+        <div class="shortcut-intro">
+          <p class="overline">LESS REACHING. MORE DOING.</p>
+          <h2 id="shortcuts-title">让操作，<br />成为肌肉记忆。</h2>
+          <p>常用功能，一按即达。<br />全局快捷键也可以按你的习惯调整。</p>
+        </div>
+        <div class="shortcut-list">
+          <div><span>区域截图</span><kbd>F1</kbd></div>
+          <div><span>剪贴板贴图 / 固定当前选区</span><kbd>F3</kbd></div>
+          <div><span>取消截图或编辑</span><kbd>Esc</kbd></div>
+          <div>
+            <span>切换标注工具</span
+            ><span
+              ><kbd>1</kbd> <span class="key-range">—</span> <kbd>9</kbd></span
+            >
+          </div>
+          <div>
+            <span>复制 OCR 所选文字</span
+            ><span><kbd>Ctrl / ⌘</kbd> <kbd>C</kbd></span>
+          </div>
+          <p class="shortcut-note">
+            macOS 功能键可能需要配合 Fn / Globe，或在设置中改用组合键。
+          </p>
+        </div>
+      </section>
+
+      <section
+        id="download"
+        class="download section-space"
+        aria-labelledby="download-title"
+      >
+        <div class="download-glow" aria-hidden="true"></div>
+        <div class="wrap download-content">
+          <img
+            src="assets/icons/app.svg"
+            width="72"
+            height="72"
+            alt=""
+            loading="lazy"
+          />
+          <p class="overline">YOUR NEXT IDEA IS ONE SHORTCUT AWAY</p>
+          <h2 id="download-title">下一次灵感，<br />就从这里留下。</h2>
+          <p>轻巧的工具。顺手的每一天。</p>
+          <div class="download-buttons">
+            <a
+              class="button"
+              data-platform="windows"
+              href="https://github.com/junyi-deep/simple-snip/releases/latest"
+              ><svg
+                width="17"
+                height="17"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  d="M1 3 9 2v7H1Zm9-1 9-1v8h-9ZM1 10h8v7l-8-1Zm9 0h9v9l-9-1Z"
+                /></svg
+              >下载 Windows 版 <span aria-hidden="true">↓</span></a
+            ><a
+              class="button button-dark"
+              data-platform="macos"
+              href="https://github.com/junyi-deep/simple-snip/releases/latest"
+              >下载 macOS 版 <span aria-hidden="true">↓</span></a
+            >
+          </div>
+          <p class="download-meta">
+            Windows 10 / 11 · AMD64 &nbsp; / &nbsp; macOS 15+ · Apple Silicon<br />免费开源
+            · 未签名开发测试包 ·
+            <a
+              href="https://github.com/junyi-deep/simple-snip/blob/main/docs/PLATFORM_SUPPORT.md"
+              >平台与运行说明 ↗</a
+            >
+          </p>
+          <a
+            class="release-caption"
+            href="https://github.com/junyi-deep/simple-snip/releases/latest"
+            >查看最新版本与更新记录 ↗</a
+          >
+        </div>
+      </section>
+    </main>
+    <footer class="footer wrap">
+      <a class="brand" href="#"
+        ><img src="assets/icons/app.svg" alt="" width="26" height="26" />Simple
+        Snip</a
+      >
+      <p>让想法，留在工作现场。</p>
+      <div>
+        <a href="https://github.com/junyi-deep/simple-snip">GitHub ↗</a
+        ><a href="https://github.com/junyi-deep/simple-snip/issues"
+          >反馈问题 ↗</a
+        ><a href="https://github.com/junyi-deep/simple-snip/blob/main/LICENSE"
+          >Apache-2.0</a
+        >
+      </div>
+    </footer>
+    <dialog class="image-dialog" aria-labelledby="image-caption">
+      <button type="button" class="dialog-close" aria-label="关闭大图">×</button
+      ><img alt="" id="dialog-image" />
+      <p id="image-caption"></p>
+    </dialog>
+  </body>
+</html>
