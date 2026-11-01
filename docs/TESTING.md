@@ -314,3 +314,6 @@ README 仅保留核心优势和六项功能，配图通过电脑操作技能在�
 
 
 本机最终检查：fmt / Clippy（-D warnings）通过，45 GUI / 资源测试 + 37 core + 4 platform + 6 updater = 92 项通过；额外显式运行 3 项默认 ignored 的原生截图 / OCR 测试，全部通过。独立 Release 构建的最终 smoke 输出 SMOKE PASS，三轮截图 / 编辑 / 取消总耗时 327 / 383 / 338ms，包含主动展示等待，不是 FPS 或纯输入延迟。实际桌面完成截图框选、矩形 / 箭头绘制、贴图右键菜单、长截图结果和 GIF 1 开始 / 2 暂停 / 3 停止（临时文件就绪并出现预览 / 保存）操作。六张 README 配图已逐张查看，不含私人桌面。拖尾桌面逐种效果、中文 IME、多屏和 macOS 原生交互仍不视作完整实机验收。
+
+
+0.0.13 发布确认：[GitHub Actions 41315799385](https://github.com/junyi-deep/simple-snip/actions/runs/41315799385) 的 Windows、macOS 与 Release 任务全部成功，标签对应 `d12b3dc`。实际日志确认 Windows 45 GUI / 资源 + 37 core + 4 platform + 6 updater = 92；macOS 45 + 37 + 1 + 5 = 88，均 0 失败，CI 中 3 项默认原生桌面测试仍 ignored，本机已经显式执行通过。实际下载公开 Windows ZIP、macOS ZIP / DMG 与 SHA256SUMS，所有尺寸、清单 SHA256 和 GitHub digest 一致；ZIP CRC、Windows AMD64 / PE32+ / GUI / 8MB 栈保留及 macOS ARM64 / Info.plist 双版本 0.0.13 通过，下载程序未执行。

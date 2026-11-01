@@ -24,3 +24,9 @@ GitHub Pages 的构建方式为 GitHub Actions。main 分支修改 site/、共�
 ## 验证
 
 本机 Chrome 无头浏览器验证六种预览、六个图片弹窗、Esc 关闭与原按钮焦点恢复、图片解码、320 / 390 / 600 / 900 / 1440px 无横向溢出、减少动态效果，以及下载 API 成功 / 离线回退；没有 JavaScript 页面异常。axe-core 的 WCAG 2 A / AA 与 2.1 AA 自动扫描发现并修复五处辅助文字对比度不足，最终桌面扫描无违规；自动扫描不能替代人工无障碍验收。检查时发现并修复了平板宽度下光晕溢出及首屏图片高度问题。实际应用截图已逐张目视检查，网页桌面和手机布局亦保存截图复查；这些检查不等于所有浏览器、读屏软件或全部设备的完整验收。
+
+
+部署确认（2026-11-01）：[Pages 工作流 41316347209](https://github.com/junyi-deep/simple-snip/actions/runs/41316347209) 成功，来源提交 `14cfc2a`。正式地址的 index.html、CSS、JavaScript 与六张截图均 HTTP 200，SHA256 与本地构建产物逐一一致。在正式 /simple-snip/ 路径重新执行五种宽度、界面切换、图片弹窗和下载回退检查，全部通过。仓库 About 的 homepage 已指向该地址。
+
+
+v0.0.13 发布后，使用正式站点和未拦截的真实 Releases API 再次确认：Windows 下载按钮解析到 v0.0.13 AMD64 ZIP，macOS 按钮解析到 v0.0.13 ARM64 DMG。
