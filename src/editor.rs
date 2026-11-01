@@ -26,6 +26,10 @@ struct PreferencesStore {
 }
 impl Global for PreferencesStore {}
 pub fn init_preferences(cx: &mut App) {
+    if crate::is_docs_demo() {
+        cx.set_global(PreferencesStore::default());
+        return;
+    }
     let path = snip_core::config::Config::path().with_file_name("editor.toml");
     let value = snip_core::editor_preferences::EditorPreferences::load(&path);
     let (writer, receiver) =

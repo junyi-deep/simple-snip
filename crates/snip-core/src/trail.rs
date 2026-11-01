@@ -67,7 +67,8 @@ impl Trail {
             .iter()
             .map(|(a, b)| (b.x - a.x).hypot(b.y - a.y))
             .sum::<f32>();
-            let steps = (length / 6.).ceil().clamp(1., 64.) as usize;
+            let budget = (2047 / self.points.len().saturating_sub(1).max(1)).clamp(1, 64);
+            let steps = ((length / 6.).ceil().clamp(1., 64.) as usize).min(budget);
             for i in 0..=steps {
                 if i == 0 && !out.is_empty() {
                     continue;
@@ -153,6 +154,22 @@ mod tests {
         assert!(trail.points.is_empty());
         trail.update(Point::new(20., 20.), 2.);
         assert!(trail.points.is_empty());
+    }
+    #[test]
+    fn fast_pointer_ribbon_has_a_fixed_geometry_budget() {
+        let mut trail = Trail::new(3.);
+        for i in 0..256 {
+            trail.update(
+                Point::new(i as f32 * 500., (i as f32 * 1.7).sin() * 1000.),
+                i as f64 / 1000.,
+            );
+        }
+        let ribbon = trail.ribbon();
+        assert!(ribbon.len() <= 2048);
+        assert!(ribbon.iter().all(|p| p.point.x.is_finite()
+            && p.point.y.is_finite()
+            && p.normal.x.is_finite()
+            && p.normal.y.is_finite()));
     }
 }
 

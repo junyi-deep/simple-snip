@@ -151,7 +151,11 @@ fn build(
     }
     cx.global_mut::<Runtime>().capture_task = Some(handle);
     let exclusion = handle.update(cx, |_, w, _| {
-        app::raw(w).and_then(snip_platform::exclude_capture_controls)
+        if crate::is_docs_demo() {
+            Ok(0)
+        } else {
+            app::raw(w).and_then(snip_platform::exclude_capture_controls)
+        }
     })?;
     view.update(cx, |v, cx| {
         match exclusion {
@@ -174,6 +178,14 @@ fn build(
         cx.notify();
     });
     Ok((handle, view))
+}
+
+fn capture_frame(display: u32, rect: Rect, excluded: u32) -> anyhow::Result<RgbaImage> {
+    #[cfg(debug_assertions)]
+    if crate::is_docs_demo() {
+        return Ok(crate::docs_demo::capture(rect));
+    }
+    snip_platform::capture_region_excluding(display, rect, excluded)
 }
 
 fn toolbar_placement(selected: Rect, screen: Rect, gif: bool) -> Rect {
@@ -453,7 +465,7 @@ impl TaskToolbar {
                     config.gif,
                     path,
                     control,
-                    move || snip_platform::capture_region_excluding(display, rect, excluded),
+                    move || capture_frame(display, rect, excluded),
                     move |result| {
                         let _ = tx.send_blocking(result);
                     },
@@ -496,7 +508,7 @@ impl TaskToolbar {
         let worker = cx.background_executor().spawn(async move {
             let result = (|| -> anyhow::Result<bool> {
                 anyhow::ensure!(!cancel.cancelled(), "任务已取消");
-                let image = snip_platform::capture_region_excluding(display, rect, excluded)?;
+                let image = capture_frame(display, rect, excluded)?;
                 anyhow::ensure!(!cancel.cancelled(), "任务已取消");
                 if let Some(s) = &mut stitch {
                     s.append(&image)
@@ -1180,7 +1192,9 @@ fn open_region_frame(
                 },
             );
             #[cfg(target_os = "windows")]
-            if let Ok(raw) = app::raw(w) {
+            if !crate::is_docs_demo()
+                && let Ok(raw) = app::raw(w)
+            {
                 let _ = snip_platform::exclude_capture_controls(raw);
             }
             cx.new(|_| RegionFrame)

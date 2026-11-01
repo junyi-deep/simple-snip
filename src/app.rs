@@ -175,7 +175,10 @@ pub fn raw(window: &Window) -> anyhow::Result<raw_window_handle::RawWindowHandle
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .as_raw())
 }
-pub fn apply_style(window: &Window, style: WindowStyle) {
+pub fn apply_style(window: &Window, mut style: WindowStyle) {
+    if crate::is_docs_demo() {
+        style.app_window = true;
+    }
     prepare_window(window);
     if let Err(e) = raw(window).and_then(|h| snip_platform::style_window(h, style)) {
         tracing::error!("window style: {e}");
@@ -333,7 +336,10 @@ pub fn start(cx: &mut App, smoke_test: bool) {
                     if cx.global::<Runtime>().hotkeys.is_none() {
                         let tx = cx.global::<Runtime>().tx.clone();
                         match HotkeyManager::new(tx) {
-                            Ok(manager) => cx.global_mut::<Runtime>().hotkeys = Some(manager),
+                            Ok(manager) => {
+                                cx.global_mut::<Runtime>().hotkeys = Some(manager);
+                                cx.refresh_windows();
+                            }
                             Err(error) => {
                                 tracing::warn!("快捷键服务重试失败: {error}");
                                 return;
@@ -348,21 +354,8 @@ pub fn start(cx: &mut App, smoke_test: bool) {
                         .apply(&config);
                     let message = result.err().map(|e| e.to_string()).unwrap_or_default();
                     if message != previous {
-                        let recovered = message.is_empty() && !previous.is_empty();
                         previous = message.clone();
-                        if let Some(handle) = cx.global::<Runtime>().settings {
-                            let _ = handle.update(cx, |_, w, cx| {
-                                use gpui_kit::component::{WindowExt, notification::Notification};
-                                w.push_notification(
-                                    if recovered {
-                                        Notification::success("快捷键已恢复注册")
-                                    } else {
-                                        Notification::warning(message.clone())
-                                    },
-                                    cx,
-                                );
-                            });
-                        }
+                        cx.refresh_windows();
                         if !message.is_empty() {
                             tracing::warn!("{message}");
                         }
@@ -491,7 +484,7 @@ fn menu(cx: &mut App) -> Vec<MenuItem> {
         MenuItem::action("隐藏所有贴图", HidePins),
         MenuItem::action("显示所有贴图", ShowPins),
         MenuItem::action("恢复全部贴图交互", RestorePins),
-        MenuItem::action("彩虹鼠标拖尾", Trail).checked(!cx.global::<Runtime>().trails.is_empty()),
+        MenuItem::action("鼠标拖尾", Trail).checked(!cx.global::<Runtime>().trails.is_empty()),
         MenuItem::separator(),
         MenuItem::action("截图历史…", History),
         MenuItem::action("偏好设置…", Preferences),
@@ -562,7 +555,9 @@ fn handle(event: Event, cx: &mut App) {
                 }
                 let enabled = !cx.global::<Runtime>().trails.is_empty();
                 cx.global_mut::<Runtime>().config.trail.enabled = enabled;
-                if let Err(e) = cx.global::<Runtime>().config.save(&Config::path()) {
+                if !crate::is_docs_demo()
+                    && let Err(e) = cx.global::<Runtime>().config.save(&Config::path())
+                {
                     status(cx, e.to_string());
                 }
             }
@@ -881,18 +876,6 @@ pub(crate) fn close_pin(id: u64, cx: &mut App) {
     }
 }
 
-fn notify_hotkey_conflicts(w: &mut Window, cx: &mut App) {
-    if let Some(message) = cx
-        .global::<Runtime>()
-        .hotkeys
-        .as_ref()
-        .and_then(|k| k.registration_error())
-        .map(str::to_string)
-    {
-        use gpui_kit::component::{WindowExt, notification::Notification};
-        w.push_notification(Notification::warning(message), cx);
-    }
-}
 pub fn open_settings(cx: &mut App) {
     cx.activate(true);
     if let Some(h) = cx.global::<Runtime>().settings
@@ -909,7 +892,7 @@ pub fn open_settings(cx: &mut App) {
                 let _ = snip_platform::show_window(raw, true);
             }
             w.activate_window();
-            notify_hotkey_conflicts(w, cx);
+            cx.refresh_windows();
         })
         .is_ok()
     {
@@ -919,7 +902,6 @@ pub fn open_settings(cx: &mut App) {
     match Settings::open(cx) {
         Ok(h) => {
             cx.global_mut::<Runtime>().settings = Some(h);
-            let _ = h.update(cx, |_, w, cx| notify_hotkey_conflicts(w, cx));
         }
         Err(e) => status(cx, e.to_string()),
     }

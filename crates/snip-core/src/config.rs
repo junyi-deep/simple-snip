@@ -93,6 +93,27 @@ pub struct TrailConfig {
     pub width: f32,
     pub lifetime_ms: u32,
     pub fps: u32,
+    pub animation: TrailAnimation,
+    pub color_mode: TrailColorMode,
+    pub primary_color: String,
+    pub secondary_color: String,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrailAnimation {
+    #[default]
+    Ribbon,
+    Comet,
+    Particles,
+    Ripple,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrailColorMode {
+    #[default]
+    Rainbow,
+    Solid,
+    Gradient,
 }
 impl Default for TrailConfig {
     fn default() -> Self {
@@ -101,6 +122,46 @@ impl Default for TrailConfig {
             width: 9.,
             lifetime_ms: 300,
             fps: 60,
+            animation: TrailAnimation::Ribbon,
+            color_mode: TrailColorMode::Rainbow,
+            primary_color: "#FF5A8A".into(),
+            secondary_color: "#38BDF8".into(),
+        }
+    }
+}
+impl TrailConfig {
+    pub fn parse_color(value: &str) -> Result<[u8; 4]> {
+        let text = value
+            .strip_prefix('#')
+            .context("拖尾颜色须为 #RRGGBB 或 #RRGGBBAA")?;
+        ensure!(
+            [6, 8].contains(&text.len()),
+            "拖尾颜色须为 #RRGGBB 或 #RRGGBBAA"
+        );
+        let color = u32::from_str_radix(text, 16).context("拖尾颜色无效")?;
+        if text.len() == 8 {
+            Ok(color.to_be_bytes())
+        } else {
+            Ok([(color >> 16) as u8, (color >> 8) as u8, color as u8, 255])
+        }
+    }
+    pub fn color_at(&self, phase: f32) -> [u8; 4] {
+        let first = || Self::parse_color(&self.primary_color).unwrap_or([255, 90, 138, 255]);
+        match self.color_mode {
+            TrailColorMode::Rainbow => {
+                let [r, g, b] = crate::trail::rainbow(phase);
+                [r, g, b, 255]
+            }
+            TrailColorMode::Solid => first(),
+            TrailColorMode::Gradient => {
+                let first = first();
+                let second =
+                    Self::parse_color(&self.secondary_color).unwrap_or([56, 189, 248, 255]);
+                let t = phase.clamp(0., 1.);
+                std::array::from_fn(|i| {
+                    (first[i] as f32 + (second[i] as f32 - first[i] as f32) * t).round() as u8
+                })
+            }
         }
     }
 }
@@ -170,6 +231,8 @@ impl Config {
             (100..=3000).contains(&self.trail.lifetime_ms) && (15..=120).contains(&self.trail.fps),
             "拖尾生命周期或帧率无效"
         );
+        TrailConfig::parse_color(&self.trail.primary_color)?;
+        TrailConfig::parse_color(&self.trail.secondary_color)?;
         let mut seen = std::collections::HashSet::new();
         for binding in self.hotkeys.values().filter(|s| !s.is_empty()) {
             ensure!(seen.insert(binding.to_lowercase()), "快捷键重复: {binding}");
@@ -219,6 +282,31 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trail_styles_and_rgba_palettes_roundtrip_without_changing_legacy_defaults() {
+        let mut c: Config =
+            toml::from_str("version=1\n[trail]\nwidth=9\nlifetime_ms=300\n").unwrap();
+        assert_eq!(c.trail.animation, TrailAnimation::Ribbon);
+        assert_eq!(c.trail.color_mode, TrailColorMode::Rainbow);
+        c.trail.animation = TrailAnimation::Particles;
+        c.trail.color_mode = TrailColorMode::Gradient;
+        c.trail.primary_color = "#FF000080".into();
+        c.trail.secondary_color = "#0000FF40".into();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        c.save(&path).unwrap();
+        let (restored, warning) = Config::load(&path);
+        assert!(warning.is_none());
+        assert_eq!(restored.trail.animation, TrailAnimation::Particles);
+        assert_eq!(restored.trail.color_at(0.), [255, 0, 0, 128]);
+        assert_eq!(restored.trail.color_at(0.5), [128, 0, 128, 96]);
+        assert_eq!(restored.trail.color_at(0.25), [191, 0, 64, 112]);
+        assert_eq!(restored.trail.color_at(1.), [0, 0, 255, 64]);
+        c.trail.color_mode = TrailColorMode::Solid;
+        assert_eq!(c.trail.color_at(0.), c.trail.color_at(0.75));
+        c.trail.primary_color = "#oops".into();
+        assert!(c.validate().is_err());
+    }
     #[test]
     fn defaults_only_two_global_keys() {
         let c = Config::default();

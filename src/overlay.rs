@@ -63,6 +63,9 @@ impl Overlay {
             options,
             cx,
             |window, cx| {
+                if crate::is_docs_demo() {
+                    window.set_window_title("Simple Snip · 区域截图");
+                }
                 app::apply_style(
                     window,
                     snip_platform::WindowStyle {
