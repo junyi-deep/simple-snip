@@ -56,16 +56,34 @@ jobs:
       - name: Third party notices
         shell: bash
         run: python3 scripts/notices.py --target ${{ matrix.target }}
-      - name: macOS unsigned bundle
+      - name: macOS distribution gate tests (command doubles)
+        if: runner.os == 'macOS'
+        run: python3 scripts/test-macos-distribution.py
+      - name: Import macOS release credentials
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && vars.MACOS_SIGNED_RELEASE == 'true'
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: bash packaging/macos/ci-signing.sh
+      - name: macOS bundle (notarized when release signing is enabled)
         if: runner.os == 'macOS'
         run: bash packaging/macos/bundle.sh release
+      - name: Remove temporary signing keychain
+        if: always() && runner.os == 'macOS'
+        run: |
+          keychain="$RUNNER_TEMP/simple-snip-signing.keychain-db"
+          if [[ -f "$keychain" ]]; then security delete-keychain "$keychain"; fi
       - name: Windows portable package
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./packaging/windows/package.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: SimpleSnip-${{ matrix.artifact }}-unsigned
+          name: SimpleSnip-${{ matrix.artifact }}
           path: |
             dist/*.zip
             dist/*.dmg
@@ -82,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: SimpleSnip-*-unsigned
+          pattern: SimpleSnip-*
           path: release-assets
           merge-multiple: true
       - name: Create checksums and publish

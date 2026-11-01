@@ -6,3 +6,10 @@
 
 # Machine-specific logs remain local; publish reproducible test summaries.
 /docs/verification/
+
+# Signing credentials and private keychains stay outside version control.
+*.p12
+*.pfx
+*.p8
+*.keychain
+*.keychain-db

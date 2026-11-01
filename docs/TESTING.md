@@ -325,3 +325,15 @@ README 仅保留核心优势和六项功能，配图通过电脑操作技能在�
 
 
 0.0.13 发布确认：[GitHub Actions 41315799385](https://github.com/junyi-deep/simple-snip/actions/runs/41315799385) 的 Windows、macOS 与 Release 任务全部成功，标签对应 `d12b3dc`。实际日志确认 Windows 45 GUI / 资源 + 37 core + 4 platform + 6 updater = 92；macOS 45 + 37 + 1 + 5 = 88，均 0 失败，CI 中 3 项默认原生桌面测试仍 ignored，本机已经显式执行通过。实际下载公开 Windows ZIP、macOS ZIP / DMG 与 SHA256SUMS，所有尺寸、清单 SHA256 和 GitHub digest 一致；ZIP CRC、Windows AMD64 / PE32+ / GUI / 8MB 栈保留及 macOS ARM64 / Info.plist 双版本 0.0.13 通过，下载程序未执行。
+
+## 2026-11-01：v0.0.14 自动保存与公证流程
+
+本机实际执行 `cargo check --workspace`、`cargo fmt --all -- --check`、`cargo clippy --locked --workspace --all-targets -- -D warnings`、`cargo test --locked --workspace`：通过。共 93 项测试通过，3 项需要原生桌面 / 权限的测试仍为 ignored，未计通过。新增 5 项设置回归，验证连续 Change 防抖后写入临时配置、重新加载、无效输入不覆盖磁盘、写入失败不应用、关闭窗口立即提交，以及保留其他入口更新的设置（合计 5 项，部分场景合并在同一测试）。更新包选择新增正式命名优先测试。
+
+`python3 scripts/test-macos-distribution.py` 的 6 项隔离命令流程测试通过，覆盖 Accepted 后先 staple app 再重建 ZIP、两次公证顺序、拒绝任一提交时不发布、Gatekeeper 失败时不发布、开发证书不能冒充 Developer ID，以及缺失凭据提前失败。`bash -n` 对三个 macOS 脚本通过；在本机 `notarytool --help` 核实 profile、keychain、JSON 和 timeout 选项。流程测试使用命令替身，**没有执行 Apple 签名或公证**。
+
+独立 `dist/autosave-preview` Debug 应用包真实启动，签名校验通过；通过桌面工具检查设置页面已无保存按钮，底部状态清晰且错误文案可见。真实输入拖尾生命周期 450 后读取用户 TOML 确认为 450，输入 abc 后仍为 450；随后恢复原来的 300，关闭窗口，读取 TOML 确认为 300。测试实例已停止；未覆盖此前获录屏权限的 `dist/Simple Snip.app`。
+
+可复现：打开偏好设置 → 修改任意输入，停顿约半秒 → 重开确认；删除数值或输入无效字符确认错误与原配置保持；修正后确认保存成功；输入后立即关闭设置确认内容保留。快捷键冲突查看「快捷键」注册状态，默认绑定仍仅 F1 / F3。
+
+当前 Windows 本机交互未执行。维护者选择无证书先发未公证测试包；本机有效签名身份为 0，无法执行正式公证包验收。v0.0.14 标签 CI / Release / 下载包校验结果将在实际完成后追加。

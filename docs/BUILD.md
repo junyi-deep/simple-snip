@@ -14,7 +14,7 @@ bash packaging/macos/bundle.sh release
 
 本地包重建会改变 ad-hoc 代码身份，已有 TCC 录屏条目可能仍绑定旧程序；请移除旧条目并重新添加当前 `.app`。本机 `security find-identity -v -p codesigning` 返回 0 个有效身份，不能交付持久的正式签名。脚本支持通过 `SIMPLE_SNIP_SIGN_IDENTITY` 指定已有有效身份（hardened runtime / timestamp），不会生成证书或降低系统权限要求。
 
-正式分发需自行提供有效 Developer ID：对内部代码与最终 app 使用适当 hardened runtime 签名；通过 `xcrun notarytool submit ... --keychain-profile ... --wait` 提交，成功后 `xcrun stapler staple ...` 并验证 Gatekeeper。当前未提供证书或公证凭据，未执行这些正式分发步骤。不要去关闭系统安全策略。
+正式分发流程已接入打包脚本和标签流水线：配置有效 Developer ID Application 身份与公证凭据后，自动签名、公证、staple 并校验应用和 DMG。详见 [macOS 签名与公证](MACOS_SIGNING.md)。当前未提供证书或公证凭据，未执行真实公证；未配置时仍为 `_unsigned` 测试包。下载后出现 Apple 无法验证提示的原因是分发签名 / 公证缺失，与录屏权限不同。
 
 ### 日常 Debug 与录屏授权
 
@@ -71,6 +71,6 @@ python scripts/notices.py --target x86_64-pc-windows-msvc
 
 公开仓库：junyi-deep/simple-snip。推送标签、PR 和手动分发会执行检查；普通 main 文档提交不重复构建。修改 Cargo 版本和 macOS Info.plist，执行 `python3 scripts/validate-release.py v0.0.1`（未来替换为新版本），提交并推送同名标签。Workflow 仅在两个原生平台的 fmt / check / Clippy / test / Release / 打包全部成功后创建 Release，生成每个安装包的 SHA256SUMS 并上传。GitHub Actions 只有发布 job 获得 contents:write，普通构建 contents:read。macOS runner 明确断言 ARM64。
 
-首次包标注 unsigned；代码签名证书未提供，不能称公证发行版。机器原始验证日志保留本地且被 .gitignore 排除，仓库公开可复现步骤及结果摘要。
+默认包标注 unsigned；配置 `MACOS_SIGNED_RELEASE=true` 及所需 Secrets 后，标签流水线才会生成经过公证验证的 macOS 包。代码签名证书未提供时，不能称公证发行版。机器原始验证日志保留本地且被 .gitignore 排除，仓库公开可复现步骤及结果摘要。
 
 Windows 运行要求：Windows ZIP 中的程序实际导入 VCRUNTIME140.dll；首次运行前需安装微软官方 x64 Visual C++ v14 运行库（https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist ）。当前 ZIP 不捆绑该运行库。另导入系统 icuuc.dll，Windows 10 早于 1703 不满足这一依赖；该下界来自 DLL/API，不能替代完整最低系统真机验收。

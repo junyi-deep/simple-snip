@@ -145,7 +145,8 @@ pub fn package(release: &Release, target: &str) -> Result<Asset> {
     release
         .assets
         .iter()
-        .find(|a| a.name.contains(target) && a.name.ends_with(extension))
+        .filter(|a| a.name.contains(target) && a.name.ends_with(extension))
+        .min_by_key(|a| a.name.contains("_unsigned"))
         .cloned()
         .context("该版本尚未提供当前平台的更新包")
 }
@@ -311,6 +312,21 @@ mod tests {
         r.prerelease = false;
         r.tag_name = "v0.0.3-beta.1".into();
         assert!(!newer(&r, "0.0.1").unwrap());
+    }
+    #[test]
+    fn prefers_notarized_package_when_unsigned_asset_is_also_present() {
+        let mut r = release();
+        for suffix in ["_unsigned", ""] {
+            r.assets.push(Asset {
+                name: format!("SimpleSnip_0.0.2_macos-arm64{suffix}.dmg"),
+                browser_download_url: String::new(),
+                size: 10,
+            });
+        }
+        assert_eq!(
+            package(&r, "macos-arm64").unwrap().name,
+            "SimpleSnip_0.0.2_macos-arm64.dmg"
+        );
     }
     #[test]
     fn proxy_modes_and_credentials_not_in_url() {

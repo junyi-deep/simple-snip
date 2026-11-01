@@ -78,3 +78,9 @@ Overlay 独立保存正在拖动的选区；拖动缩放手柄时临时隐藏编
 macOS 区域采集使用 `SCShareableContent` + `SCContentFilter(display:excludingWindows:)` + `SCScreenshotManager`；裁剪矩形从源像素换算为显示器逻辑点，输出尺寸仍为源像素。只将拥有的 RGBA 数据从系统回调传回后台线程，不对 Objective-C 对象添加未经验证的 Send 实现。CoreGraphics RGBA 转换有颜色通道 / 行序自动测试。Windows 对自己的控制栏设置 `WDA_EXCLUDEFROMCAPTURE`，像素采集继续复用原后端。控制栏不能安全排除且必须放入选区时，停止开始操作并要求用户留出空间。
 
 GIF 控制栏保持显示，由原有有界生产 / 编码线程更新实际时长与暂停状态。当前是逐帧截图，不宣称已完成 SCStream / WGC 连续视频管线或帧率性能验收。关闭任务统一通过命令队列回收窗口，取消后台工作；不增加系统全局快捷键。
+
+## 设置自动保存与分发身份（2026-11-01）
+
+设置窗口订阅 GPUI Kit InputEvent::Change 和 ColorPickerEvent::Change，输入采用可取消的 500ms 防抖任务；开关与选项直接提交。窗口关闭及 on_app_quit 回调提交待保存输入。表单保留加载基线，只将用户修改字段合并到最新 Runtime.config；验证及原子磁盘保存成功后才应用到运行状态。错误保留原配置与编辑草稿，底部状态支持换行，不逐次弹出通知；代理密码仍不落盘。仅拖尾参数变化重启已启用的拖尾，仅边框参数变化刷新贴图。
+
+Release macOS 签名通过独立 distribute.sh 执行，与 GUI 和录屏 TCC 解耦。正式输出要求 Developer ID Application、两次 Accepted 公证、应用与 DMG 的 staple / validate 和 Gatekeeper 通过；未提供身份的构建明确标记 unsigned。CI 私钥只进入标签作业的临时钥匙串，不进入仓库或制品。

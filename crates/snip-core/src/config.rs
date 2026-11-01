@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub version: u32,
@@ -22,7 +22,7 @@ pub struct Config {
     pub updates: UpdateConfig,
     pub pin: PinConfig,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PinConfig {
     pub border_color: String,
@@ -59,14 +59,14 @@ pub enum ProxyMode {
     Direct,
     Http,
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
     pub proxy_mode: ProxyMode,
     pub proxy_url: String,
     pub proxy_username: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GifConfig {
     pub fps: u32,
@@ -86,7 +86,7 @@ impl Default for GifConfig {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrailConfig {
     pub enabled: bool,

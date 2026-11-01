@@ -1,10 +1,11 @@
 use crate::app::{self, Command, Runtime};
+use anyhow::Context as _;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     component::{
         button::*,
-        color_picker::{ColorPicker, ColorPickerState},
-        input::{Input, InputState},
+        color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
+        input::{Input, InputEvent, InputState},
         notification::Notification,
         switch::Switch,
         *,
@@ -35,8 +36,48 @@ fn picker_hex(picker: &Entity<ColorPickerState>, cx: &App) -> String {
 }
 
 struct UpdateNotification;
+// Apply only fields actually edited in this window. Saving a dialog elsewhere
+// (or toggling the tray menu) must not be overwritten by an older settings form.
+fn merge_settings(mut current: Config, baseline: &Config, draft: &Config) -> Config {
+    macro_rules! merge {
+        ($($($field:ident).+),+ $(,)?) => { $(
+            if draft.$($field).+ != baseline.$($field).+ {
+                current.$($field).+ = draft.$($field).+.clone();
+            }
+        )+ };
+    }
+    merge!(
+        show_settings_on_start,
+        theme,
+        save_directory,
+        hotkeys,
+        gif.fps,
+        gif.max_seconds,
+        gif.max_width,
+        trail.width,
+        trail.lifetime_ms,
+        trail.animation,
+        trail.color_mode,
+        trail.primary_color,
+        trail.secondary_color,
+        pin.border_color,
+        pin.border_width,
+        pin.shadow,
+        updates
+    );
+    current
+}
 pub struct Settings {
     section: usize,
+    baseline: Config,
+    config_path: std::path::PathBuf,
+    show_on_start: bool,
+    gif_fps: u32,
+    theme: String,
+    save_status: String,
+    save_error: bool,
+    pending: bool,
+    autosave: Option<Task<()>>,
     screenshot_key: Entity<InputState>,
     paste_key: Entity<InputState>,
     save_path: Entity<InputState>,
@@ -48,7 +89,7 @@ pub struct Settings {
     trail_color_mode: TrailColorMode,
     trail_primary: Entity<ColorPickerState>,
     trail_secondary: Entity<ColorPickerState>,
-    _trail_observers: Vec<Subscription>,
+    _subscriptions: Vec<Subscription>,
     pin_border_color: Entity<ColorPickerState>,
     pin_border_width: Entity<InputState>,
     pin_shadow: bool,
@@ -96,12 +137,6 @@ impl Settings {
                         ..Default::default()
                     },
                 );
-                w.on_window_should_close(cx, |window, _| {
-                    if let Ok(raw) = app::raw(window) {
-                        let _ = snip_platform::show_window(raw, false);
-                    }
-                    false
-                });
                 let config = cx.global::<Runtime>().config.clone();
                 let mut input =
                     |value: String| cx.new(|cx| InputState::new(w, cx).default_value(value));
@@ -127,7 +162,7 @@ impl Settings {
                 let pin_border_width = input(config.pin.border_width.to_string());
                 let proxy_url = input(config.updates.proxy_url.clone());
                 let proxy_username = input(config.updates.proxy_username.clone());
-                let optional = ["long_capture", "gif", "ocr", "mouse_trail", "settings"]
+                let optional: Vec<_> = ["long_capture", "gif", "ocr", "mouse_trail", "settings"]
                     .into_iter()
                     .map(|key| {
                         (
@@ -151,14 +186,54 @@ impl Settings {
                 });
                 let proxy_password = cx.new(|cx| InputState::new(w, cx).masked(true));
                 cx.new(|cx| {
-                    let trail_observers = vec![
+                    let mut subscriptions = vec![
                         cx.observe(&trail_primary, |_: &mut Self, _, cx| cx.notify()),
                         cx.observe(&trail_secondary, |_, _, cx| cx.notify()),
                         cx.observe(&trail_width, |_, _, cx| cx.notify()),
                         cx.observe(&trail_life, |_, _, cx| cx.notify()),
                     ];
+                    for input in [
+                        &screenshot_key,
+                        &paste_key,
+                        &save_path,
+                        &gif_seconds,
+                        &gif_width,
+                        &trail_width,
+                        &trail_life,
+                        &pin_border_width,
+                        &proxy_url,
+                        &proxy_username,
+                    ]
+                    .into_iter()
+                    .chain(optional.iter().map(|(_, input)| input))
+                    {
+                        subscriptions.push(cx.subscribe(input, |v, _, event: &InputEvent, cx| {
+                            if matches!(event, InputEvent::Change) {
+                                v.schedule_save(cx);
+                            }
+                        }));
+                    }
+                    for picker in [&trail_primary, &trail_secondary, &pin_border_color] {
+                        subscriptions.push(cx.subscribe(
+                            picker,
+                            |v, _, event: &ColorPickerEvent, cx| {
+                                if matches!(event, ColorPickerEvent::Change(_)) {
+                                    v.schedule_save(cx);
+                                }
+                            },
+                        ));
+                    }
                     Self {
                         section: 0,
+                        baseline: config.clone(),
+                        config_path: Config::path(),
+                        show_on_start: config.show_settings_on_start,
+                        gif_fps: config.gif.fps,
+                        theme: config.theme.clone(),
+                        save_status: "修改后自动保存".into(),
+                        save_error: false,
+                        pending: false,
+                        autosave: None,
                         screenshot_key,
                         paste_key,
                         save_path,
@@ -170,7 +245,7 @@ impl Settings {
                         trail_color_mode: config.trail.color_mode,
                         trail_primary,
                         trail_secondary,
-                        _trail_observers: trail_observers,
+                        _subscriptions: subscriptions,
                         pin_border_color,
                         pin_border_width,
                         pin_shadow: config.pin.shadow,
@@ -200,6 +275,26 @@ impl Settings {
                 })
             },
         )?;
+        h.update(cx, |_, window, cx| {
+            let settings = view.downgrade();
+            window.on_window_should_close(cx, move |window, cx| {
+                let _ = settings.update(cx, |v, cx| v.save(cx));
+                if let Ok(raw) = app::raw(window) {
+                    let _ = snip_platform::show_window(raw, false);
+                }
+                false
+            });
+        })?;
+        let settings = view.downgrade();
+        let on_quit = cx.on_app_quit(move |cx| {
+            let _ = settings.update(cx, |v, cx| {
+                if v.pending {
+                    v.save(cx);
+                }
+            });
+            async {}
+        });
+        view.update(cx, |v, _| v._subscriptions.push(on_quit));
         Ok((h, view))
     }
     #[cfg(debug_assertions)]
@@ -230,7 +325,7 @@ impl Settings {
                     .selected(self.trail_animation == style)
                     .on_click(cx.listener(move |v, _, _, cx| {
                         v.trail_animation = style;
-                        cx.notify();
+                        v.save(cx);
                     })),
             );
         }
@@ -249,7 +344,7 @@ impl Settings {
                     .selected(self.trail_color_mode == mode)
                     .on_click(cx.listener(move |v, _, _, cx| {
                         v.trail_color_mode = mode;
-                        cx.notify();
+                        v.save(cx);
                     })),
             );
         }
@@ -295,13 +390,29 @@ impl Settings {
             .child(
                 div()
                     .text_xs()
-                    .child("效果预览 · 保存设置后应用到桌面，颜色和动画会自动记住"),
+                    .child("效果预览 · 修改后自动保存并应用到桌面"),
             )
             .into_any_element()
     }
-    fn save(&self, window: &mut Window, cx: &mut App) {
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        self.pending = true;
+        self.save_status = "等待输入完成，自动保存…".into();
+        self.save_error = false;
+        self.autosave = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let _ = this.update(cx, |v, cx| v.save(cx));
+        }));
+        cx.notify();
+    }
+    fn save(&mut self, cx: &mut Context<Self>) {
+        self.pending = false;
         let result = (|| -> anyhow::Result<Config> {
-            let mut c = cx.global::<Runtime>().config.clone();
+            let mut c = self.baseline.clone();
+            c.show_settings_on_start = self.show_on_start;
+            c.gif.fps = self.gif_fps;
+            c.theme = self.theme.clone();
             c.save_directory = self.save_path.read(cx).value().to_string().into();
             c.hotkeys.insert(
                 "screenshot".into(),
@@ -319,10 +430,30 @@ impl Settings {
                     c.hotkeys.insert(name.clone(), value);
                 }
             }
-            c.gif.max_seconds = self.gif_seconds.read(cx).value().parse()?;
-            c.gif.max_width = self.gif_width.read(cx).value().parse()?;
-            c.trail.width = self.trail_width.read(cx).value().parse()?;
-            c.trail.lifetime_ms = self.trail_life.read(cx).value().parse()?;
+            c.gif.max_seconds = self
+                .gif_seconds
+                .read(cx)
+                .value()
+                .parse()
+                .context("最长录制时间须为整数")?;
+            c.gif.max_width = self
+                .gif_width
+                .read(cx)
+                .value()
+                .parse()
+                .context("输出最大宽度须为整数")?;
+            c.trail.width = self
+                .trail_width
+                .read(cx)
+                .value()
+                .parse()
+                .context("拖尾宽度须为数字")?;
+            c.trail.lifetime_ms = self
+                .trail_life
+                .read(cx)
+                .value()
+                .parse()
+                .context("拖尾生命周期须为整数")?;
             c.trail.animation = self.trail_animation;
             c.trail.color_mode = self.trail_color_mode;
             c.trail.primary_color = picker_hex(&self.trail_primary, cx);
@@ -336,28 +467,56 @@ impl Settings {
                     (c_rgb.b * 255.).round() as u8
                 );
             }
-            c.pin.border_width = self.pin_border_width.read(cx).value().parse()?;
+            c.pin.border_width = self
+                .pin_border_width
+                .read(cx)
+                .value()
+                .parse()
+                .context("贴图边框粗细须为数字")?;
             c.pin.shadow = self.pin_shadow;
             c.updates = self.proxy_config(cx);
             snip_update::validate_proxy(&c.updates)?;
             c.validate()?;
             crate::hotkeys::validate(&c)?;
-            if !crate::is_docs_demo() {
-                c.save(&Config::path())?;
-            }
             Ok(c)
         })();
         match result {
-            Ok(config) => {
-                let restart_trail = !cx.global::<Runtime>().trails.is_empty();
-                cx.global_mut::<Runtime>().config = config;
+            Ok(draft) => {
+                let previous = cx.global::<Runtime>().config.clone();
+                let config = merge_settings(previous.clone(), &self.baseline, &draft);
+                if config != previous
+                    && !crate::is_docs_demo()
+                    && let Err(error) = config.save(&self.config_path)
+                {
+                    self.save_status = format!("自动保存失败：{error}。请检查配置目录权限后重试。");
+                    self.save_error = true;
+                    cx.notify();
+                    return;
+                }
+                let refresh_pins = config.pin != previous.pin;
+                let restart_trail =
+                    config.trail != previous.trail && !cx.global::<Runtime>().trails.is_empty();
+                let update_hotkeys = config.hotkeys != previous.hotkeys;
+                cx.global_mut::<Runtime>().config = config.clone();
+                self.baseline = draft;
+                if config.theme != previous.theme {
+                    Theme::change(
+                        if config.theme == "dark" {
+                            ThemeMode::Dark
+                        } else {
+                            ThemeMode::Light
+                        },
+                        None,
+                        cx,
+                    );
+                }
                 let pins: Vec<_> = cx
                     .global::<Runtime>()
                     .pins
                     .values()
                     .map(|p| (p.handle, p.view.clone()))
                     .collect();
-                for (handle, view) in pins {
+                for (handle, view) in pins.into_iter().filter(|_| refresh_pins) {
                     let _ = handle.update(cx, |_, w, cx| {
                         view.update(cx, |v, cx| v.refresh_frame(w, cx))
                     });
@@ -366,17 +525,23 @@ impl Settings {
                     crate::effects::stop(cx);
                     crate::effects::start(cx);
                 }
-                let config = cx.global::<Runtime>().config.clone();
-                if let Some(keys) = cx.global_mut::<Runtime>().hotkeys.as_mut()
+                self.save_status = "已自动保存".into();
+                self.save_error = false;
+                if update_hotkeys
+                    && let Some(keys) = cx.global_mut::<Runtime>().hotkeys.as_mut()
                     && let Err(error) = keys.apply(&config)
                 {
-                    tracing::warn!("{error}");
+                    self.save_status = format!("已保存；快捷键尚未生效：{error}");
+                    self.save_error = true;
                 }
-                window.push_notification(Notification::success("设置已保存"), cx);
                 cx.refresh_windows();
             }
-            Err(e) => window.push_notification(Notification::error(format!("设置未保存: {e}")), cx),
+            Err(e) => {
+                self.save_status = format!("尚未保存：{e}；请修正输入，原设置仍然有效。");
+                self.save_error = true;
+            }
         }
+        cx.notify();
     }
     fn proxy_config(&self, cx: &App) -> UpdateConfig {
         UpdateConfig {
@@ -621,11 +786,11 @@ impl Render for Settings {
                         "启动时显示偏好设置",
                         "关闭窗口后继续驻留菜单栏 / 系统托盘",
                         Switch::new("show-settings")
-                            .checked(config.show_settings_on_start)
-                            .on_click(|checked, _, cx| {
-                                cx.global_mut::<Runtime>().config.show_settings_on_start = *checked;
-                                cx.refresh_windows();
-                            }),
+                            .checked(self.show_on_start)
+                            .on_click(cx.listener(|v, checked, _, cx| {
+                                v.show_on_start = *checked;
+                                v.save(cx);
+                            })),
                     ))
                     .child(
                         div()
@@ -678,7 +843,7 @@ impl Render for Settings {
                             .checked(self.pin_shadow)
                             .on_click(cx.listener(|v, checked, _, cx| {
                                 v.pin_shadow = *checked;
-                                cx.notify();
+                                v.save(cx);
                             })),
                     ));
             }
@@ -692,11 +857,11 @@ impl Render for Settings {
                     rates = rates.child(
                         Button::new(("fps", fps as usize))
                             .label(format!("{fps}"))
-                            .when(config.gif.fps == fps, |b| b.primary())
-                            .on_click(move |_, _, cx| {
-                                cx.global_mut::<Runtime>().config.gif.fps = fps;
-                                cx.refresh_windows();
-                            }),
+                            .when(self.gif_fps == fps, |b| b.primary())
+                            .on_click(cx.listener(move |v, _, _, cx| {
+                                v.gif_fps = fps;
+                                v.save(cx);
+                            })),
                     );
                 }
                 content = content
@@ -859,17 +1024,17 @@ impl Render for Settings {
             9 => {
                 content = content.child("主题跟随 GPUI Kit。选择后立即应用。");
                 for (label, mode) in [("浅色", ThemeMode::Light), ("深色", ThemeMode::Dark)] {
-                    content = content.child(Button::new(label).label(label).on_click(
-                        move |_, window, cx| {
-                            Theme::change(mode, Some(window), cx);
-                            cx.global_mut::<Runtime>().config.theme = if mode == ThemeMode::Dark {
+                    content = content.child(Button::new(label).label(label).on_click(cx.listener(
+                        move |v, _, _, cx| {
+                            v.theme = if mode == ThemeMode::Dark {
                                 "dark"
                             } else {
                                 "light"
                             }
                             .into();
+                            v.save(cx);
                         },
-                    ));
+                    )));
                 }
             }
             _ => {
@@ -887,7 +1052,7 @@ impl Render for Settings {
                             .selected(self.proxy_mode == mode)
                             .on_click(cx.listener(move |v, _, _, cx| {
                                 v.proxy_mode = mode;
-                                cx.notify();
+                                v.save(cx);
                             }))
                     }),
                 );
@@ -984,10 +1149,12 @@ impl Render for Settings {
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(
-                        Button::new("save-settings")
-                            .primary()
-                            .label("保存设置")
-                            .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .when(self.save_error, |d| d.text_color(cx.theme().danger))
+                            .child(self.save_status.clone()),
                     ),
             )
     }
@@ -995,16 +1162,16 @@ impl Render for Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{Runtime, Settings};
-    use gpui_kit::TestAppContext;
-    use gpui_kit::component::WindowExt;
-    #[gpui_kit::test]
-    fn failed_save_uses_notification_without_writing_configuration(cx: &mut TestAppContext) {
+    use super::{Config, Runtime, Settings, merge_settings};
+    use gpui_kit::{AnyWindowHandle, Entity, TestAppContext};
+    use std::time::Duration;
+
+    fn fixture(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Settings>, tempfile::TempDir) {
         cx.update(gpui_kit::init);
         let (tx, _) = async_channel::bounded(8);
-        cx.set_global(crate::app::Runtime {
+        cx.set_global(Runtime {
             recordings: vec![],
-            config: snip_core::config::Config::default(),
+            config: Config::default(),
             status: String::new(),
             tx,
             pins: Default::default(),
@@ -1019,17 +1186,120 @@ mod tests {
             annotation_toolbar: None,
             capture_task: None,
         });
-        cx.update(|cx| cx.global_mut::<Runtime>().config.gif.max_seconds = 0);
+        let directory = tempfile::tempdir().unwrap();
         let (handle, settings) = cx.update(|cx| Settings::build(cx).unwrap());
+        cx.update(|cx| {
+            settings.update(cx, |v, _| {
+                v.config_path = directory.path().join("config.toml")
+            })
+        });
+        (handle, settings, directory)
+    }
+    fn type_lifetime(
+        handle: AnyWindowHandle,
+        settings: &Entity<Settings>,
+        value: &str,
+        cx: &mut TestAppContext,
+    ) {
         cx.update(|cx| {
             handle
                 .update(cx, |_, w, cx| {
-                    let _ = w.draw(cx);
-                    settings.update(cx, |v, cx| v.save(w, cx));
-                    assert_eq!(w.notifications(cx).len(), 1);
-                    let _ = w.draw(cx);
+                    let input = settings.read(cx).trail_life.clone();
+                    input.update(cx, |i, cx| i.replace_all(value.to_string(), w, cx));
                 })
                 .unwrap()
         });
+        cx.run_until_parked();
+    }
+    fn wait_for_save(cx: &mut TestAppContext) {
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+    }
+    #[gpui_kit::test]
+    fn input_changes_are_debounced_and_survive_reloading(cx: &mut TestAppContext) {
+        let (h, v, directory) = fixture(cx);
+        type_lifetime(h, &v, "4", cx);
+        type_lifetime(h, &v, "450", cx);
+        assert!(!directory.path().join("config.toml").exists());
+        wait_for_save(cx);
+        let (loaded, error) = Config::load(&directory.path().join("config.toml"));
+        assert!(error.is_none());
+        assert_eq!(loaded.trail.lifetime_ms, 450);
+        assert_eq!(loaded.hotkeys.len(), 2);
+        cx.update(|cx| assert_eq!(v.read(cx).save_status, "已自动保存"));
+    }
+    #[gpui_kit::test]
+    fn invalid_draft_preserves_disk_and_recovers_after_correction(cx: &mut TestAppContext) {
+        let (h, v, directory) = fixture(cx);
+        type_lifetime(h, &v, "500", cx);
+        wait_for_save(cx);
+        let path = directory.path().join("config.toml");
+        let original = std::fs::read(&path).unwrap();
+        type_lifetime(h, &v, "", cx);
+        wait_for_save(cx);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        cx.update(|cx| {
+            assert!(v.read(cx).save_error);
+            assert_eq!(cx.global::<Runtime>().config.trail.lifetime_ms, 500);
+        });
+        type_lifetime(h, &v, "750", cx);
+        wait_for_save(cx);
+        assert_eq!(Config::load(&path).0.trail.lifetime_ms, 750);
+    }
+    #[gpui_kit::test]
+    fn save_failure_does_not_apply_or_discard_draft(cx: &mut TestAppContext) {
+        let (h, v, directory) = fixture(cx);
+        cx.update(|cx| v.update(cx, |v, _| v.config_path = directory.path().to_path_buf()));
+        type_lifetime(h, &v, "600", cx);
+        wait_for_save(cx);
+        cx.update(|cx| {
+            assert!(v.read(cx).save_error);
+            assert_eq!(
+                cx.global::<Runtime>().config.trail.lifetime_ms,
+                Config::default().trail.lifetime_ms
+            );
+            v.update(cx, |v, cx| {
+                v.config_path = directory.path().join("config.toml");
+                v.save(cx);
+                assert!(!v.save_error);
+            });
+        });
+        assert_eq!(
+            Config::load(&directory.path().join("config.toml"))
+                .0
+                .trail
+                .lifetime_ms,
+            600
+        );
+    }
+    #[gpui_kit::test]
+    fn closing_window_flushes_pending_edit(cx: &mut TestAppContext) {
+        let (h, v, directory) = fixture(cx);
+        type_lifetime(h, &v, "900", cx);
+        let mut visual = gpui_kit::VisualTestContext::from_window(h, cx);
+        assert!(
+            !visual.simulate_close(),
+            "closing preferences must keep the resident window alive"
+        );
+        assert_eq!(
+            Config::load(&directory.path().join("config.toml"))
+                .0
+                .trail
+                .lifetime_ms,
+            900
+        );
+    }
+    #[test]
+    fn unrelated_edits_preserve_newer_tray_and_save_dialog_preferences() {
+        let baseline = Config::default();
+        let mut latest = baseline.clone();
+        latest.trail.enabled = !baseline.trail.enabled;
+        latest.save_directory = "/new/save/dialog/location".into();
+        let mut draft = baseline.clone();
+        draft.pin.shadow = !baseline.pin.shadow;
+        let merged = merge_settings(latest.clone(), &baseline, &draft);
+        assert_eq!(merged.trail.enabled, latest.trail.enabled);
+        assert_eq!(merged.save_directory, latest.save_directory);
+        assert_eq!(merged.pin.shadow, draft.pin.shadow);
     }
 }
