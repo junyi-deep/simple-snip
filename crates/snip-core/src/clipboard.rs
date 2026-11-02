@@ -348,7 +348,7 @@ impl Writer {
         let fg = self.color(style.color);
         let bg = style.background.map(|c| self.color(c)).unwrap_or(0);
         self.body.push_str(&format!(
-            "{{\\f{font}\\fs{}\\cf{fg}\\highlight{bg}\\b{}\\i{}\\ul{} {}}}",
+            "{{\\f{font}\\fs{}\\cf{fg}\\highlight{bg}\\cb{bg}\\b{}\\i{}\\ul{} {}}}",
             (style.size * 1.5).round() as u32,
             u8::from(style.bold),
             u8::from(style.italic),
@@ -543,7 +543,8 @@ impl Writer {
                 }
                 if let Some(bg) = cs.background {
                     let c = self.color(bg);
-                    self.body.push_str(&format!("\\clcbpat{c}"));
+                    self.body
+                        .push_str(&format!("\\clcbpat{c}\\clcfpat{c}\\clshdng10000"));
                 }
                 let right = widths[..cell.column + cell.span].iter().sum::<f32>() * scale;
                 self.body

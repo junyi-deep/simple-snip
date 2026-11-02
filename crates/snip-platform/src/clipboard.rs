@@ -95,9 +95,19 @@ mod tests {
             render(&clipboard::from_text("Clipboard 中文 2026\nSecond line").unwrap()).unwrap();
         assert!(text.width() > 100 && text.height() > 35);
         let table=render(&clipboard::from_html(br#"<table border='1'><tr><td style='background-color:#12ab34;color:#ff0000;font-weight:bold'>Hello</td><td>42</td></tr><tr><td>World</td><td>123</td></tr></table>"#).unwrap()).unwrap();
+        if let Some(folder) = std::env::var_os("SNIP_CLIPBOARD_FIXTURES") {
+            let folder = std::path::PathBuf::from(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            table.save(folder.join("clipboard-table.png")).unwrap();
+            text.save(folder.join("clipboard-text.png")).unwrap();
+        }
         assert!(table.width() > 200 && table.height() > 35);
         assert!(
-            table.pixels().any(|p| p[1] > 130 && p[0] < 50 && p[2] < 80),
+            table
+                .pixels()
+                .filter(|p| p[1] > 130 && p[0] < 50 && p[2] < 80)
+                .count()
+                > (table.width() * table.height() / 9) as usize,
             "cell background must survive"
         );
         assert!(
@@ -114,13 +124,6 @@ mod tests {
                 .any(|p| p[0] > 180 && p[1] < 100 && p[2] < 100),
             "native RTF styling must survive"
         );
-        if let Some(folder) = std::env::var_os("SNIP_CLIPBOARD_FIXTURES") {
-            let folder = std::path::PathBuf::from(folder);
-            std::fs::create_dir_all(&folder).unwrap();
-            table.save(folder.join("clipboard-table.png")).unwrap();
-            text.save(folder.join("clipboard-text.png")).unwrap();
-            native_rtf.save(folder.join("clipboard-rtf.png")).unwrap();
-        }
         let plain = render(&clipboard::from_text("small").unwrap()).unwrap();
         assert!(
             plain.width() < 200 && plain.height() < 100,
