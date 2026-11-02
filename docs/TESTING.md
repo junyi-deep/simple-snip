@@ -357,4 +357,12 @@ Windows 使用隐藏 RichEdit 和 EM_FORMATRANGE，macOS 使用私有 NSAttribut
 新增原生夹具绘制包含中文的两行文本、红色加粗文字 / 绿色底色表格，逐张查看本地 PNG，确认字体、文字、颜色与边框可见；夹具测试不读取或覆写用户剪贴板。短文本 / 表格三次原生绘制在本机 Debug 测试中由约 10 秒降到约 0.5 秒，包含缓存冷暖差异，不作为 Release F3 延迟基准。重复绘制检查 GDI 对象数保持有界。图片源像素与现有贴图生命周期测试继续保留。
 
 
-合并远程 v0.0.14 后，本机 fmt / Clippy（-D warnings）通过，50 GUI / 资源 + 41 core + 6 platform + 7 updater = 104 项测试通过；额外显式执行默认 ignored 的 3 项原生截图 / OCR 测试全部通过。macOS ARM64 平台库及其测试目标在 Windows 上完成交叉 check / Clippy，尚需 macOS runner 实际执行；不将交叉编译视为 macOS 实机验收。
+合并远程 v0.0.14 后，本机 fmt / Clippy（-D warnings）通过，50 GUI / 资源 + 41 core + 6 platform + 7 updater = 104 项测试通过；额外显式执行默认 ignored 的 3 项原生截图 / OCR 测试全部通过。macOS ARM64 平台库及其测试目标在 Windows 上完成交叉 check / Clippy，随后由 macOS runner 实际执行；交叉编译本身不计作 macOS 实机验收。
+
+
+macOS 原生预检曾揭示两个实际差异：自动背景色索引被解释为黑色，表格没有首选宽度时被扩展到整个容器。已对生成的 RTF 明确文字 / 单元格纸张底色、表格及列的首选宽度，并移除行间多余段落；Mac 位图按 96 DPI 绘制，与 RTF 的点 / twip 单位对应。最终用例还检查默认文字白底、表格宽度范围及整片底色面积，没有通过放宽为少量着色像素来规避失败。CI 仅保留由固定示例生成的三张原生绘制夹具图 7 天，不读取或上传用户剪贴板内容。
+
+最终本机 Release 原生 smoke 输出 SMOKE PASS，三轮真实截图 / 箭头编辑 / 取消 / 拖尾恢复耗时 368 / 326 / 306ms（包含主动展示等待），贴图和设置窗口生命周期通过。日志位于本地忽略目录 verification/v0015-final-smoke.log；该检查不等同于真实办公软件的全部剪贴板格式、多屏或 IME 的完整验收。
+
+
+发布前预检：[41466502744](https://github.com/junyi-deep/simple-snip/actions/runs/41466502744) 在源码 `24115cb` 上完成，Windows 104 项、macOS 99 项 Rust 测试全部通过，两端各有 3 项默认原生权限测试 ignored，未计通过；macOS 额外 6 项签名 / 公证流程命令替身测试通过。新原生富文本绘制像素测试在两平台都实际运行，覆盖白底、单元格背景面积、表格宽度及红色文字。两平台 Release / 打包均成功。后续标签提交仅增加夹具保留配置及验证文档，Rust 源码与本次预检一致。

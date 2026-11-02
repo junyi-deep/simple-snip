@@ -54,13 +54,14 @@ jobs:
       - run: cargo test --locked --workspace --target ${{ matrix.target }}
         env:
           SNIP_CLIPBOARD_FIXTURES: ${{ runner.temp }}/clipboard-fixtures
-      - name: Native clipboard fixtures on test failure
-        if: failure()
+      - name: Native clipboard fixture snapshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Clipboard-fixtures-${{ matrix.artifact }}
           path: ${{ runner.temp }}/clipboard-fixtures/*.png
           if-no-files-found: ignore
+          retention-days: 7
       - run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Third party notices
         shell: bash
