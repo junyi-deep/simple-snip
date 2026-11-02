@@ -243,7 +243,7 @@ impl Writer {
             rules: vec![],
             nodes: 0,
             characters: 0,
-            width: 720,
+            width: 0,
         }
     }
     fn color(&mut self, value: [u8; 3]) -> usize {
@@ -346,7 +346,7 @@ impl Writer {
             self.fonts.len() - 1
         };
         let fg = self.color(style.color);
-        let bg = style.background.map(|c| self.color(c)).unwrap_or(0);
+        let bg = self.color(style.background.unwrap_or([255, 255, 255]));
         self.body.push_str(&format!(
             "{{\\f{font}\\fs{}\\cf{fg}\\highlight{bg}\\cb{bg}\\b{}\\i{}\\ul{} {}}}",
             (style.size * 1.5).round() as u32,
@@ -526,8 +526,12 @@ impl Writer {
         let total = widths.iter().sum::<f32>().max(1.);
         let scale = style.width.unwrap_or(total).min(1150.) / total;
         self.width = self.width.max((total * scale).ceil() as u32 + 32).min(1200);
+        self.body.push_str("\\par ");
         for cells in grid {
-            self.body.push_str("\\par\\trowd\\trgaph90\\trleft0 ");
+            self.body.push_str(&format!(
+                "\\trowd\\trgaph90\\trleft0\\trftsWidth3\\trwWidth{} ",
+                (total * scale * 15.).round() as u32
+            ));
             for cell in &cells {
                 let cs = &cell.style;
                 self.body.push_str(cell.merge);
@@ -541,11 +545,18 @@ impl Writer {
                         ));
                     }
                 }
-                if let Some(bg) = cs.background {
-                    let c = self.color(bg);
-                    self.body
-                        .push_str(&format!("\\clcbpat{c}\\clcfpat{c}\\clshdng10000"));
-                }
+                let c = self.color(cs.background.unwrap_or([255, 255, 255]));
+                self.body
+                    .push_str(&format!("\\clcbpat{c}\\clcfpat{c}\\clshdng10000"));
+                let cell_width = widths[cell.column..cell.column + cell.span]
+                    .iter()
+                    .sum::<f32>()
+                    * scale
+                    * 15.;
+                self.body.push_str(&format!(
+                    "\\clftsWidth3\\clwWidth{}",
+                    cell_width.round() as u32
+                ));
                 let right = widths[..cell.column + cell.span].iter().sum::<f32>() * scale;
                 self.body
                     .push_str(&format!("\\cellx{} ", (right * 15.).round() as u32));
@@ -583,7 +594,7 @@ impl Writer {
         ensure!(rtf.len() <= MAX_BYTES, "剪贴板内容过大，请分段复制");
         Ok(RichText {
             rtf,
-            width: self.width,
+            width: if self.width == 0 { 720 } else { self.width },
         })
     }
 }

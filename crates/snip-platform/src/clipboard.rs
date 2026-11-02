@@ -91,17 +91,27 @@ mod tests {
     }
     #[test]
     fn native_text_and_styled_table_render_without_clipboard_or_visible_windows() {
+        let save_fixture = |image: &RgbaImage, name: &str| {
+            if let Some(folder) = std::env::var_os("SNIP_CLIPBOARD_FIXTURES") {
+                let folder = std::path::PathBuf::from(folder);
+                std::fs::create_dir_all(&folder).unwrap();
+                image.save(folder.join(name)).unwrap();
+            }
+        };
         let text =
             render(&clipboard::from_text("Clipboard 中文 2026\nSecond line").unwrap()).unwrap();
+        save_fixture(&text, "clipboard-text.png");
         assert!(text.width() > 100 && text.height() > 35);
+        assert!(
+            text.pixels()
+                .filter(|p| p.0[..3].iter().all(|v| *v > 245))
+                .count()
+                > (text.width() * text.height() / 2) as usize,
+            "plain text needs a white background, not automatic black shading"
+        );
         let table=render(&clipboard::from_html(br#"<table border='1'><tr><td style='background-color:#12ab34;color:#ff0000;font-weight:bold'>Hello</td><td>42</td></tr><tr><td>World</td><td>123</td></tr></table>"#).unwrap()).unwrap();
-        if let Some(folder) = std::env::var_os("SNIP_CLIPBOARD_FIXTURES") {
-            let folder = std::path::PathBuf::from(folder);
-            std::fs::create_dir_all(&folder).unwrap();
-            table.save(folder.join("clipboard-table.png")).unwrap();
-            text.save(folder.join("clipboard-text.png")).unwrap();
-        }
-        assert!(table.width() > 200 && table.height() > 35);
+        save_fixture(&table, "clipboard-table.png");
+        assert!(table.width() > 200 && table.width() < 500 && table.height() > 35);
         assert!(
             table
                 .pixels()
@@ -118,6 +128,7 @@ mod tests {
         );
         let rtf=clipboard::from_rtf(br"{\rtf1\ansi{\fonttbl{\f0 Arial;}}{\colortbl;\red255\green0\blue0;}\f0\fs36\cf1 Rich text \u20013?\u25991?}").unwrap();
         let native_rtf = render(&rtf).unwrap();
+        save_fixture(&native_rtf, "clipboard-rtf.png");
         assert!(
             native_rtf
                 .pixels()

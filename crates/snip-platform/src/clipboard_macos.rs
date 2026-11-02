@@ -2,12 +2,12 @@ use anyhow::{Context, Result, ensure};
 use image::RgbaImage;
 use objc2::{AnyThread, rc::autoreleasepool};
 use objc2_app_kit::{
-    NSAttributedStringAppKitDocumentFormats, NSAttributedStringNSExtendedStringDrawing,
-    NSBitmapImageFileType, NSBitmapImageRep, NSColor, NSDeviceRGBColorSpace, NSGraphicsContext,
-    NSPasteboard, NSRectFill, NSStringDrawingOptions,
+    NSAffineTransformNSAppKitAdditions, NSAttributedStringAppKitDocumentFormats,
+    NSAttributedStringNSExtendedStringDrawing, NSBitmapImageFileType, NSBitmapImageRep, NSColor,
+    NSDeviceRGBColorSpace, NSGraphicsContext, NSPasteboard, NSRectFill, NSStringDrawingOptions,
 };
 use objc2_foundation::{
-    NSAttributedString, NSData, NSDictionary, NSPoint, NSRect, NSSize, NSString,
+    NSAffineTransform, NSAttributedString, NSData, NSDictionary, NSPoint, NSRect, NSSize, NSString,
 };
 use snip_core::clipboard::{MAX_BYTES, MAX_PIXELS, RichText};
 
@@ -41,18 +41,19 @@ pub fn render(document: &RichText) -> Result<RgbaImage> {
         )
         .context("系统无法读取剪贴板富文本")?;
         let width = document.width.clamp(80, 1200);
+        let scale = 96. / 72.;
         let options = NSStringDrawingOptions::UsesLineFragmentOrigin
             | NSStringDrawingOptions::UsesFontLeading;
         let bounds = text.boundingRectWithSize_options_context(
-            NSSize::new((width - 32) as f64, 1_000_000.),
+            NSSize::new((width - 32) as f64 / scale, 1_000_000.),
             options,
             None,
         );
         ensure!(
-            bounds.size.height.is_finite() && bounds.size.height < 10_000.,
+            bounds.size.height.is_finite() && bounds.size.height * scale < 9968.,
             "剪贴板内容过长，请分段复制"
         );
-        let height = (bounds.size.height.ceil() as u32 + 32).max(48);
+        let height = ((bounds.size.height * scale).ceil() as u32 + 32).max(48);
         ensure!(
             u64::from(width) * u64::from(height) <= MAX_PIXELS,
             "剪贴板内容图片过大，请分段复制"
@@ -76,10 +77,13 @@ pub fn render(document: &RichText) -> Result<RgbaImage> {
             NSPoint::new(0., 0.),
             NSSize::new(width as f64, height as f64),
         ));
+        let transform = NSAffineTransform::transform();
+        transform.scaleBy(scale);
+        transform.concat();
         text.drawWithRect_options_context(
             NSRect::new(
-                NSPoint::new(16., 16.),
-                NSSize::new((width - 32) as f64, (height - 32) as f64),
+                NSPoint::new(16. / scale, 16. / scale),
+                NSSize::new((width - 32) as f64 / scale, (height - 32) as f64 / scale),
             ),
             options,
             None,
