@@ -1,6 +1,6 @@
 [package]
 name = "snip-core"
-version = "0.0.14"
+version = "0.0.15"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -16,3 +16,5 @@ tiny-skia = "0.11"
 gif = "0.14"
 
 fontdue = "=0.9.5"
+html5ever = "=0.27.0"
+markup5ever_rcdom = "=0.3.0"

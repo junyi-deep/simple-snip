@@ -845,14 +845,8 @@ impl EditorView {
                     if cancel.cancelled() {
                         return;
                     }
-                    let message = match result {
-                        Ok(()) => "已复制图片，可按 F3 贴图".into(),
-                        Err(e) => format!("复制失败: {e}"),
-                    };
                     let _ = this.update(cx, |v, cx| {
-                        v.toast_last.clear();
-                        v.message = message;
-                        cx.notify();
+                        v.copied(result.map_err(|e| format!("复制失败: {e}")), cx);
                     });
                 }
                 1 => cx.update(|cx| app::save_image(image, cx)),
@@ -876,6 +870,17 @@ impl EditorView {
         })
         .detach();
         cx.notify();
+    }
+    fn copied(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+        if result.is_ok() && matches!(self.host, EditorHost::Capture) {
+            app::close_overlays(cx);
+        } else {
+            self.toast_last.clear();
+            self.message = result
+                .err()
+                .unwrap_or_else(|| "已复制图片，可按 F3 贴图".into());
+            cx.notify();
+        }
     }
     fn pin_placement(&self) -> Option<Bounds<Pixels>> {
         matches!(self.host, EditorHost::Capture)
@@ -3155,6 +3160,48 @@ mod tests {
                 .unwrap();
         });
     }
+    #[gpui_kit::test]
+    fn image_copy_closes_capture_only_on_success_and_keeps_pin(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        let (tx, _) = async_channel::bounded(4);
+        cx.set_global(crate::app::Runtime {
+            recordings: vec![],
+            config: snip_core::config::Config::default(),
+            status: String::new(),
+            tx,
+            pins: Default::default(),
+            next_pin: 1,
+            overlays: vec![window],
+            capture_busy: false,
+            permission_prompt: false,
+            settings: None,
+            hotkeys: None,
+            tray: None,
+            trails: vec![],
+            annotation_toolbar: None,
+            capture_task: None,
+        });
+        cx.update(crate::window_pool::init);
+        cx.update(|cx| {
+            editor.update(cx, |v, cx| {
+                v.copied(Ok(()), cx);
+                assert!(
+                    !cx.global::<crate::app::Runtime>().overlays.is_empty(),
+                    "copying from a pin must keep it open"
+                );
+                v.host = EditorHost::Capture;
+                v.copied(Err("clipboard busy".into()), cx);
+                assert_eq!(v.message, "clipboard busy");
+                assert!(
+                    !cx.global::<crate::app::Runtime>().overlays.is_empty(),
+                    "failed writes must keep the selection"
+                );
+                v.copied(Ok(()), cx);
+                assert!(cx.global::<crate::app::Runtime>().overlays.is_empty());
+            });
+        });
+    }
+
     #[gpui_kit::test]
     fn ocr_keeps_original_pixels_and_messages_do_not_change_toolbar_height(
         cx: &mut TestAppContext,

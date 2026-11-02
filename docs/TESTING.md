@@ -345,3 +345,16 @@ README 仅保留核心优势和六项功能，配图通过电脑操作技能在�
 [v0.0.14 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.14) 已公开，非草稿、非预发布。实际下载 Windows ZIP、macOS ZIP / DMG 与 SHA256SUMS：所有下载文件匹配 GitHub 资产 digest，三个包同时匹配 SHA256SUMS；两个 ZIP 完整性检查、DMG CRC32 校验通过。Windows PE 为 AMD64 / PE32+ / GUI subsystem；macOS Mach-O 为 ARM64，下载应用的两个版本号均为 0.0.14、最低系统为 15.0，ad-hoc 签名完整性校验通过。
 
 未执行下载的 Windows 程序，不代表 Windows 桌面验收。所有 macOS 发行资产本轮仍为 `_unsigned`，没有 Developer ID / Apple 公证；不得把签名完整性或命令替身测试称作 Gatekeeper / 公证通过。独立本地 Release 打包也已通过，Mach-O minos 为 15.0；原授权包保持未覆盖。
+
+## 0.0.15 复制完成与多格式剪贴板贴图（2026-11-02）
+
+[issue #2](https://github.com/junyi-deep/simple-snip/issues/2) 要求截图复制成功后退出，以及 F3 直接贴出文本 / 带样式表格。复制完成回调仅在剪贴板写入成功且宿主为截图时结束会话；失败保留选区，已有贴图与 OCR 文字复制维持原有行为。F3 保留当前截图 / 当前贴图编辑的路由，普通粘贴读取图片、RTF、HTML，再回退纯文本。转换在后台执行，重用现有图片贴图；不将富文本作为可执行页面打开。
+
+HTML 使用已有版本的 html5ever / RcDom，按 CF_HTML 的 UTF-8 字节偏移选取片段，同时读取外围继承样式和本地样式表。支持常见文字格式、表格底色 / 边框 / 对齐、col 列宽及 colspan / rowspan；RTF 交给系统原生文字引擎，过滤嵌入图片、OLE 对象和字段指令。纯文本保留换行，TSV 转表格。限制输入字节、文字数量、DOM 深度 / 节点、表格行列及输出像素，不承诺任意网页 CSS、外部图片或复杂嵌入对象的还原。
+
+Windows 使用隐藏 RichEdit 和 EM_FORMATRANGE，macOS 使用私有 NSAttributedString / 位图绘制上下文；不依赖桌面采集。Windows 先测量所需高度，避免短文字也分配并扫描 10000px 高画布。回归中曾发现表格字符长度含段落标记、测量后换入位图仍复用旧排版缓存的问题，改为原生字符计数并在目标改变时释放缓存；RichEdit 系统 DLL 按进程保留一次，绘制串行化。每次绘制的窗口 / DC / 位图和末次排版缓存由 RAII 清理。
+
+新增原生夹具绘制包含中文的两行文本、红色加粗文字 / 绿色底色表格，逐张查看本地 PNG，确认字体、文字、颜色与边框可见；夹具测试不读取或覆写用户剪贴板。短文本 / 表格三次原生绘制在本机 Debug 测试中由约 10 秒降到约 0.5 秒，包含缓存冷暖差异，不作为 Release F3 延迟基准。重复绘制检查 GDI 对象数保持有界。图片源像素与现有贴图生命周期测试继续保留。
+
+
+合并远程 v0.0.14 后，本机 fmt / Clippy（-D warnings）通过，50 GUI / 资源 + 41 core + 6 platform + 7 updater = 104 项测试通过；额外显式执行默认 ignored 的 3 项原生截图 / OCR 测试全部通过。macOS ARM64 平台库及其测试目标在 Windows 上完成交叉 check / Clippy，尚需 macOS runner 实际执行；不将交叉编译视为 macOS 实机验收。

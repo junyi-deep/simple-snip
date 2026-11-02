@@ -10,4 +10,5 @@ pub mod recording;
 
 pub use fontdue;
 
+pub mod clipboard;
 pub mod history;

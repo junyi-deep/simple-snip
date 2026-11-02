@@ -21,6 +21,7 @@ use image::RgbaImage;
 use raw_window_handle::RawWindowHandle;
 use snip_core::geometry::{DisplayMap, Point, Rect};
 use std::{borrow::Cow, sync::Arc};
+mod clipboard;
 
 #[derive(Debug)]
 pub struct ScreenPermissionDenied;

@@ -514,6 +514,26 @@ pub(crate) fn current_pin_editor(cx: &mut App) -> Option<Entity<crate::editor::E
             .flatten()
     })
 }
+static CLIPBOARD_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct ClipboardJob;
+impl ClipboardJob {
+    fn start() -> Option<Self> {
+        CLIPBOARD_PENDING
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .ok()
+            .map(|_| Self)
+    }
+}
+impl Drop for ClipboardJob {
+    fn drop(&mut self) {
+        CLIPBOARD_PENDING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 fn handle(event: Event, cx: &mut App) {
     match event {
         Event::Command(cmd) => match cmd {
@@ -533,17 +553,27 @@ fn handle(event: Event, cx: &mut App) {
                     editor.update(cx, |v, cx| v.export(3, cx));
                     return;
                 }
+                let Some(job) = ClipboardJob::start() else {
+                    return;
+                };
                 let tx = cx.global::<Runtime>().tx.clone();
-                std::thread::spawn(move || match NativeClipboard.read_image() {
-                    Ok(image) => {
-                        let _ = tx.send_blocking(if matches!(cmd, Command::Paste) {
-                            Event::Pin(PreparedImage::new(image), None)
-                        } else {
-                            Event::Edit(image)
-                        });
-                    }
-                    Err(e) => {
-                        let _ = tx.send_blocking(Event::Status(e.to_string()));
+                std::thread::spawn(move || {
+                    let _job = job;
+                    match if matches!(cmd, Command::Paste) {
+                        NativeClipboard.read_pin()
+                    } else {
+                        NativeClipboard.read_image()
+                    } {
+                        Ok(image) => {
+                            let _ = tx.send_blocking(if matches!(cmd, Command::Paste) {
+                                Event::Pin(PreparedImage::new(image), None)
+                            } else {
+                                Event::Edit(image)
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send_blocking(Event::Status(e.to_string()));
+                        }
                     }
                 });
             }
