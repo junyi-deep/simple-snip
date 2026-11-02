@@ -366,3 +366,7 @@ macOS 原生预检曾揭示两个实际差异：自动背景色索引被解释�
 
 
 发布前预检：[41466502744](https://github.com/junyi-deep/simple-snip/actions/runs/41466502744) 在源码 `24115cb` 上完成，Windows 104 项、macOS 99 项 Rust 测试全部通过，两端各有 3 项默认原生权限测试 ignored，未计通过；macOS 额外 6 项签名 / 公证流程命令替身测试通过。新原生富文本绘制像素测试在两平台都实际运行，覆盖白底、单元格背景面积、表格宽度及红色文字。两平台 Release / 打包均成功。后续标签提交仅增加夹具保留配置及验证文档，Rust 源码与本次预检一致。
+
+最终发布确认：[v0.0.15 标签流水线 41469830475](https://github.com/junyi-deep/simple-snip/actions/runs/41469830475) 的 Windows、macOS 和 Release 任务全部成功，标签源码为 `8bfc1fd05ddab0fb500fe57a2fad64d1b3e20830`。实际日志确认 Windows 104 项、macOS 99 项 Rust 测试通过，macOS 另有 6 项公证流程命令替身测试通过；默认原生权限测试仍各有 3 项 ignored，不计通过。下载并逐张查看两平台成功测试生成的文本、表格及 RTF 合成夹具 PNG，确认中文可读、白底、红字、绿色单元格背景和紧凑表格宽度。
+
+[v0.0.15 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.15) 已公开。实际下载 Windows ZIP、macOS ZIP / DMG 及 SHA256SUMS，文件尺寸、清单 SHA256 与 GitHub asset digest 一致；ZIP CRC、Windows AMD64 / PE32+ / GUI / 8MB 栈保留、macOS ARM64 / Info.plist 双版本 0.0.15 检查通过。下载程序未执行；Windows 本机 Release 原生 smoke 已另行通过。发行包仍为 `_unsigned`，本轮没有执行 Apple 正式签名或公证，不把命令替身测试称为公证验收。
