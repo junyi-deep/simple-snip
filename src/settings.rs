@@ -6,7 +6,7 @@ use gpui_kit::{
         button::*,
         color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
         input::{Input, InputEvent, InputState},
-        notification::Notification,
+        progress::Progress,
         switch::Switch,
         *,
     },
@@ -35,7 +35,11 @@ fn picker_hex(picker: &Entity<ColorPickerState>, cx: &App) -> String {
     }
 }
 
-struct UpdateNotification;
+enum DownloadEvent {
+    Progress(u64, u64),
+    Installing,
+    Done(anyhow::Result<()>),
+}
 // Apply only fields actually edited in this window. Saving a dialog elsewhere
 // (or toggling the tray menu) must not be overwritten by an older settings form.
 fn merge_settings(mut current: Config, baseline: &Config, draft: &Config) -> Config {
@@ -99,7 +103,7 @@ pub struct Settings {
     proxy_password: Entity<InputState>,
     update_busy: bool,
     update_status: String,
-    notified_status: String,
+    update_progress: Option<f32>,
     update_release: Option<snip_update::Release>,
     optional: Vec<(String, Entity<InputState>)>,
 }
@@ -254,7 +258,7 @@ impl Settings {
                         proxy_username,
                         proxy_password,
                         update_busy: false,
-                        notified_status: String::new(),
+                        update_progress: None,
                         update_status: match std::fs::read_to_string(
                             Config::path()
                                 .with_file_name("updates")
@@ -562,6 +566,7 @@ impl Settings {
         }
         let password = self.proxy_password.read(cx).value().to_string();
         self.update_busy = true;
+        self.update_progress = None;
         self.update_release = None;
         self.update_status = "正在检查 GitHub 发布版本…".into();
         cx.spawn(async move |this, cx| {
@@ -595,20 +600,28 @@ impl Settings {
         let config = self.proxy_config(cx);
         let password = self.proxy_password.read(cx).value().to_string();
         let directory = Config::path().with_file_name("updates");
-        enum DownloadEvent {
-            Progress(u64, u64),
-            Done(anyhow::Result<()>),
-        }
         let (tx, rx) = async_channel::bounded(8);
         self.update_busy = true;
+        self.update_progress = Some(0.);
         self.update_status = "正在下载并校验更新包…".into();
         let app_tx = cx.global::<Runtime>().tx.clone();
         std::thread::spawn(move || {
+            let mut last_progress = std::time::Instant::now();
             let result =
                 snip_update::download(&release, &config, &password, &directory, |done, total| {
-                    let _ = tx.try_send(DownloadEvent::Progress(done, total));
+                    // Keep UI work bounded even on fast connections. Never block the
+                    // download for intermediate progress; stage changes are reliable.
+                    if (done == total
+                        || last_progress.elapsed() >= std::time::Duration::from_millis(100))
+                        && tx.try_send(DownloadEvent::Progress(done, total)).is_ok()
+                    {
+                        last_progress = std::time::Instant::now();
+                    }
                 })
-                .and_then(|path| snip_update::prepare_install(&path))
+                .and_then(|path| {
+                    let _ = tx.send_blocking(DownloadEvent::Installing);
+                    snip_update::prepare_install(&path)
+                })
                 .and_then(snip_update::launch_install);
             if result.is_ok() {
                 let _ = app_tx.send_blocking(app::Event::Command(Command::Quit));
@@ -620,24 +633,7 @@ impl Settings {
                 let finished = matches!(event, DownloadEvent::Done(_));
                 if this
                     .update(cx, |v, cx| {
-                        match event {
-                            DownloadEvent::Progress(done, total) => {
-                                v.update_status = format!(
-                                    "正在下载：{}%（完成后校验 SHA256）",
-                                    done * 100 / total.max(1)
-                                )
-                            }
-                            DownloadEvent::Done(result) => {
-                                v.update_busy = false;
-                                match result {
-                                    Ok(()) => {
-                                        v.update_status =
-                                            "升级助手已就绪，正在退出并安装新版本…".into();
-                                    }
-                                    Err(e) => v.update_status = format!("升级失败：{e}"),
-                                }
-                            }
-                        }
+                        v.apply_download_event(event);
                         cx.notify();
                     })
                     .is_err()
@@ -649,6 +645,36 @@ impl Settings {
         })
         .detach();
         cx.notify();
+    }
+    fn apply_download_event(&mut self, event: DownloadEvent) {
+        match event {
+            DownloadEvent::Progress(done, total) => {
+                let percent = (done as f64 / total.max(1) as f64 * 100.).clamp(0., 100.) as f32;
+                self.update_progress = Some(percent);
+                self.update_status = if total > 0 && done >= total {
+                    "下载完成，正在校验 SHA256…".into()
+                } else {
+                    format!("正在下载：{percent:.0}%")
+                };
+            }
+            DownloadEvent::Installing => {
+                self.update_progress = Some(100.);
+                self.update_status = "校验通过，正在准备安装…".into();
+            }
+            DownloadEvent::Done(result) => {
+                self.update_busy = false;
+                match result {
+                    Ok(()) => {
+                        self.update_progress = Some(100.);
+                        self.update_status = "升级助手已就绪，正在退出并安装新版本…".into();
+                    }
+                    Err(e) => {
+                        self.update_progress = None;
+                        self.update_status = format!("升级失败：{e}");
+                    }
+                }
+            }
+        }
     }
 }
 fn row(title: &str, description: &str, control: impl IntoElement) -> Div {
@@ -678,16 +704,7 @@ fn row(title: &str, description: &str, control: impl IntoElement) -> Div {
         .child(div().flex_shrink_0().child(control))
 }
 impl Render for Settings {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.notified_status != self.update_status {
-            if !self.notified_status.is_empty() {
-                window.push_notification(
-                    Notification::info(self.update_status.clone()).id::<UpdateNotification>(),
-                    cx,
-                );
-            }
-            self.notified_status = self.update_status.clone();
-        }
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let config = cx.global::<Runtime>().config.clone();
         let names = [
             "通用",
@@ -747,7 +764,28 @@ impl Render for Settings {
                     .font_weight(FontWeight::SEMIBOLD)
                     .mb_3()
                     .child(names[self.section]),
-            );
+            )
+            .when(self.section == 10 || self.update_busy, |d| {
+                d.child(
+                    div()
+                        .id("update-status")
+                        .v_flex()
+                        .gap_2()
+                        .p_3()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .rounded_md()
+                        .child(self.update_status.clone())
+                        .when(self.update_busy || self.update_progress.is_some(), |d| {
+                            d.child(
+                                Progress::new("update-progress")
+                                    .accessibility_label("自动更新进度")
+                                    .value(self.update_progress.unwrap_or(0.))
+                                    .loading(self.update_progress.is_none()),
+                            )
+                        }),
+                )
+            });
         match self.section {
             0 => {
                 let (toast_enabled, toast_delay) = crate::editor::toast_preferences(cx);
@@ -1162,7 +1200,8 @@ impl Render for Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Runtime, Settings, merge_settings};
+    use super::{Config, DownloadEvent, Runtime, Settings, merge_settings};
+    use gpui_kit::component::WindowExt;
     use gpui_kit::{AnyWindowHandle, Entity, TestAppContext};
     use std::time::Duration;
 
@@ -1214,6 +1253,66 @@ mod tests {
     fn wait_for_save(cx: &mut TestAppContext) {
         cx.executor().advance_clock(Duration::from_millis(600));
         cx.run_until_parked();
+    }
+    #[gpui_kit::test]
+    fn update_progress_renders_without_notifications_and_recovers_from_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view, _directory) = fixture(cx);
+        cx.update(|cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    view.update(cx, |v, cx| {
+                        v.section = 10;
+                        v.update_busy = true;
+                        v.update_progress = Some(0.);
+                        cx.notify();
+                    });
+                    for done in 0..=100 {
+                        view.update(cx, |v, cx| {
+                            v.apply_download_event(DownloadEvent::Progress(done, 100));
+                            assert_eq!(v.update_progress, Some(done as f32));
+                            assert!(v.update_busy);
+                            cx.notify();
+                        });
+                        let _ = window.draw(cx);
+                        assert!(window.notifications(cx).is_empty());
+                    }
+                    view.update(cx, |v, cx| {
+                        assert!(v.update_status.contains("校验"));
+                        v.apply_download_event(DownloadEvent::Installing);
+                        assert_eq!(v.update_progress, Some(100.));
+                        assert!(v.update_status.contains("准备安装"));
+                        v.apply_download_event(DownloadEvent::Done(Err(anyhow::anyhow!(
+                            "校验失败"
+                        ))));
+                        assert!(!v.update_busy, "failure must enable retry");
+                        assert!(v.update_progress.is_none());
+                        assert!(v.update_status.contains("升级失败"));
+                        cx.notify();
+                    });
+                    let _ = window.draw(cx);
+                    assert!(window.notifications(cx).is_empty());
+                    // The same indicator also renders on another tab during a retry.
+                    view.update(cx, |v, cx| {
+                        v.section = 0;
+                        v.update_busy = true;
+                        v.apply_download_event(DownloadEvent::Progress(25, 100));
+                        cx.notify();
+                    });
+                    let _ = window.draw(cx);
+                    assert!(window.notifications(cx).is_empty());
+                    view.update(cx, |v, cx| {
+                        v.apply_download_event(DownloadEvent::Done(Ok(())));
+                        assert!(!v.update_busy);
+                        assert_eq!(v.update_progress, Some(100.));
+                        cx.notify();
+                    });
+                    let _ = window.draw(cx);
+                    assert!(window.notifications(cx).is_empty());
+                })
+                .unwrap();
+        });
     }
     #[gpui_kit::test]
     fn input_changes_are_debounced_and_survive_reloading(cx: &mut TestAppContext) {
