@@ -1,0 +1,71 @@
+name: Publish verified desktop build
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag
+        required: true
+        type: string
+      build_run_id:
+        description: Supported desktop builds run with two successful desktop jobs
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-${{ inputs.release_tag }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+    steps:
+      - name: Verify tag and successful desktop builds
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          repo, tag, run_id = (os.environ[k] for k in ('GH_REPO', 'RELEASE_TAG', 'BUILD_RUN_ID'))
+          assert re.fullmatch(r'v\d+\.\d+\.\d+', tag)
+          assert re.fullmatch(r'\d+', run_id)
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/{path}']))
+          ref = api(f'git/ref/tags/{tag}')['object']
+          if ref['type'] == 'tag':
+              ref = api(f'git/tags/{ref["sha"]}')['object']
+          assert ref['type'] == 'commit'
+          run = api(f'actions/runs/{run_id}')
+          assert run['head_sha'] == ref['sha'], 'Build and tag differ'
+          assert run['path'] == '.github/workflows/build.yml'
+          assert run['event'] == 'push' and run['head_branch'] == tag
+          jobs = api(f'actions/runs/{run_id}/jobs?per_page=100')['jobs']
+          expected = {'desktop (windows-2022, x86_64-pc-windows-msvc, win-amd64)',
+                      'desktop (macos-15, aarch64-apple-darwin, macos-arm64)'}
+          assert {j['name'] for j in jobs if j['conclusion'] == 'success'} >= expected
+          print('Verified tag commit and both desktop builds:', ref['sha'])
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.build_run_id }}
+          pattern: SimpleSnip-*
+          path: release-assets
+          merge-multiple: true
+      - name: Validate version and publish existing packages
+        shell: bash
+        run: |
+          python3 scripts/validate-release.py "$RELEASE_TAG"
+          cd release-assets
+          test -n "$(find . -maxdepth 1 -name '*win-amd64*.zip' -print -quit)"
+          test -n "$(find . -maxdepth 1 -name '*macos-arm64*.zip' -print -quit)"
+          test -n "$(find . -maxdepth 1 -name '*macos-arm64*.dmg' -print -quit)"
+          sha256sum *.zip *.dmg > SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --title "Simple Snip ${RELEASE_TAG#v}" --notes-file "../docs/releases/${RELEASE_TAG#v}.md" *.zip *.dmg SHA256SUMS
