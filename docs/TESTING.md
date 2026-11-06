@@ -390,3 +390,12 @@ F3 / 托盘贴图操作在标注工具栏打开时导出当前文档（包括未
 本机 workspace 111 项通过（53 应用 + 42 core + 9 platform + 7 updater），3 项默认桌面权限测试仍 ignored，未计通过。fmt / Clippy（-D warnings）通过。回归包含标注窗口优先于剪贴板、当前线条实际进入导出像素、已有贴图提交后再读取剪贴板、相同像素不同 Arc 去重、鼠标穿透解除、无常规边框的高亮、重复高亮计时重置、仅末端像素不同仍新建。富文本失败回退和图片快速路径继续通过，测试不覆写用户剪贴板。macOS 本轮未执行原生回归。
 
 最终 Release 构建与原生 --smoke-test 通过，三轮真实截图 / 编辑 / 取消 / 拖尾恢复及贴图和设置窗口生命周期正常。日志保留本地忽略目录 verification/f3-context-dedup-smoke.log。该 smoke 不模拟物理 F3；F3 路由、实际文档导出事件和重复贴图高亮由 GPUI 回归测试覆盖。
+
+
+## 2026-11-07：v0.0.18 发布核验
+
+标签源码为 f8773ff3434a4c10ee0a4bebbbf0142aeade5232。[双平台构建](https://github.com/junyi-deep/simple-snip/actions/runs/42250055507) 的 Windows 和 macOS 桌面任务均成功，实际日志确认 Windows 111 项、macOS 105 项 Rust 测试通过，包括当前文档导出、工具栏关闭后的剪贴板回退与重复贴图定位 / 高亮。各有 3 项默认原生权限测试 ignored，未计通过；macOS 另有 6 项签名 / 公证流程命令替身测试通过，不代表实际 Apple 公证。
+
+原上传任务因 macOS ARM64 运行器容量不足未能开始执行；重试仍排队后取消该上传运行，桌面构建结果保持成功。新增 [Linux 资产发布任务](https://github.com/junyi-deep/simple-snip/actions/runs/42253934983)，核对标签对应提交和两端成功构建，复用同一批安装包，生成校验清单并成功发布。后续常规发布的上传阶段也改用 Linux，桌面原生构建平台不变。
+
+[v0.0.18 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.18) 已公开，非草稿、非预发布。实际下载 Windows ZIP、macOS ZIP / DMG 和 SHA256SUMS，文件尺寸、清单 SHA256 与 GitHub asset digest 一致；ZIP CRC、Windows AMD64 / PE32+ / GUI / 8MB 栈保留及 macOS ARM64 / Info.plist 双版本 0.0.18 均通过。下载程序未执行。发行包仍为 unsigned / ad-hoc 测试包，没有执行 Developer ID 签名或 Apple 公证。
