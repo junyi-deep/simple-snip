@@ -370,3 +370,12 @@ macOS 原生预检曾揭示两个实际差异：自动背景色索引被解释�
 最终发布确认：[v0.0.15 标签流水线 41469830475](https://github.com/junyi-deep/simple-snip/actions/runs/41469830475) 的 Windows、macOS 和 Release 任务全部成功，标签源码为 `8bfc1fd05ddab0fb500fe57a2fad64d1b3e20830`。实际日志确认 Windows 104 项、macOS 99 项 Rust 测试通过，macOS 另有 6 项公证流程命令替身测试通过；默认原生权限测试仍各有 3 项 ignored，不计通过。下载并逐张查看两平台成功测试生成的文本、表格及 RTF 合成夹具 PNG，确认中文可读、白底、红字、绿色单元格背景和紧凑表格宽度。
 
 [v0.0.15 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.15) 已公开。实际下载 Windows ZIP、macOS ZIP / DMG 及 SHA256SUMS，文件尺寸、清单 SHA256 与 GitHub asset digest 一致；ZIP CRC、Windows AMD64 / PE32+ / GUI / 8MB 栈保留、macOS ARM64 / Info.plist 双版本 0.0.15 检查通过。下载程序未执行；Windows 本机 Release 原生 smoke 已另行通过。发行包仍为 `_unsigned`，本轮没有执行 Apple 正式签名或公证，不把命令替身测试称为公证验收。
+
+
+## 2026-11-06：Windows 拖尾录屏与共享
+
+拖尾配置增加 show_in_capture，默认 true，旧配置缺失该字段时同样启用。设置「鼠标拖尾」提供「在录屏和屏幕共享中显示」，自动保存并应用；关闭时使用原来的全局捕获排除。Windows 在本工具截图采样、长截图及 GIF 采集期间临时设置排除，截图采样完成即恢复用户策略，不等选区或标注结束。原生排除成功时本地拖尾保持可见；失败时保留绘制暂停回退。复用窗口时显式恢复 WDA_NONE，避免沿用上一次排除状态。macOS 原有采集行为保持。
+
+本机 fmt / Clippy（-D warnings）通过，workspace 共 108 项测试通过（52 应用 + 42 core + 7 platform + 7 updater）。新增测试覆盖旧配置默认、关闭选项的磁盘往返、设置防抖保存和运行状态更新，以及真实隐藏 Win32 窗口重复设置 / 读取捕获亲和性。3 项默认原生权限测试本轮仍 ignored，不计通过。Release 构建与原生 --smoke-test 通过，三轮真实截图 / 编辑 / 取消 / 拖尾恢复和窗口生命周期无失败；日志保留本地忽略目录 verification/trail-sharing-smoke.log。
+
+会议软件的真实远端画面未实测；独立拖尾窗口需要整屏捕获，单应用共享、游戏捕获等模式仍可能不包含它。建议复查设置开关两种状态，在会议软件整屏共享预览中移动鼠标；连续截图、取消和复制后确认共享拖尾恢复；长截图或 GIF 结束后确认恢复。macOS 本轮未执行原生回归。

@@ -93,10 +93,21 @@ pub fn request_screen_permission() -> bool {
 pub fn exclude_capture_controls(handle: RawWindowHandle) -> Result<u32> {
     // Windows 10 2004+: the controls remain visible to the user but are omitted
     // from desktop capture. Older Windows may treat this as WDA_MONITOR.
-    unsafe {
-        SetWindowDisplayAffinity(hwnd(handle)?, WDA_EXCLUDEFROMCAPTURE)?;
-    }
+    set_capture_excluded(handle, true)?;
     Ok(0)
+}
+pub fn set_capture_excluded(handle: RawWindowHandle, excluded: bool) -> Result<()> {
+    unsafe {
+        SetWindowDisplayAffinity(
+            hwnd(handle)?,
+            if excluded {
+                WDA_EXCLUDEFROMCAPTURE
+            } else {
+                WDA_NONE
+            },
+        )?;
+    }
+    Ok(())
 }
 pub fn capture_region_excluding(display: u32, rect: Rect, _: u32) -> Result<RgbaImage> {
     crate::capture_region(display, rect)
@@ -541,6 +552,26 @@ mod tests {
             "hello world 中文 text"
         );
         assert_eq!(super::ocr_line_text("测  试\n测\t试"), "测  试\n测\t试");
+    }
+
+    #[test]
+    fn capture_exclusion_can_be_cleared_on_a_reused_window() {
+        let window = TestWindow::new();
+        for excluded in [false, true, false, true, false] {
+            set_capture_excluded(window.raw(), excluded).unwrap();
+            let mut affinity = 0;
+            unsafe {
+                GetWindowDisplayAffinity(window.0, &mut affinity).unwrap();
+            }
+            assert_eq!(
+                affinity,
+                if excluded {
+                    WDA_EXCLUDEFROMCAPTURE.0
+                } else {
+                    WDA_NONE.0
+                }
+            );
+        }
     }
 
     #[test]

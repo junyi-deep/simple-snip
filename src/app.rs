@@ -678,6 +678,10 @@ fn handle(event: Event, cx: &mut App) {
         Event::Captured(result, mode) => {
             let opened_at = std::time::Instant::now();
             cx.global_mut::<Runtime>().capture_busy = false;
+            // Pixels have already been sampled. Restore sharing immediately,
+            // including while the user selects/annotates the frozen image.
+            #[cfg(target_os = "windows")]
+            set_trails_visible(cx, true);
             match result {
                 Ok(displays) => {
                     for (display, texture) in displays {
@@ -881,8 +885,8 @@ pub fn close_overlays(cx: &mut App) {
 pub fn set_trails_visible(cx: &mut App, show: bool) {
     let handles = cx.global::<Runtime>().trails.clone();
     for (h, view) in handles {
-        view.update(cx, |v, cx| v.set_visible(show, cx));
-        let _ = h.update(cx, |_, w, _| {
+        let _ = h.update(cx, |_, w, cx| {
+            view.update(cx, |v, cx| v.set_capture_visible(show, w, cx));
             // Windows' full-screen transparent swap chain can stop presenting
             // after native hide/show. Keep it mapped and paint an empty frame.
             #[cfg(target_os = "macos")]

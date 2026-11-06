@@ -59,6 +59,7 @@ fn merge_settings(mut current: Config, baseline: &Config, draft: &Config) -> Con
         gif.max_seconds,
         gif.max_width,
         trail.width,
+        trail.show_in_capture,
         trail.lifetime_ms,
         trail.animation,
         trail.color_mode,
@@ -90,6 +91,7 @@ pub struct Settings {
     trail_width: Entity<InputState>,
     trail_life: Entity<InputState>,
     trail_animation: TrailAnimation,
+    trail_show_in_capture: bool,
     trail_color_mode: TrailColorMode,
     trail_primary: Entity<ColorPickerState>,
     trail_secondary: Entity<ColorPickerState>,
@@ -246,6 +248,7 @@ impl Settings {
                         trail_width,
                         trail_life,
                         trail_animation: config.trail.animation,
+                        trail_show_in_capture: config.trail.show_in_capture,
                         trail_color_mode: config.trail.color_mode,
                         trail_primary,
                         trail_secondary,
@@ -459,6 +462,7 @@ impl Settings {
                 .parse()
                 .context("拖尾生命周期须为整数")?;
             c.trail.animation = self.trail_animation;
+            c.trail.show_in_capture = self.trail_show_in_capture;
             c.trail.color_mode = self.trail_color_mode;
             c.trail.primary_color = picker_hex(&self.trail_primary, cx);
             c.trail.secondary_color = picker_hex(&self.trail_secondary, cx);
@@ -930,6 +934,18 @@ impl Render for Settings {
             }
             6 => {
                 content = content
+                    .when(cfg!(target_os = "windows"), |d| {
+                        d.child(row(
+                            "在录屏和屏幕共享中显示",
+                            "会议演示请共享整个屏幕；本工具截图、长截图和 GIF 采集期间自动排除拖尾",
+                            Switch::new("trail-show-in-capture")
+                                .checked(self.trail_show_in_capture)
+                                .on_click(cx.listener(|v, checked, _, cx| {
+                                    v.trail_show_in_capture = *checked;
+                                    v.schedule_save(cx);
+                                })),
+                        ))
+                    })
                     .child(row(
                         "鼠标拖尾",
                         "独立透明穿透窗口；支持动画与自定义配色",
@@ -1314,6 +1330,26 @@ mod tests {
                 .unwrap();
         });
     }
+    #[gpui_kit::test]
+    fn trail_sharing_setting_autosaves_and_updates_runtime(cx: &mut TestAppContext) {
+        let (_handle, view, directory) = fixture(cx);
+        for enabled in [false, true] {
+            cx.update(|cx| {
+                view.update(cx, |v, cx| {
+                    v.trail_show_in_capture = enabled;
+                    v.schedule_save(cx);
+                })
+            });
+            wait_for_save(cx);
+            let (loaded, warning) = Config::load(&directory.path().join("config.toml"));
+            assert!(warning.is_none());
+            assert_eq!(loaded.trail.show_in_capture, enabled);
+            cx.update(|cx| {
+                assert_eq!(cx.global::<Runtime>().config.trail.show_in_capture, enabled)
+            });
+        }
+    }
+
     #[gpui_kit::test]
     fn input_changes_are_debounced_and_survive_reloading(cx: &mut TestAppContext) {
         let (h, v, directory) = fixture(cx);

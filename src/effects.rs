@@ -48,9 +48,18 @@ pub fn start(cx: &mut App) {
                     },
                 );
                 #[cfg(target_os = "windows")]
-                let capture_excluded = app::raw(window)
-                    .and_then(snip_platform::exclude_capture_controls)
-                    .is_ok();
+                let capture_excluded = {
+                    let excluded = !config.show_in_capture;
+                    match app::raw(window)
+                        .and_then(|raw| snip_platform::set_capture_excluded(raw, excluded))
+                    {
+                        Ok(()) => excluded,
+                        Err(error) => {
+                            tracing::warn!("设置拖尾捕获策略失败: {error}");
+                            false
+                        }
+                    }
+                };
                 #[cfg(target_os = "macos")]
                 let capture_excluded = false;
                 let view = cx.new(|_| TrailView {
@@ -119,7 +128,7 @@ pub fn start(cx: &mut App) {
     cx.global_mut::<Runtime>().trails = handles;
     if cx.global::<Runtime>().capture_task.is_some()
         || cx.global::<Runtime>().capture_busy
-        || !cx.global::<Runtime>().overlays.is_empty()
+        || (!cfg!(target_os = "windows") && !cx.global::<Runtime>().overlays.is_empty())
     {
         app::set_trails_visible(cx, false);
     }
@@ -167,6 +176,29 @@ pub fn raise(cx: &mut App) {
 }
 
 impl TrailView {
+    pub fn set_capture_visible(
+        &mut self,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(target_os = "windows")]
+        {
+            // Only exclude globally while our own capture is active, or when
+            // the user explicitly opts out of screen sharing. Always reset the
+            // affinity on pooled windows when sharing is enabled again.
+            let excluded = !visible || !self.config.show_in_capture;
+            match app::raw(window)
+                .and_then(|raw| snip_platform::set_capture_excluded(raw, excluded))
+            {
+                Ok(()) => self.capture_excluded = excluded,
+                Err(error) => tracing::warn!("切换拖尾捕获策略失败: {error}"),
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let _ = window;
+        self.set_visible(visible, cx);
+    }
     #[cfg(target_os = "windows")]
     pub fn is_visible(&self) -> bool {
         self.visible

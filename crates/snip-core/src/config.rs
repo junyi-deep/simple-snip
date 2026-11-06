@@ -90,6 +90,7 @@ impl Default for GifConfig {
 #[serde(default)]
 pub struct TrailConfig {
     pub enabled: bool,
+    pub show_in_capture: bool,
     pub width: f32,
     pub lifetime_ms: u32,
     pub fps: u32,
@@ -119,6 +120,7 @@ impl Default for TrailConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            show_in_capture: true,
             width: 9.,
             lifetime_ms: 300,
             fps: 60,
@@ -307,6 +309,20 @@ mod tests {
         c.trail.primary_color = "#oops".into();
         assert!(c.validate().is_err());
     }
+    #[test]
+    fn trail_sharing_defaults_on_for_old_configs_and_preserves_opt_out() {
+        let mut config: Config = toml::from_str("[trail]\nenabled = true\nwidth = 12.0\n").unwrap();
+        assert!(config.trail.show_in_capture);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        config.trail.show_in_capture = false;
+        config.save(&path).unwrap();
+        let (loaded, warning) = Config::load(&path);
+        assert!(warning.is_none());
+        assert!(!loaded.trail.show_in_capture);
+        assert_eq!(loaded.trail.width, 12.);
+    }
+
     #[test]
     fn defaults_only_two_global_keys() {
         let c = Config::default();
