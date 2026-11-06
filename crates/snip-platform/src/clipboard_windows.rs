@@ -25,7 +25,19 @@ pub fn read_formats() -> Result<super::Formats> {
         }
     }
     unsafe {
-        OpenClipboard(None).context("剪贴板正被其他应用使用，请重试")?;
+        // Clipboard ownership often changes briefly immediately after Ctrl+C.
+        // Retry here on the worker, without blocking the UI thread.
+        let mut attempts = 0;
+        loop {
+            match OpenClipboard(None) {
+                Ok(()) => break,
+                Err(_) if attempts < 5 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => return Err(error).context("剪贴板正被其他应用使用，请重试"),
+            }
+        }
         let _open = Open;
         let read = |name| -> Result<Option<Vec<u8>>> {
             let format = RegisterClipboardFormatW(name);

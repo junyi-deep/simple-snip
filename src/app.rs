@@ -51,6 +51,7 @@ pub enum Event {
     ClosePinEditor(u64),
     FinishPinEditor(u64),
     ClosePin(u64),
+    RevealPin(u64),
     CloseTask(AnyWindowHandle),
     FocusPinToolbar(u64),
     FocusPinCanvas(u64),
@@ -493,27 +494,6 @@ fn menu(cx: &mut App) -> Vec<MenuItem> {
         MenuItem::action("退出 Simple Snip", Quit),
     ]
 }
-pub(crate) fn current_capture_editor(cx: &App) -> Option<Entity<crate::editor::EditorView>> {
-    if cx.global::<Runtime>().overlays.is_empty() {
-        return None;
-    }
-    cx.try_global::<crate::editor::ActiveCaptureEditor>()
-        .and_then(|e| e.0.upgrade())
-}
-pub(crate) fn current_pin_editor(cx: &mut App) -> Option<Entity<crate::editor::EditorView>> {
-    let pins: Vec<_> = cx
-        .global::<Runtime>()
-        .pins
-        .values()
-        .map(|p| (p.handle, p.view.clone()))
-        .collect();
-    pins.into_iter().find_map(|(handle, view)| {
-        handle
-            .update(cx, |_, w, cx| view.read(cx).selected_editor(w, cx))
-            .ok()
-            .flatten()
-    })
-}
 static CLIPBOARD_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 struct ClipboardJob;
 impl ClipboardJob {
@@ -534,46 +514,79 @@ impl Drop for ClipboardJob {
         CLIPBOARD_PENDING.store(false, std::sync::atomic::Ordering::Release);
     }
 }
-fn handle(event: Event, cx: &mut App) {
+// A visible annotation toolbar owns F3; otherwise read the system clipboard.
+pub(crate) fn read_clipboard_command(
+    cmd: Command,
+    cx: &mut App,
+    read: impl FnOnce() -> anyhow::Result<Arc<image::RgbaImage>> + Send + 'static,
+) {
+    if matches!(cmd, Command::Paste) {
+        let capture = (!cx.global::<Runtime>().overlays.is_empty())
+            .then(|| {
+                cx.try_global::<crate::editor::ActiveCaptureEditor>()
+                    .and_then(|e| e.0.upgrade())
+            })
+            .flatten();
+        let editor = capture.or_else(|| {
+            cx.global::<Runtime>()
+                .annotation_toolbar
+                .as_ref()
+                .and_then(|(_, toolbar)| toolbar.read(cx).editor())
+        });
+        if let Some(editor) = editor {
+            editor.update(cx, |v, cx| v.export(2, cx));
+            return;
+        }
+    }
+    let Some(job) = ClipboardJob::start() else {
+        return;
+    };
+    let tx = cx.global::<Runtime>().tx.clone();
+    std::thread::spawn(move || {
+        let event = match read() {
+            Ok(image) if matches!(cmd, Command::Paste) => {
+                Event::Pin(PreparedImage::new(image), None)
+            }
+            Ok(image) => Event::Edit(image),
+            Err(error) => Event::Status(format!("读取剪贴板失败：{error}")),
+        };
+        // Release before enqueueing: a subsequent key press can start another
+        // read as soon as this result is visible to the UI.
+        drop(job);
+        let _ = tx.send_blocking(event);
+    });
+}
+#[cfg(test)]
+pub(crate) fn clipboard_test_event(
+    rx: &async_channel::Receiver<Event>,
+    cx: &mut TestAppContext,
+) -> Event {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        cx.run_until_parked();
+        if let Ok(event) = rx.try_recv() {
+            return event;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "clipboard command did not deliver an event"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+pub(crate) fn handle(event: Event, cx: &mut App) {
     match event {
         Event::Command(cmd) => match cmd {
             Command::Capture => start_capture(CaptureMode::Screenshot, cx),
             Command::LongCapture => start_capture(CaptureMode::Long, cx),
             Command::Gif => start_capture(CaptureMode::Gif, cx),
             Command::Paste | Command::Ocr => {
-                if matches!(cmd, Command::Paste)
-                    && let Some(editor) = current_capture_editor(cx)
-                {
-                    editor.update(cx, |v, cx| v.export(2, cx));
-                    return;
-                }
-                if matches!(cmd, Command::Paste)
-                    && let Some(editor) = current_pin_editor(cx)
-                {
-                    editor.update(cx, |v, cx| v.export(3, cx));
-                    return;
-                }
-                let Some(job) = ClipboardJob::start() else {
-                    return;
-                };
-                let tx = cx.global::<Runtime>().tx.clone();
-                std::thread::spawn(move || {
-                    let _job = job;
-                    match if matches!(cmd, Command::Paste) {
+                read_clipboard_command(cmd, cx, move || {
+                    if matches!(cmd, Command::Paste) {
                         NativeClipboard.read_pin()
                     } else {
                         NativeClipboard.read_image()
-                    } {
-                        Ok(image) => {
-                            let _ = tx.send_blocking(if matches!(cmd, Command::Paste) {
-                                Event::Pin(PreparedImage::new(image), None)
-                            } else {
-                                Event::Edit(image)
-                            });
-                        }
-                        Err(e) => {
-                            let _ = tx.send_blocking(Event::Status(e.to_string()));
-                        }
                     }
                 });
             }
@@ -727,6 +740,17 @@ fn handle(event: Event, cx: &mut App) {
         }
         Event::Pin(image, placement) => {
             cx.activate(true);
+            let duplicate = cx
+                .global::<Runtime>()
+                .pins
+                .iter()
+                .filter(|(_, pin)| pin.view.read(cx).matches_content(&image.pixels))
+                .map(|(id, _)| *id)
+                .min();
+            if let Some(id) = duplicate {
+                reveal_pin(id, cx);
+                return;
+            }
             let id = cx.global::<Runtime>().next_pin;
             cx.global_mut::<Runtime>().next_pin += 1;
             match PinView::open_prepared(id, image, false, placement, cx) {
@@ -756,6 +780,7 @@ fn handle(event: Event, cx: &mut App) {
             }
         }
         Event::ClosePin(id) => close_pin(id, cx),
+        Event::RevealPin(id) => reveal_pin(id, cx),
         Event::CloseTask(handle) => {
             if cx.global::<Runtime>().capture_task == Some(handle) {
                 cx.global_mut::<Runtime>().capture_task = None;
@@ -897,6 +922,18 @@ pub fn set_trails_visible(cx: &mut App, show: bool) {
         });
     }
     if show {
+        crate::effects::raise(cx);
+    }
+}
+pub(crate) fn reveal_pin(id: u64, cx: &mut App) {
+    if let Some((handle, view)) = cx
+        .global::<Runtime>()
+        .pins
+        .get(&id)
+        .map(|pin| (pin.handle, pin.view.clone()))
+    {
+        cx.activate(true);
+        let _ = handle.update(cx, |_, w, cx| view.update(cx, |v, cx| v.reveal(w, cx)));
         crate::effects::raise(cx);
     }
 }

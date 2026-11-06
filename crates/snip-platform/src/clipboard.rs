@@ -15,32 +15,44 @@ type Formats = (Option<Vec<u8>>, Option<Vec<u8>>);
 
 impl NativeClipboard {
     pub fn read_pin(&self) -> Result<Arc<RgbaImage>> {
-        if let Ok(image) = self.read_image() {
-            return Ok(image);
-        }
-        let (html, rtf) = native::read_formats()?;
-        for (bytes, convert) in [
-            (
-                rtf.as_deref(),
-                clipboard::from_rtf as fn(&[u8]) -> Result<RichText>,
-            ),
-            (
-                html.as_deref(),
-                clipboard::from_html as fn(&[u8]) -> Result<RichText>,
-            ),
-        ] {
-            if let Some(bytes) = bytes {
-                match convert(bytes).and_then(|d| render(&d)) {
-                    Ok(image) => return Ok(Arc::new(image)),
-                    Err(error) => tracing::warn!("剪贴板富文本转换未完成，尝试其他格式：{error}"),
-                }
+        read_pin_with(
+            || self.read_image(),
+            native::read_formats,
+            || Ok(arboard::Clipboard::new()?.get_text()?),
+        )
+    }
+}
+fn read_pin_with(
+    image: impl FnOnce() -> Result<Arc<RgbaImage>>,
+    formats: impl FnOnce() -> Result<Formats>,
+    text: impl FnOnce() -> Result<String>,
+) -> Result<Arc<RgbaImage>> {
+    if let Ok(image) = image() {
+        return Ok(image);
+    }
+    let (html, rtf) = formats().unwrap_or_else(|error| {
+        tracing::warn!("读取富文本格式失败，继续尝试纯文本：{error}");
+        (None, None)
+    });
+    for (bytes, convert) in [
+        (
+            rtf.as_deref(),
+            clipboard::from_rtf as fn(&[u8]) -> Result<RichText>,
+        ),
+        (
+            html.as_deref(),
+            clipboard::from_html as fn(&[u8]) -> Result<RichText>,
+        ),
+    ] {
+        if let Some(bytes) = bytes {
+            match convert(bytes).and_then(|d| render(&d)) {
+                Ok(image) => return Ok(Arc::new(image)),
+                Err(error) => tracing::warn!("剪贴板富文本转换未完成，尝试其他格式：{error}"),
             }
         }
-        let text = arboard::Clipboard::new()?
-            .get_text()
-            .map_err(|_| anyhow::anyhow!("剪贴板中没有可贴出的图片、文本或表格"))?;
-        Ok(Arc::new(render(&clipboard::from_text(&text)?)?))
     }
+    let text = text().map_err(|_| anyhow::anyhow!("剪贴板中没有可贴出的图片、文本或表格"))?;
+    Ok(Arc::new(render(&clipboard::from_text(&text)?)?))
 }
 pub(crate) fn render(document: &RichText) -> Result<RgbaImage> {
     crop(native::render(document)?)
@@ -71,6 +83,33 @@ fn crop(image: RgbaImage) -> Result<RgbaImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plain_text_survives_unavailable_or_invalid_rich_formats() {
+        for formats in [
+            Err(anyhow::anyhow!("temporarily busy")),
+            Ok((Some(b"".to_vec()), Some(b"invalid".to_vec()))),
+        ] {
+            let image = read_pin_with(
+                || anyhow::bail!("not an image"),
+                || formats,
+                || Ok("System clipboard 中文\nSecond line".into()),
+            )
+            .unwrap();
+            assert!(image.width() > 100 && image.height() > 35);
+            assert!(image.pixels().any(|p| p[0] < 100));
+        }
+    }
+    #[test]
+    fn image_clipboard_does_not_require_text_formats() {
+        let source = Arc::new(RgbaImage::from_pixel(3, 2, image::Rgba([11, 22, 33, 255])));
+        let image = read_pin_with(
+            || Ok(source.clone()),
+            || panic!("image fast path"),
+            || panic!("image fast path"),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&image, &source));
+    }
     #[cfg(target_os = "windows")]
     #[test]
     fn repeated_native_renders_release_gdi_objects() {

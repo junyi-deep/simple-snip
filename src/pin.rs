@@ -29,6 +29,8 @@ pub struct PinView {
     animation: Option<crate::animation::Playback>,
     display_scale: f32,
     display_revision: u64,
+    highlighted: bool,
+    highlight_task: Option<Task<()>>,
 }
 pub fn schedule_blur(id: u64, cx: &mut App) {
     let Some(view) = cx
@@ -49,6 +51,36 @@ pub fn schedule_blur(id: u64, cx: &mut App) {
     .detach();
 }
 impl PinView {
+    pub fn matches_content(&self, image: &Arc<RgbaImage>) -> bool {
+        // Compare full-resolution pixels, excluding frame/opacity/zoom. An
+        // animated pin's current frame must not swallow a static image paste.
+        self.animation.is_none()
+            && (Arc::ptr_eq(&self.shown, image)
+                || (self.shown.dimensions() == image.dimensions()
+                    && self.shown.as_raw() == image.as_raw()))
+    }
+    pub fn reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_visible(true);
+        self.click_through = false;
+        self.style(window);
+        if let Ok(raw) = app::raw(window) {
+            let _ = snip_platform::show_window(raw, true);
+        }
+        window.activate_window();
+        self.focus.focus(window, cx);
+        self.highlighted = true;
+        let timer = cx
+            .background_executor()
+            .timer(std::time::Duration::from_millis(1000));
+        self.highlight_task = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |v, cx| {
+                v.highlighted = false;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
     fn update_display_texture(&mut self, w: &Window, cx: &mut Context<Self>) {
         let scale = (self.scale * w.scale_factor()).clamp(0.01, 1.);
         if let Some(animation) = &self.animation {
@@ -265,6 +297,8 @@ impl PinView {
                         animation: None,
                         display_scale: 0.,
                         display_revision: 0,
+                        highlighted: false,
+                        highlight_task: None,
                     }
                 })
             },
@@ -453,11 +487,6 @@ impl PinView {
         self.open_toolbar(w, cx);
         cx.notify();
     }
-    pub fn selected_editor(&self, w: &Window, cx: &App) -> Option<Entity<EditorView>> {
-        self.is_selected(w, cx)
-            .then(|| self.editor.clone())
-            .flatten()
-    }
     pub fn play_gif(&mut self, source: crate::animation::Source, cx: &mut Context<Self>) {
         let playback = crate::animation::Playback::new(source);
         let receiver = playback.receiver.clone();
@@ -568,6 +597,7 @@ impl Render for PinView {
         let margin = config.margin();
         let border = config.color().unwrap_or(0x1688ff);
         let selected = self.is_selected(window, cx);
+        let highlighted = self.highlighted;
         let content = if let Some(editor) = &self.editor {
             editor.clone().into_any_element()
         } else {
@@ -585,8 +615,8 @@ impl Render for PinView {
                 canvas(
                     move |_, _, _| (),
                     move |bounds, _, w, _| {
-                        if selected && config.border_width > 0. {
-                            let thickness = px(config.border_width);
+                        if highlighted || (selected && config.border_width > 0.) {
+                            let thickness = px(if highlighted { 3. } else { config.border_width });
                             w.paint_quad(
                                 outline(
                                     Bounds::new(
@@ -596,7 +626,7 @@ impl Render for PinView {
                                             (bounds.size.height - thickness).max(px(0.)),
                                         ),
                                     ),
-                                    rgb(border),
+                                    rgb(if highlighted { 0x00b7ff } else { border }),
                                     BorderStyle::Solid,
                                 )
                                 .border_widths(thickness),
@@ -1116,21 +1146,94 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn f3_selects_existing_pin_editor_instead_of_creating_clipboard_pin(cx: &mut TestAppContext) {
-        setup(cx);
-        let (window, view) = pin(cx, 1, true);
-        let mut visual = VisualTestContext::from_window(window, cx);
-        visual.update(|w, cx| {
-            let _ = w.draw(cx);
-        });
-        cx.update(|cx| view.update(cx, |v, cx| v.focus_toolbar(cx)));
-        let editor = cx.update(|cx| view.read(cx).editor.clone().unwrap());
+    fn f3_commits_open_pin_toolbar_then_reads_clipboard_after_it_closes(cx: &mut TestAppContext) {
+        let rx = setup(cx);
+        let (_window, view) = pin(cx, 1, true);
         cx.update(|cx| {
-            assert_eq!(
-                app::current_pin_editor(cx).unwrap().entity_id(),
-                editor.entity_id()
-            );
+            app::read_clipboard_command(app::Command::Paste, cx, || {
+                panic!("visible toolbar owns F3")
+            })
+        });
+        let event = app::clipboard_test_event(&rx, cx);
+        assert!(matches!(&event, Event::ApplyPin(1, ..)));
+        cx.update(|cx| app::handle(event, cx));
+        let event = app::clipboard_test_event(&rx, cx);
+        assert!(matches!(&event, Event::RevealPin(1)));
+        cx.update(|cx| {
+            app::handle(event, cx);
+            assert!(view.read(cx).editor.is_none());
+            assert!(view.read(cx).highlighted);
             assert_eq!(cx.global::<Runtime>().pins.len(), 1);
+            app::read_clipboard_command(app::Command::Paste, cx, || {
+                Ok(Arc::new(RgbaImage::from_pixel(
+                    9,
+                    6,
+                    image::Rgba([17, 31, 47, 255]),
+                )))
+            });
+        });
+        let Event::Pin(image, _) = app::clipboard_test_event(&rx, cx) else {
+            panic!("expected clipboard pin with toolbar closed");
+        };
+        assert_eq!(image.pixels.dimensions(), (9, 6));
+        assert_eq!(image.pixels.get_pixel(0, 0).0, [17, 31, 47, 255]);
+    }
+
+    #[gpui_kit::test]
+    fn duplicate_pin_is_revealed_highlighted_and_not_created_twice(cx: &mut TestAppContext) {
+        setup(cx);
+        let (window, view) = pin(cx, 1, false);
+        cx.update(|cx| {
+            view.update(cx, |v, _| {
+                v.click_through = true;
+                v.border_visible = false;
+            });
+            window
+                .update(cx, |_, w, cx| view.update(cx, |v, _| v.style(w)))
+                .unwrap();
+            app::handle(
+                Event::Pin(
+                    app::PreparedImage::new(Arc::new(RgbaImage::new(240, 160))),
+                    None,
+                ),
+                cx,
+            );
+        });
+        cx.update(|cx| {
+            assert_eq!(cx.global::<Runtime>().pins.len(), 1);
+            assert_eq!(cx.global::<Runtime>().next_pin, 3);
+            assert_eq!(cx.active_window(), Some(window));
+            assert!(!view.read(cx).click_through);
+            assert!(view.read(cx).highlighted);
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            app::handle(
+                Event::Pin(
+                    app::PreparedImage::new(Arc::new(RgbaImage::new(240, 160))),
+                    None,
+                ),
+                cx,
+            )
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.update(|cx| assert!(view.read(cx).highlighted));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(!view.read(cx).highlighted);
+            let mut different = RgbaImage::new(240, 160);
+            different.put_pixel(239, 159, image::Rgba([1, 2, 3, 255]));
+            app::handle(
+                Event::Pin(app::PreparedImage::new(Arc::new(different)), None),
+                cx,
+            );
+            assert_eq!(cx.global::<Runtime>().pins.len(), 2);
         });
     }
 

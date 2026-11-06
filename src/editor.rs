@@ -69,14 +69,15 @@ pub fn set_toast_preferences(enabled: bool, delay: u32, cx: &mut App) {
     }
     cx.refresh_windows();
 }
-pub struct ActiveCaptureEditor(pub WeakEntity<EditorView>);
-impl Global for ActiveCaptureEditor {}
 #[derive(Clone, Copy)]
 pub enum EditorHost {
     Capture,
     Pin(u64),
 }
 /// One image canvas, embedded in the capture overlay or the existing pin window.
+pub struct ActiveCaptureEditor(pub WeakEntity<EditorView>);
+impl Global for ActiveCaptureEditor {}
+
 /// It never opens an application editor window.
 pub struct EditorView {
     pub doc: Document,
@@ -802,7 +803,7 @@ impl EditorView {
     }
     fn export_action(&self, action: u8) -> u8 {
         if action == 2 && matches!(self.host, EditorHost::Pin(_)) {
-            3
+            4
         } else {
             action
         }
@@ -811,7 +812,7 @@ impl EditorView {
         let action = self.export_action(action);
         self.commit_text(cx);
         self.finish_path(cx);
-        let doc = if action == 3 {
+        let doc = if action == 3 || action == 4 {
             self.doc.clone()
         } else {
             self.doc.render_snapshot()
@@ -822,8 +823,11 @@ impl EditorView {
         let cancel = self.session_cancel.clone();
         let tx = cx.global::<Runtime>().tx.clone();
         self.message = "正在合成…".into();
+        let render = cx
+            .background_executor()
+            .spawn(async move { render_document(doc, transform) });
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || render_document(doc, transform)).await;
+            let result = render.await;
             if cancel.cancelled() {
                 return;
             }
@@ -851,7 +855,10 @@ impl EditorView {
                 }
                 1 => cx.update(|cx| app::save_image(image, cx)),
                 2 => {
-                    let prepared = smol::unblock(move || app::PreparedImage::new(image)).await;
+                    let prepared = cx
+                        .background_executor()
+                        .spawn(async move { app::PreparedImage::new(image) })
+                        .await;
                     if cancel.cancelled() {
                         return;
                     }
@@ -863,6 +870,9 @@ impl EditorView {
                 _ => match host {
                     EditorHost::Pin(id) => {
                         let _ = tx.send(Event::ApplyPin(id, doc, image, cancel)).await;
+                        if action == 4 {
+                            let _ = tx.send(Event::RevealPin(id)).await;
+                        }
                     }
                     EditorHost::Capture => {}
                 },
@@ -2181,6 +2191,9 @@ pub struct FloatingToolbar {
     subscription: Option<Subscription>,
 }
 impl FloatingToolbar {
+    pub fn editor(&self) -> Option<Entity<EditorView>> {
+        self.editor.clone()
+    }
     pub fn focus_tools(&self, w: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(w, cx);
         w.activate_window();
@@ -2522,9 +2535,9 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn f3_routes_to_current_capture_export(cx: &mut TestAppContext) {
+    fn f3_exports_edited_capture_instead_of_reading_clipboard(cx: &mut TestAppContext) {
         let (window, editor) = editor(cx);
-        let (tx, _rx) = async_channel::bounded(8);
+        let (tx, rx) = async_channel::bounded(8);
         cx.set_global(crate::app::Runtime {
             recordings: vec![],
             config: snip_core::config::Config::default(),
@@ -2548,11 +2561,26 @@ mod tests {
                 v.host = EditorHost::Capture;
             });
             cx.set_global(super::ActiveCaptureEditor(editor.downgrade()));
-            assert_eq!(
-                crate::app::current_capture_editor(cx).unwrap().entity_id(),
-                editor.entity_id()
-            );
+            editor.update(cx, |v, _| {
+                v.doc.objects.push(snip_core::annotation::Annotation {
+                    tool: super::Tool::Line,
+                    points: vec![ImagePoint::new(10., 30.), ImagePoint::new(100., 30.)],
+                    color: [255, 0, 0, 255],
+                    width: 6.,
+                    text: String::new(),
+                    arrow_style: Default::default(),
+                })
+            });
+            crate::app::read_clipboard_command(crate::app::Command::Paste, cx, || {
+                panic!("visible toolbar owns F3")
+            });
         });
+        let crate::app::Event::Pin(image, _) = crate::app::clipboard_test_event(&rx, cx) else {
+            panic!("expected current capture pin");
+        };
+        assert_eq!(image.pixels.dimensions(), (1240, 430));
+        assert!(image.pixels.get_pixel(30, 30)[0] > 200);
+        assert!(image.pixels.get_pixel(30, 30)[1] < 30);
     }
 
     #[gpui_kit::test]
@@ -2642,7 +2670,7 @@ mod tests {
                         assert!(v.host_height(cx) >= 492.);
                         v.color_picker.update(cx, |p, cx| p.set_open(false, cx));
                         assert_eq!(v.host_height(cx), 72.);
-                        assert_eq!(v.export_action(2), 3);
+                        assert_eq!(v.export_action(2), 4);
                         v.choose_tool(super::Tool::Text, w, cx);
                         v.begin_text(ImagePoint::new(20., 20.), None, w, cx);
                         v.text
