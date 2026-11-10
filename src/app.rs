@@ -4,9 +4,13 @@ use crate::{
     pin::PinView,
     settings::Settings,
 };
+use anyhow::Context as _;
 use gpui_kit::*;
 use raw_window_handle::HasWindowHandle;
-use snip_core::{config::Config, geometry::Rect};
+use snip_core::{
+    config::Config,
+    geometry::{Point as ImagePoint, Rect},
+};
 use snip_platform::{
     CapturedDisplay, ClipboardProvider, NativeCapture, NativeClipboard, ScreenCapture, WindowStyle,
 };
@@ -34,10 +38,7 @@ pub enum Command {
 pub enum Event {
     Command(Command),
     Hotkey(u32),
-    Captured(
-        anyhow::Result<Vec<(CapturedDisplay, Arc<RenderImage>)>>,
-        CaptureMode,
-    ),
+    Captured(anyhow::Result<PreparedCapture>, CaptureMode),
     Selection(CapturedDisplay, Rect, CaptureMode),
     Pin(PreparedImage, Option<Bounds<Pixels>>),
     AnimatedPin(PreparedImage, crate::animation::Source),
@@ -59,6 +60,27 @@ pub enum Event {
     Status(String),
     ScreenPermissionDenied,
     Saved(anyhow::Result<PathBuf>),
+}
+/// A screenshot session owns exactly one display and one pointer snapshot.
+/// Keeping this singular prevents independent editors on multiple monitors.
+pub struct PreparedCapture {
+    display: CapturedDisplay,
+    texture: Arc<RenderImage>,
+    cursor: ImagePoint,
+}
+impl PreparedCapture {
+    fn at_cursor(displays: Vec<CapturedDisplay>, cursor: ImagePoint) -> anyhow::Result<Self> {
+        let display = displays
+            .into_iter()
+            .find(|display| display.map.desktop.contains(cursor))
+            .context("鼠标所在显示器已断开或无法采集，请移动鼠标后重试")?;
+        let texture = texture(&display.image);
+        Ok(Self {
+            display,
+            texture,
+            cursor,
+        })
+    }
 }
 /// Pixel conversion is CPU work; prepare it on the capture/clipboard worker.
 pub struct PreparedImage {
@@ -126,6 +148,29 @@ pub struct Runtime {
 struct HotkeyRetryControl(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl Global for HotkeyRetryControl {}
 impl Global for Runtime {}
+#[cfg(test)]
+pub(crate) fn init_test_runtime(cx: &mut App) -> async_channel::Receiver<Event> {
+    let (tx, rx) = async_channel::bounded(32);
+    cx.set_global(Runtime {
+        recordings: vec![],
+        config: Config::default(),
+        status: String::new(),
+        tx,
+        pins: Default::default(),
+        next_pin: 1,
+        overlays: vec![],
+        capture_busy: false,
+        permission_prompt: false,
+        settings: None,
+        hotkeys: None,
+        tray: None,
+        trails: vec![],
+        annotation_toolbar: None,
+        capture_task: None,
+    });
+    crate::window_pool::init(cx);
+    rx
+}
 gpui_kit::actions!(
     simple_snip,
     [
@@ -689,6 +734,10 @@ pub(crate) fn handle(event: Event, cx: &mut App) {
             }
         }
         Event::Captured(result, mode) => {
+            if !cx.global::<Runtime>().overlays.is_empty() {
+                tracing::debug!("ignored duplicate capture result while selection is active");
+                return;
+            }
             let opened_at = std::time::Instant::now();
             cx.global_mut::<Runtime>().capture_busy = false;
             // Pixels have already been sampled. Restore sharing immediately,
@@ -696,12 +745,16 @@ pub(crate) fn handle(event: Event, cx: &mut App) {
             #[cfg(target_os = "windows")]
             set_trails_visible(cx, true);
             match result {
-                Ok(displays) => {
-                    for (display, texture) in displays {
-                        match Overlay::open_prepared(display, texture, mode, cx) {
-                            Ok(handle) => cx.global_mut::<Runtime>().overlays.push(handle),
-                            Err(e) => status(cx, e.to_string()),
-                        }
+                Ok(prepared) => {
+                    match Overlay::open_prepared(
+                        prepared.display,
+                        prepared.texture,
+                        mode,
+                        prepared.cursor,
+                        cx,
+                    ) {
+                        Ok(handle) => cx.global_mut::<Runtime>().overlays.push(handle),
+                        Err(e) => status(cx, e.to_string()),
                     }
                     tracing::debug!(
                         elapsed_ms = opened_at.elapsed().as_millis(),
@@ -845,6 +898,13 @@ fn start_capture(mode: CaptureMode, cx: &mut App) {
     if cx.global::<Runtime>().capture_busy || !cx.global::<Runtime>().overlays.is_empty() {
         return;
     }
+    let cursor = match snip_platform::cursor_position() {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            status(cx, format!("无法获取鼠标位置：{error}"));
+            return;
+        }
+    };
     cx.global_mut::<Runtime>().capture_busy = true;
     set_trails_visible(cx, false);
     let tx = cx.global::<Runtime>().tx.clone();
@@ -859,23 +919,12 @@ fn start_capture(mode: CaptureMode, cx: &mut App) {
         }
         std::thread::spawn(move || {
             let captured_at = std::time::Instant::now();
-            let result = NativeCapture.capture_desktop().map(|displays| {
+            let result = NativeCapture.capture_desktop().and_then(|displays| {
                 tracing::debug!(
                     elapsed_ms = captured_at.elapsed().as_millis(),
                     "desktop pixels captured"
                 );
-                displays
-                    .into_iter()
-                    .map(|d| {
-                        let converted_at = std::time::Instant::now();
-                        let texture = texture(&d.image);
-                        tracing::debug!(
-                            elapsed_ms = converted_at.elapsed().as_millis(),
-                            "capture texture prepared"
-                        );
-                        (d, texture)
-                    })
-                    .collect()
+                PreparedCapture::at_cursor(displays, cursor)
             });
             let _ = tx.send_blocking(Event::Captured(result, mode));
         });
@@ -1380,5 +1429,94 @@ mod texture_tests {
             }
             assert_eq!(source.get_pixel(0, 0).0, [0, 0, 71, 93]);
         }
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::{Event, PreparedCapture, Runtime, handle, init_test_runtime};
+    use crate::overlay::CaptureMode;
+    use gpui_kit::TestAppContext;
+    use snip_core::geometry::{DisplayMap, Point, Rect};
+    use snip_platform::CapturedDisplay;
+    use std::sync::Arc;
+
+    fn displays() -> Vec<CapturedDisplay> {
+        [
+            (1, Rect::new(-200., -20., 200., 150.), 400, 300),
+            (2, Rect::new(0., 0., 300., 200.), 300, 200),
+        ]
+        .into_iter()
+        .map(|(id, desktop, pixel_width, pixel_height)| CapturedDisplay {
+            id,
+            map: DisplayMap {
+                desktop,
+                pixel_width,
+                pixel_height,
+            },
+            image: Arc::new(image::RgbaImage::new(pixel_width, pixel_height)),
+            windows: vec![],
+        })
+        .collect()
+    }
+    #[test]
+    fn targets_one_display_at_the_original_pointer_with_mixed_dpi() {
+        let cursor = Point::new(-100., 40.);
+        let prepared = PreparedCapture::at_cursor(displays(), cursor).unwrap();
+        assert_eq!(prepared.display.id, 1);
+        assert_eq!(prepared.cursor, cursor);
+        assert_eq!(
+            prepared.display.map.to_image(cursor),
+            Point::new(200., 120.)
+        );
+        let prepared = PreparedCapture::at_cursor(displays(), Point::new(0., 40.)).unwrap();
+        assert_eq!(
+            prepared.display.id, 2,
+            "shared screen edge belongs to exactly one display"
+        );
+        assert!(PreparedCapture::at_cursor(displays(), Point::new(500., 40.)).is_err());
+        assert!(PreparedCapture::at_cursor(vec![], cursor).is_err());
+    }
+    #[gpui_kit::test]
+    fn capture_results_never_create_parallel_overlays_and_can_restart(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let _rx = cx.update(init_test_runtime);
+        let first = cx.update(|cx| {
+            handle(
+                Event::Captured(
+                    PreparedCapture::at_cursor(displays(), Point::new(-100., 40.)),
+                    CaptureMode::Screenshot,
+                ),
+                cx,
+            );
+            assert_eq!(cx.global::<Runtime>().overlays.len(), 1);
+            cx.global::<Runtime>().overlays[0]
+        });
+        cx.update(|cx| {
+            handle(
+                Event::Captured(
+                    PreparedCapture::at_cursor(displays(), Point::new(100., 40.)),
+                    CaptureMode::Screenshot,
+                ),
+                cx,
+            );
+            assert_eq!(cx.global::<Runtime>().overlays, vec![first]);
+            crate::app::close_overlays(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(cx.global::<Runtime>().overlays.is_empty());
+            handle(
+                Event::Captured(
+                    PreparedCapture::at_cursor(displays(), Point::new(100., 40.)),
+                    CaptureMode::Screenshot,
+                ),
+                cx,
+            );
+            assert_eq!(cx.global::<Runtime>().overlays.len(), 1);
+            crate::app::close_overlays(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| assert!(cx.global::<Runtime>().overlays.is_empty()));
     }
 }

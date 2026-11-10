@@ -82,3 +82,9 @@ v0.0.3 预检 CI 40427251004 两个平台全部通过；本机最终 Release、�
 首轮 Windows CI 的编译、Clippy、测试和 Release 均成功，许可证生成因 cp1252 编码失败；显式 UTF-8 修复后 v0.0.1 双平台流水线及 Release 成功。v0.0.2 将继续由标签流水线构建，不用本机 macOS 类型检查冒充 Windows 运行。
 
 0.0.2 已成功自动发布，两平台 CI 和 Release 见 https://github.com/junyi-deep/simple-snip/actions/runs/40251248659 。更新下载 v0.0.2 的网络 / SHA256 链路通过，Windows ZIP 的 AMD64 / GUI PE 检查与哈希通过。物理功能键、边框和工具条的最终桌面目视验收仍待解锁，Windows 系统交互也仍待真机。
+
+## 2026-11-10：issue #4 / v0.0.19
+
+修复多显示器各自出现截图窗口和初始整屏候选：采集结果缩为单个 PreparedCapture，只保留 F1 鼠标所在屏幕；重复结果不再创建第二个 Overlay。初始 hover 使用真实鼠标快照和 DisplayMap，窗口识别未命中则保留空选区，空白单击 / 回车 / 方向键不再触发整屏；显式 A 全选和拖动框选保持可用。
+
+本机 macOS ARM64 fmt / check / Clippy 与 112 项常规测试通过（58 应用、44 core、4 platform、6 updater），3 项默认原生权限测试仍 ignored。新增 7 项回归覆盖混合 DPI / 负坐标 / 显示器边缘、重复结果 / 取消重开、窗口初始化命中、空白键鼠操作、手动拖拽与窗口跨屏裁剪。真实双屏 / Windows 桌面验收仍待设备验证。macOS Release 与原生窗口生命周期 SMOKE PASS；原生运行仍观察到 GPUI RefCell 重入告警，已如实记录。标签流水线与发布核验结果待实际完成后补充。

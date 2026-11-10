@@ -187,13 +187,17 @@ impl ImageTransform {
         p
     }
 }
-pub fn snap_at(p: Point, windows: &[Rect], display: Rect) -> Rect {
+/// The frontmost window under the pointer, clipped to the target display.
+/// Empty desktop space has no candidate; full-screen capture is explicit.
+pub fn snap_at(p: Point, windows: &[Rect], display: Rect) -> Option<Rect> {
+    if !display.contains(p) {
+        return None;
+    }
     windows
         .iter()
-        .find(|r| r.contains(p))
         .copied()
-        .unwrap_or(display)
-        .intersect(display)
+        .map(|r| r.intersect(display))
+        .find(|r| r.width > 0. && r.height > 0. && r.contains(p))
 }
 #[cfg(test)]
 mod tests {
@@ -241,7 +245,40 @@ mod tests {
                 &[a, Rect::new(0., 0., 100., 100.)],
                 Rect::new(0., 0., 200., 200.)
             ),
-            a
+            Some(a)
+        );
+    }
+    #[test]
+    fn empty_desktop_has_no_implicit_full_screen_candidate() {
+        let display = Rect::new(-800., -100., 800., 600.);
+        assert_eq!(snap_at(Point::new(-500., 200.), &[], display), None);
+        assert_eq!(
+            snap_at(
+                Point::new(-500., 200.),
+                &[Rect::new(-790., 0., 100., 100.)],
+                display
+            ),
+            None
+        );
+        assert_eq!(
+            snap_at(
+                Point::new(0., 0.),
+                &[Rect::new(-50., 0., 100., 100.)],
+                display
+            ),
+            None
+        );
+    }
+    #[test]
+    fn window_crossing_displays_is_clipped_without_reordering() {
+        let display = Rect::new(-800., -100., 800., 600.);
+        assert_eq!(
+            snap_at(
+                Point::new(-20., 80.),
+                &[Rect::new(-100., 50., 400., 300.)],
+                display
+            ),
+            Some(Rect::new(-100., 50., 100., 300.))
         );
     }
 }

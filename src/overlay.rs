@@ -32,16 +32,18 @@ impl Overlay {
         cx: &mut App,
     ) -> anyhow::Result<AnyWindowHandle> {
         let texture = app::texture(&display.image);
-        Self::open_prepared(display, texture, mode, cx)
+        let cursor = snip_platform::cursor_position()?;
+        Self::open_prepared(display, texture, mode, cursor, cx)
     }
     pub fn open_prepared(
         display: CapturedDisplay,
         texture: std::sync::Arc<RenderImage>,
         mode: CaptureMode,
+        cursor: ImagePoint,
         cx: &mut App,
     ) -> anyhow::Result<AnyWindowHandle> {
         let d = display.map.desktop;
-        let cursor = snip_platform::cursor_position().unwrap_or_default();
+        let hover = display.map.to_image(cursor);
         let (bounds, display_id) = app::display_bounds(&display, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -82,7 +84,7 @@ impl Overlay {
                     anchor: None,
                     moving: None,
                     selection: None,
-                    hover: ImagePoint::default(),
+                    hover,
                     focus,
                     editor: None,
                     resizing: None,
@@ -121,7 +123,9 @@ impl Overlay {
         if self.editor.is_some() {
             return;
         }
-        let r = self.selection.unwrap_or_else(|| self.candidate());
+        let Some(r) = self.selection.or_else(|| self.candidate()) else {
+            return;
+        };
         self.selection = Some(r);
         self.editing_rect = Some(r);
         let (x, y, width, height) =
@@ -285,22 +289,24 @@ impl Overlay {
             f32::from(p.y) * self.display.image.height() as f32 / f32::from(s.height),
         )
     }
-    fn candidate(&self) -> Rect {
+    fn candidate(&self) -> Option<Rect> {
         let desktop = self.display.map.to_desktop(self.hover);
-        let r = snap_at(desktop, &self.display.windows, self.display.map.desktop);
+        let r = snap_at(desktop, &self.display.windows, self.display.map.desktop)?;
         let a = self.display.map.to_image(ImagePoint::new(r.x, r.y));
         let b = self
             .display
             .map
             .to_image(ImagePoint::new(r.right(), r.bottom()));
-        Rect::from_points(a, b)
+        Some(Rect::from_points(a, b))
     }
     fn finish(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.mode, CaptureMode::Screenshot) {
             self.begin_edit(w, cx);
             return;
         }
-        let r = self.selection.unwrap_or_else(|| self.candidate());
+        let Some(r) = self.selection.or_else(|| self.candidate()) else {
+            return;
+        };
         app::send(cx, Event::Selection(self.display.clone(), r, self.mode));
     }
 }
@@ -309,7 +315,8 @@ impl Render for Overlay {
         let s = window.viewport_size();
         let sx = f32::from(s.width) / self.display.image.width() as f32;
         let sy = f32::from(s.height) / self.display.image.height() as f32;
-        let r = self.selection.unwrap_or_else(|| self.candidate());
+        let region = self.selection.or_else(|| self.candidate());
+        let r = region.unwrap_or_default();
         let ui = Rect::new(r.x * sx, r.y * sy, r.width * sx, r.height * sy);
         let color = self.display.image.get_pixel(
             (self.hover.x.max(0.) as u32).min(self.display.image.width() - 1),
@@ -357,14 +364,16 @@ impl Render for Overlay {
                                 ));
                             }
                         }
-                        w.paint_quad(outline(
-                            Bounds::new(
-                                point(px(ui.x), px(ui.y)),
-                                size(px(ui.width), px(ui.height)),
-                            ),
-                            rgb(0x28d4de),
-                            BorderStyle::Solid,
-                        ));
+                        if region.is_some() {
+                            w.paint_quad(outline(
+                                Bounds::new(
+                                    point(px(ui.x), px(ui.y)),
+                                    size(px(ui.width), px(ui.height)),
+                                ),
+                                rgb(0x28d4de),
+                                BorderStyle::Solid,
+                            ));
+                        }
                     },
                 )
                 .absolute()
@@ -378,6 +387,7 @@ impl Render for Overlay {
                         return;
                     }
                     let p = this.image_point(e.position, w);
+                    this.hover = p;
                     if let Some(r) = this.selection.filter(|r| r.contains(p)) {
                         this.moving = Some((p, r));
                         this.anchor = None;
@@ -441,7 +451,7 @@ impl Render for Overlay {
                     this.anchor = None;
                     this.moving = None;
                     if this.selection.is_none_or(|r| r.width < 3. || r.height < 3.) {
-                        this.selection = Some(this.candidate());
+                        this.selection = this.candidate();
                     }
                     if matches!(this.mode, CaptureMode::Screenshot) {
                         this.begin_edit(w, cx);
@@ -505,7 +515,9 @@ impl Render for Overlay {
                         cx.notify();
                     }
                     "left" | "right" | "up" | "down" => {
-                        let mut r = this.selection.unwrap_or_else(|| this.candidate());
+                        let Some(mut r) = this.selection.or_else(|| this.candidate()) else {
+                            return;
+                        };
                         let (dx, dy) = match e.keystroke.key.as_str() {
                             "left" => (-1., 0.),
                             "right" => (1., 0.),
@@ -656,6 +668,132 @@ mod tests {
         WindowOptions, point, px, size,
     };
     use snip_core::geometry::{DisplayMap, Rect};
+    fn fixture(
+        cx: &mut TestAppContext,
+        windows: Vec<Rect>,
+    ) -> (gpui_kit::AnyWindowHandle, gpui_kit::Entity<Overlay>) {
+        cx.update(gpui_kit::init);
+        let _rx = cx.update(crate::app::init_test_runtime);
+        cx.update(|cx| {
+            let display = snip_platform::CapturedDisplay {
+                id: 9001,
+                map: DisplayMap {
+                    desktop: Rect::new(-200., -20., 200., 150.),
+                    pixel_width: 400,
+                    pixel_height: 300,
+                },
+                image: std::sync::Arc::new(image::RgbaImage::new(400, 300)),
+                windows,
+            };
+            let handle = Overlay::open_prepared(
+                display.clone(),
+                crate::app::texture(&display.image),
+                CaptureMode::Screenshot,
+                snip_core::geometry::Point::new(-100., 40.),
+                cx,
+            )
+            .unwrap();
+            let view = handle
+                .update(cx, |root, _, cx| {
+                    root.downcast::<gpui_kit::base::Root>()
+                        .unwrap()
+                        .read(cx)
+                        .view()
+                        .clone()
+                        .downcast::<Overlay>()
+                        .unwrap()
+                })
+                .unwrap();
+            (handle, view)
+        })
+    }
+    #[gpui_kit::test]
+    fn initial_candidate_uses_pointer_before_any_mouse_move(cx: &mut TestAppContext) {
+        let (_, view) = fixture(cx, vec![Rect::new(-150., 0., 100., 80.)]);
+        cx.update(|cx| {
+            let v = view.read(cx);
+            assert_eq!(v.hover, snip_core::geometry::Point::new(200., 120.));
+            assert_eq!(v.candidate(), Some(Rect::new(100., 40., 200., 160.)));
+            assert!(v.selection.is_none());
+            assert!(v.editor.is_none());
+        });
+    }
+    #[gpui_kit::test]
+    fn empty_desktop_click_enter_and_arrows_do_not_select_full_screen(cx: &mut TestAppContext) {
+        let (window, view) = fixture(cx, vec![]);
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        cx.simulate_keystrokes(window, "enter left");
+        visual.simulate_mouse_down(
+            point(px(100.), px(60.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        visual.simulate_mouse_up(
+            point(px(100.), px(60.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|cx| {
+            assert!(view.read(cx).candidate().is_none());
+            assert!(view.read(cx).selection.is_none());
+            assert!(view.read(cx).editor.is_none());
+        });
+        cx.simulate_keystrokes(window, "a enter");
+        cx.update(|cx| {
+            let v = view.read(cx);
+            assert_eq!(v.selection, Some(Rect::new(0., 0., 400., 300.)));
+            assert_eq!(
+                v.editor
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .doc
+                    .original
+                    .dimensions(),
+                (400, 300)
+            );
+        });
+    }
+    #[gpui_kit::test]
+    fn empty_desktop_manual_drag_enters_one_editor(cx: &mut TestAppContext) {
+        let (window, view) = fixture(cx, vec![]);
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        visual.simulate_mouse_down(
+            point(px(20.), px(30.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        visual.simulate_mouse_move(
+            point(px(80.), px(90.)),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+        visual.simulate_mouse_up(
+            point(px(80.), px(90.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|cx| {
+            let v = view.read(cx);
+            assert_eq!(v.selection, Some(Rect::new(40., 60., 120., 120.)));
+            assert_eq!(
+                v.editor
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .doc
+                    .original
+                    .dimensions(),
+                (120, 120)
+            );
+        });
+    }
     #[gpui_kit::test]
     fn selected_capture_resizes_through_real_handle_events(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);

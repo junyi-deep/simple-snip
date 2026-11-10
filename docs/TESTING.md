@@ -399,3 +399,13 @@ F3 / 托盘贴图操作在标注工具栏打开时导出当前文档（包括未
 原上传任务因 macOS ARM64 运行器容量不足未能开始执行；重试仍排队后取消该上传运行，桌面构建结果保持成功。新增 [Linux 资产发布任务](https://github.com/junyi-deep/simple-snip/actions/runs/42253934983)，核对标签对应提交和两端成功构建，复用同一批安装包，生成校验清单并成功发布。后续常规发布的上传阶段也改用 Linux，桌面原生构建平台不变。
 
 [v0.0.18 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.18) 已公开，非草稿、非预发布。实际下载 Windows ZIP、macOS ZIP / DMG 和 SHA256SUMS，文件尺寸、清单 SHA256 与 GitHub asset digest 一致；ZIP CRC、Windows AMD64 / PE32+ / GUI / 8MB 栈保留及 macOS ARM64 / Info.plist 双版本 0.0.18 均通过。下载程序未执行。发行包仍为 unsigned / ad-hoc 测试包，没有执行 Developer ID 签名或 Apple 公证。
+
+## 2026-11-10：issue #4 单一截图与初始窗口吸附
+
+本机 macOS ARM64 执行 cargo fmt --all -- --check、cargo check --locked --workspace、cargo clippy --locked --workspace --all-targets -- -D warnings、cargo test --locked --workspace：通过。112 项测试通过，3 项原生权限测试保持 ignored，不计通过。新增 7 项测试覆盖指针所在屏幕选择（负坐标、1x / 2x 和边缘点）、重复采集结果不增加窗口、取消后重开、鼠标未移动时按原图坐标命中窗口、空白处点击 / 回车 / 方向键不框选、A 全选后编辑、手动拖动后编辑及跨显示器窗口裁剪。原有选区八向缩放和标注导出回归继续通过。
+
+人工验收：连接两个显示器（包含不同缩放），将鼠标停在第二块屏幕的普通窗口内按 F1，不移动鼠标，确认只有该显示器出现截图窗口，初始边框贴合鼠标下窗口。Esc 后在第一块屏幕重复。鼠标停在没有窗口的桌面背景按 F1，确认无候选边框，单击 / 回车不生成整屏选区；拖动框选或按 A 再回车应可继续编辑。重复取消 / 复制，确认无残留独立窗口。窗口部分超出屏幕时只高亮该屏内的可见矩形。
+
+测试使用 GPUI 真实事件调度与合成双屏图像，不能替代真实双屏的桌面目视验收。本机未执行 Windows 原生交互，本轮未将这两项标记通过。
+
+本机 ARM64 Release 构建通过；实际执行 --smoke-test，显式启用 simple_snip / snip_platform 的 info 日志后获得 SMOKE PASS，覆盖托盘、透明置顶、穿透恢复、截图窗口三轮复用、文档释放和采集控制栏生命周期。macOS smoke 使用合成截图图像，不代表真实桌面采集或多屏手工验收。首轮默认日志级别下同时观察到 RefCell already borrowed（13 条）；不得据后一次按模块过滤的日志宣称无 GPUI 重入错误，需继续专项排查。
