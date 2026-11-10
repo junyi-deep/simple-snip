@@ -409,3 +409,11 @@ F3 / 托盘贴图操作在标注工具栏打开时导出当前文档（包括未
 测试使用 GPUI 真实事件调度与合成双屏图像，不能替代真实双屏的桌面目视验收。本机未执行 Windows 原生交互，本轮未将这两项标记通过。
 
 本机 ARM64 Release 构建通过；实际执行 --smoke-test，显式启用 simple_snip / snip_platform 的 info 日志后获得 SMOKE PASS，覆盖托盘、透明置顶、穿透恢复、截图窗口三轮复用、文档释放和采集控制栏生命周期。macOS smoke 使用合成截图图像，不代表真实桌面采集或多屏手工验收。首轮默认日志级别下同时观察到 RefCell already borrowed（13 条）；不得据后一次按模块过滤的日志宣称无 GPUI 重入错误，需继续专项排查。
+
+## 2026-11-10：v0.0.19 / issue #4 发布核验
+
+注释标签 v0.0.19 指向 a22083813a556e39c56931539b5c526bf41f4cb7。[双平台流水线](https://github.com/junyi-deep/simple-snip/actions/runs/42833821368) 的 Windows AMD64、macOS ARM64 和 Release job 全部成功；原生 runner 断言、fmt / check / Clippy / tests / Release / 打包通过。实际日志为 Windows 118 项（58 app + 44 core + 9 platform + 7 updater）、macOS 112 项（58 + 44 + 4 + 6）通过，各跳过 3 项默认原生权限测试；macOS 另有 6 项公证流程命令替身测试，不代表真实 Apple 公证。
+
+原生 Debug 测试应用使用 --docs-demo capture 的本地合成画面；桌面工具目视确认初始全遮罩且无候选边框，回车后仍无选区，按 A 才出现取消 / 全屏 / 编辑工具栏，点击编辑后标注工具正常出现，取消返回偏好设置且截图窗口已清理。该用例不读取真实桌面内容，测试实例已停止。初始真实窗口命中与两显示器选择由 GPUI / 数据回归覆盖；未模拟物理 F1，也未声称真实双屏手工验收通过。
+
+[v0.0.19 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.19) 已公开，非草稿、非预发布。实际下载 Windows ZIP、macOS ZIP / DMG 和 SHA256SUMS：大小与 GitHub 资产 digest 一致，三个包均匹配 SHA256 清单；两个 ZIP CRC 和 DMG CRC32 校验通过。Windows PE 为 AMD64 / PE32+ / GUI subsystem / 8 MiB 栈；macOS Mach-O 为 ARM64，下载包两个版本号均为 0.0.19、最低系统为 15.0，ad-hoc 签名完整性检查通过。未执行下载的 Windows 程序；发行资产仍未公证。issue #4 已标记完成。

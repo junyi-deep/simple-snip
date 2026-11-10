@@ -50,3 +50,5 @@ Windows ZIP 中的程序实际导入 VCRUNTIME140.dll；首次运行前需安装
 [v0.0.14 标签构建](https://github.com/junyi-deep/simple-snip/actions/runs/41320304485) 的 Windows AMD64 / macOS ARM64 原生 runner 均通过全部常规检查、测试和 Release 打包（分别 97 / 93 项测试，分别 3 项 ignored）；公开下载包已核验架构与完整性。Windows 桌面手工验收和正式 Apple 公证仍不计完成。
 
 2026-11-10：issue #4 的单一截图结果、初始窗口候选和空白未选中逻辑由共享 Rust / GPUI 实现；macOS ARM64 112 项常规测试通过，覆盖合成双屏 / 负坐标 / 混合 DPI。真实双屏、Windows 桌面与热插拔仍待独立验收。
+
+[v0.0.19 标签流水线](https://github.com/junyi-deep/simple-snip/actions/runs/42833821368) Windows AMD64 / macOS ARM64 均通过（118 / 112 项测试，各 3 项 ignored）；公开安装包已下载验证。macOS 原生合成截图的空选区、全选、标注和取消操作通过；真实双屏与 Windows 桌面手工验收仍未计完成。
