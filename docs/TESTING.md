@@ -425,3 +425,7 @@ GPUI 回归先在旧代码复现 `2 → 3 → 2` 最后仍为椭圆、新图形�
 Windows OCR 的应用测试检查独立进程异常退出能返回普通错误，集成测试通过真实应用二进制验证无效输入的回传格式。本机无 Windows 桌面，原报告没有崩溃调用栈，尚未复现原始偶发崩溃。Windows 原生 CI 测试结果和下载核验见发布记录。
 
 人工复现标注：进入截图或贴图的标注模式，按 2、3、2 后绘制矩形。松手时出现控制点。在图像内滚动应改变同一个矩形的线宽，拖动右边中点应只改变宽度，拖动角点应同时改变宽高。按 1 重新选择图形，再拖动控制点并撤销。Windows OCR 真机检查应使用已安装 OCR 语言包的系统，重复识别不同尺寸图片，并在识别前后切换工具和关闭选区。
+
+[v0.0.20 标签流水线](https://github.com/junyi-deep/simple-snip/actions/runs/44017583223) 的 Windows AMD64、macOS ARM64 构建和发布任务全部通过。原生 CI 通过 Windows 122 项、macOS 114 项 Rust 测试，各跳过 3 项默认原生权限测试；Windows 两项 OCR 子进程测试均通过。本机 macOS ARM64 Release 构建和原生窗口生命周期 smoke 通过。
+
+[v0.0.20 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.20) 的 Windows ZIP、macOS ZIP / DMG 和 SHA256SUMS 已下载核验。三个包的尺寸与 SHA256 与 GitHub 下载资产匹配，ZIP CRC、DMG 校验、Windows AMD64 / PE32+ / GUI 和 macOS ARM64 / Info.plist 双版本 0.0.20 均正确。Windows OCR 原报告的偶发崩溃仍缺真机复现，异常退出及无效请求由自动测试覆盖。

@@ -88,3 +88,9 @@ v0.0.3 预检 CI 40427251004 两个平台全部通过；本机最终 Release、�
 修复多显示器各自出现截图窗口和初始整屏候选：采集结果缩为单个 PreparedCapture，只保留 F1 鼠标所在屏幕；重复结果不再创建第二个 Overlay。初始 hover 使用真实鼠标快照和 DisplayMap，窗口识别未命中则保留空选区，空白单击 / 回车 / 方向键不再触发整屏；显式 A 全选和拖动框选保持可用。
 
 本机 macOS ARM64 fmt / check / Clippy 与 112 项常规测试通过（58 应用、44 core、4 platform、6 updater），3 项默认原生权限测试仍 ignored。新增 7 项回归覆盖混合 DPI / 负坐标 / 显示器边缘、重复结果 / 取消重开、窗口初始化命中、空白键鼠操作、手动拖拽与窗口跨屏裁剪。真实双屏 / Windows 桌面验收仍待设备验证。macOS Release 与原生窗口生命周期 SMOKE PASS；原生运行仍观察到 GPUI RefCell 重入告警，已如实记录。[双平台流水线](https://github.com/junyi-deep/simple-snip/actions/runs/42833821368) 和 Release 均已成功；Windows 118 项、macOS 112 项测试通过，各跳过 3 项原生权限测试。[v0.0.19](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.19) 已发布，公开包的哈希、格式、架构与版本核验通过，issue #4 已关闭。原生合成画面额外验证空选区回车、A 全选、进入标注和取消清理。
+
+## 2026-11-17：v0.0.20 标注操作与 Windows OCR
+
+Issue #5 的矩形 / 椭圆键位已独立；完稿即选中图形，可拖动控制点调整几何形状或用滚轮修改当前线宽。Windows OCR 改用 WinRT 初始化和独立进程，异常退出、超时、取消由编辑器处理。原始偶发崩溃尚未在 Windows 桌面复现。
+
+[v0.0.20](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.20) 已发布，源码标签指向 dcf0893。[双平台流水线](https://github.com/junyi-deep/simple-snip/actions/runs/44017583223) 全部通过。Windows 122 项、macOS 114 项测试通过，三个公开下载包均已校验。
