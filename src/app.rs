@@ -61,27 +61,41 @@ pub enum Event {
     ScreenPermissionDenied,
     Saved(anyhow::Result<PathBuf>),
 }
-/// A screenshot session owns exactly one display and one pointer snapshot.
-/// Keeping this singular prevents independent editors on multiple monitors.
+/// Freeze every display once before showing an overlay. Moving between
+/// screens reuses that snapshot so the previous overlay never enters it.
 pub struct PreparedCapture {
-    display: CapturedDisplay,
-    texture: Arc<RenderImage>,
+    frames: Vec<(CapturedDisplay, Arc<RenderImage>)>,
+    initial: usize,
     cursor: ImagePoint,
 }
 impl PreparedCapture {
     fn at_cursor(displays: Vec<CapturedDisplay>, cursor: ImagePoint) -> anyhow::Result<Self> {
-        let display = displays
-            .into_iter()
-            .find(|display| display.map.desktop.contains(cursor))
+        let initial = displays
+            .iter()
+            .position(|display| display.map.desktop.contains(cursor))
             .context("鼠标所在显示器已断开或无法采集，请移动鼠标后重试")?;
-        let texture = texture(&display.image);
+        let frames = displays
+            .into_iter()
+            .map(|display| {
+                let image = texture(&display.image);
+                (display, image)
+            })
+            .collect();
         Ok(Self {
-            display,
-            texture,
+            frames,
+            initial,
             cursor,
         })
     }
 }
+struct CaptureNavigation {
+    frames: Vec<(CapturedDisplay, Arc<RenderImage>)>,
+    current: usize,
+    mode: CaptureMode,
+    overlay: Entity<Overlay>,
+    _tracking: Option<Task<()>>,
+}
+impl Global for CaptureNavigation {}
 /// Pixel conversion is CPU work; prepare it on the capture/clipboard worker.
 pub struct PreparedImage {
     pub pixels: Arc<image::RgbaImage>,
@@ -746,15 +760,8 @@ pub(crate) fn handle(event: Event, cx: &mut App) {
             set_trails_visible(cx, true);
             match result {
                 Ok(prepared) => {
-                    match Overlay::open_prepared(
-                        prepared.display,
-                        prepared.texture,
-                        mode,
-                        prepared.cursor,
-                        cx,
-                    ) {
-                        Ok(handle) => cx.global_mut::<Runtime>().overlays.push(handle),
-                        Err(e) => status(cx, e.to_string()),
+                    if let Err(error) = open_capture_session(prepared, mode, cx) {
+                        status(cx, error.to_string());
                     }
                     tracing::debug!(
                         elapsed_ms = opened_at.elapsed().as_millis(),
@@ -931,7 +938,99 @@ fn start_capture(mode: CaptureMode, cx: &mut App) {
     })
     .detach();
 }
+fn open_capture_session(
+    prepared: PreparedCapture,
+    mode: CaptureMode,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    let (display, texture) = prepared.frames[prepared.initial].clone();
+    let (handle, overlay) = Overlay::open_prepared(display, texture, mode, prepared.cursor, cx)?;
+    cx.global_mut::<Runtime>().overlays.push(handle);
+    let tracking = (prepared.frames.len() > 1).then(|| {
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(20))
+                    .await;
+                if !cx.update(|cx| {
+                    let Some(capture) = cx.try_global::<CaptureNavigation>() else {
+                        return false;
+                    };
+                    if capture.overlay.read(cx).can_switch_display()
+                        && let Ok(cursor) = snip_platform::cursor_position()
+                    {
+                        switch_capture_display(cursor, cx);
+                    }
+                    true
+                }) {
+                    break;
+                }
+            }
+        })
+    });
+    cx.set_global(CaptureNavigation {
+        frames: prepared.frames,
+        current: prepared.initial,
+        mode,
+        overlay,
+        _tracking: tracking,
+    });
+    Ok(())
+}
+
+fn switch_capture_display(cursor: ImagePoint, cx: &mut App) {
+    let Some(capture) = cx.try_global::<CaptureNavigation>() else {
+        return;
+    };
+    if !capture.overlay.read(cx).can_switch_display()
+        || capture.frames[capture.current]
+            .0
+            .map
+            .desktop
+            .contains(cursor)
+    {
+        return;
+    }
+    let Some(next) = capture
+        .frames
+        .iter()
+        .position(|(display, _)| display.map.desktop.contains(cursor))
+    else {
+        return;
+    };
+    let [old] = cx.global::<Runtime>().overlays.as_slice() else {
+        return;
+    };
+    let old = *old;
+    let mode = capture.mode;
+    let (display, texture) = capture.frames[next].clone();
+    // Park the old overlay before presenting the new display, including when
+    // the native window pool can reuse the same handle on macOS.
+    if let Err(error) = old.update(cx, |_, w, cx| {
+        crate::window_pool::park(crate::window_pool::Role::Capture, w, cx);
+    }) {
+        tracing::warn!("无法切换截图窗口: {error}");
+        return;
+    }
+    match Overlay::open_prepared(display, texture, mode, cursor, cx) {
+        Ok((handle, overlay)) => {
+            cx.global_mut::<Runtime>().overlays[0] = handle;
+            let capture = cx.global_mut::<CaptureNavigation>();
+            capture.current = next;
+            capture.overlay = overlay;
+        }
+        Err(error) => {
+            cx.global_mut::<Runtime>().overlays.clear();
+            close_overlays(cx);
+            status(cx, format!("无法切换截图屏幕：{error}"));
+        }
+    }
+}
+
 pub fn close_overlays(cx: &mut App) {
+    if cx.try_global::<CaptureNavigation>().is_some() {
+        cx.remove_global::<CaptureNavigation>();
+    }
     let overlays = std::mem::take(&mut cx.global_mut::<Runtime>().overlays);
     // Cancel can originate inside this same window's event listener. Defer the
     // root replacement until its mutable window/entity borrow has ended.
@@ -1434,7 +1533,10 @@ mod texture_tests {
 
 #[cfg(test)]
 mod capture_tests {
-    use super::{Event, PreparedCapture, Runtime, handle, init_test_runtime};
+    use super::{
+        CaptureNavigation, Event, PreparedCapture, Runtime, handle, init_test_runtime,
+        switch_capture_display,
+    };
     use crate::overlay::CaptureMode;
     use gpui_kit::TestAppContext;
     use snip_core::geometry::{DisplayMap, Point, Rect};
@@ -1463,19 +1565,103 @@ mod capture_tests {
     fn targets_one_display_at_the_original_pointer_with_mixed_dpi() {
         let cursor = Point::new(-100., 40.);
         let prepared = PreparedCapture::at_cursor(displays(), cursor).unwrap();
-        assert_eq!(prepared.display.id, 1);
+        assert_eq!(prepared.frames[prepared.initial].0.id, 1);
         assert_eq!(prepared.cursor, cursor);
         assert_eq!(
-            prepared.display.map.to_image(cursor),
+            prepared.frames[prepared.initial].0.map.to_image(cursor),
             Point::new(200., 120.)
         );
         let prepared = PreparedCapture::at_cursor(displays(), Point::new(0., 40.)).unwrap();
         assert_eq!(
-            prepared.display.id, 2,
+            prepared.frames[prepared.initial].0.id, 2,
             "shared screen edge belongs to exactly one display"
         );
         assert!(PreparedCapture::at_cursor(displays(), Point::new(500., 40.)).is_err());
         assert!(PreparedCapture::at_cursor(vec![], cursor).is_err());
+    }
+    #[gpui_kit::test]
+    fn follows_cursor_before_selection_and_escape_closes_the_session(cx: &mut TestAppContext) {
+        use gpui_kit::{MouseButton, VisualTestContext, point, px};
+        cx.update(gpui_kit::init);
+        let _rx = cx.update(init_test_runtime);
+        let first = cx.update(|cx| {
+            handle(
+                Event::Captured(
+                    PreparedCapture::at_cursor(displays(), Point::new(-100., 40.)),
+                    CaptureMode::Screenshot,
+                ),
+                cx,
+            );
+            let capture = cx.global::<CaptureNavigation>();
+            assert_eq!(capture.overlay.read(cx).display_id(), 1);
+            capture.overlay.downgrade()
+        });
+        let window = cx.update(|cx| {
+            // A pointer in the gap between monitors leaves the overlay alone.
+            switch_capture_display(Point::new(20., -10.), cx);
+            assert_eq!(cx.global::<CaptureNavigation>().current, 0);
+            switch_capture_display(Point::new(50., 40.), cx);
+            let capture = cx.global::<CaptureNavigation>();
+            assert_eq!(capture.overlay.read(cx).display_id(), 2);
+            assert_eq!(cx.global::<Runtime>().overlays.len(), 1);
+            cx.global::<Runtime>().overlays[0]
+        });
+        cx.run_until_parked();
+        assert!(first.upgrade().is_none());
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+            w.simulate_next_frame(cx);
+            let _ = w.draw(cx);
+        });
+        let start = point(px(70.), px(80.));
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.update(|cx| {
+            switch_capture_display(Point::new(-100., 40.), cx);
+            assert_eq!(cx.global::<CaptureNavigation>().current, 1);
+        });
+        visual.simulate_mouse_up(start, MouseButton::Left, Default::default());
+        cx.update(|cx| {
+            assert!(
+                cx.global::<CaptureNavigation>()
+                    .overlay
+                    .read(cx)
+                    .can_switch_display()
+            );
+        });
+        cx.simulate_keystrokes(window, "escape");
+        cx.update(|cx| {
+            assert!(cx.try_global::<CaptureNavigation>().is_none());
+            assert!(cx.global::<Runtime>().overlays.is_empty());
+            switch_capture_display(Point::new(-100., 40.), cx);
+            assert!(cx.global::<Runtime>().overlays.is_empty());
+        });
+    }
+    #[gpui_kit::test]
+    fn escape_before_any_mouse_input_closes_capture(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let _rx = cx.update(init_test_runtime);
+        let window = cx.update(|cx| {
+            handle(
+                Event::Captured(
+                    PreparedCapture::at_cursor(displays(), Point::new(-100., 40.)),
+                    CaptureMode::Screenshot,
+                ),
+                cx,
+            );
+            cx.global::<Runtime>().overlays[0]
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+            w.simulate_next_frame(cx);
+            let _ = w.draw(cx);
+        });
+        cx.simulate_keystrokes(window, "escape");
+        cx.update(|cx| {
+            assert!(cx.try_global::<CaptureNavigation>().is_none());
+            assert!(cx.global::<Runtime>().overlays.is_empty());
+        });
     }
     #[gpui_kit::test]
     fn capture_results_never_create_parallel_overlays_and_can_restart(cx: &mut TestAppContext) {

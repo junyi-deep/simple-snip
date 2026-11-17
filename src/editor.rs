@@ -728,9 +728,24 @@ impl EditorView {
         }
         cx.notify();
     }
+    fn text_top_left(&self, anchor: ImagePoint) -> ImagePoint {
+        let mut point = self.transform.forward(anchor);
+        if self.text_index.is_none() {
+            // For new text, keep the first line's center at the pointer even
+            // if the font size changes while typing.
+            point.y -= (self.width * 6. + 12.) * 1.3 / 2.;
+        }
+        point
+    }
+
     fn commit_text(&mut self, cx: &mut Context<Self>) {
-        let Some(p) = self.text_anchor.take() else {
+        let Some(anchor) = self.text_anchor.take() else {
             return;
+        };
+        let p = if self.text_index.is_some() {
+            anchor
+        } else {
+            self.transform.inverse(self.text_top_left(anchor))
         };
         let text = self.text.read(cx).value().to_string();
         let index = self.text_index.take();
@@ -2052,8 +2067,9 @@ impl Render for EditorView {
             )
             .children(self.cursor_indicator())
             .children(self.text_anchor.map(|p| {
-                let p = self.transform.forward(p);
+                let p = self.text_top_left(p);
                 let font = (self.width * 6. + 12.) * self.scale;
+                let line_height = px(font * 1.3);
                 let value = self.text.read(cx).value();
                 let mut text_font = w.text_style().font();
                 text_font.family = annotation_font_family().into();
@@ -2077,13 +2093,13 @@ impl Render for EditorView {
                     .left(px(p.x * self.scale))
                     .top(px(p.y * self.scale))
                     .w(px((content_width + 6.).max(16.)))
-                    .h(px(font * 1.3))
+                    .h(line_height)
                     .font_family(annotation_font_family())
                     .text_size(px(font))
-                    .line_height(px(font * 1.3))
+                    .line_height(line_height)
                     .bg(transparent_black())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
+                    .child(Styled::h(
                         Input::new(&self.text)
                             .id("annotation-text-field")
                             .aria_label("图片文字")
@@ -2092,15 +2108,15 @@ impl Render for EditorView {
                             .p_0()
                             .font_family(annotation_font_family())
                             .text_size(px(font))
-                            .h(px(font * 1.3))
-                            .line_height(px(font * 1.3))
+                            .line_height(line_height)
                             .text_color(rgba(
                                 ((self.color[0] as u32) << 24)
                                     | ((self.color[1] as u32) << 16)
                                     | ((self.color[2] as u32) << 8)
                                     | self.color[3] as u32,
                             )),
-                    )
+                        line_height,
+                    ))
             }))
             .when(self.text_anchor.is_some(), |d| {
                 let input = self.text.clone();
@@ -3566,6 +3582,44 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn text_caret_and_frame_center_align_to_canvas_click(cx: &mut TestAppContext) {
+        use gpui_kit::{MouseButton, VisualTestContext};
+        let (window, editor) = editor(cx);
+        window_focus_for_test(window, &editor, cx);
+        cx.simulate_keystrokes(window, "8");
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        let click = point(px(520.), px(705.));
+        visual.simulate_mouse_down(click, MouseButton::Left, Default::default());
+        visual.simulate_mouse_up(click, MouseButton::Left, Default::default());
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+            w.simulate_next_frame(cx);
+            let _ = w.draw(cx);
+        });
+        cx.update(|cx| {
+            let view = editor.read(cx);
+            let input = view.text.read(cx);
+            let frame = super::text_frame_bounds(input).unwrap();
+            let caret = input.cursor_layout().unwrap().0;
+            assert!(
+                (frame.left() - click.x).abs() <= px(1.),
+                "frame {frame:?}, click {click:?}"
+            );
+            assert!(
+                (caret.left() - click.x).abs() <= px(1.),
+                "caret {caret:?}, click {click:?}"
+            );
+            assert!(
+                (frame.center().y - click.y).abs() <= px(1.),
+                "frame {frame:?}, click {click:?}"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
     fn new_inline_text_field_receives_keyboard_input_after_mount(cx: &mut TestAppContext) {
         let (window, editor) = editor(cx);
         cx.update(|cx| {
@@ -3652,7 +3706,9 @@ mod tests {
                 assert!(v.text_anchor.is_none());
                 assert_eq!(v.doc.objects.len(), 1);
                 assert_eq!(v.doc.objects[0].text, "图片内输入");
-                assert_eq!(v.doc.objects[0].points[0], ImagePoint::new(100., 80.));
+                let origin = v.doc.objects[0].points[0];
+                assert_eq!(origin.x, 100.);
+                assert!((origin.y + (v.width * 6. + 12.) * 1.3 / 2. - 80.).abs() < 0.001);
             })
         });
         cx.update(|cx| {

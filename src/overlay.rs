@@ -33,7 +33,7 @@ impl Overlay {
     ) -> anyhow::Result<AnyWindowHandle> {
         let texture = app::texture(&display.image);
         let cursor = snip_platform::cursor_position()?;
-        Self::open_prepared(display, texture, mode, cursor, cx)
+        Self::open_prepared(display, texture, mode, cursor, cx).map(|(handle, _)| handle)
     }
     pub fn open_prepared(
         display: CapturedDisplay,
@@ -41,7 +41,7 @@ impl Overlay {
         mode: CaptureMode,
         cursor: ImagePoint,
         cx: &mut App,
-    ) -> anyhow::Result<AnyWindowHandle> {
+    ) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
         let d = display.map.desktop;
         let hover = display.map.to_image(cursor);
         let (bounds, display_id) = app::display_bounds(&display, cx);
@@ -92,6 +92,20 @@ impl Overlay {
                 })
             },
         )?;
+        handle.update(cx, |_, w, _| {
+            let view = view.downgrade();
+            w.on_next_frame(move |w, cx| {
+                let _ = view.update(cx, |v, cx| {
+                    if v.editor.is_none() {
+                        v.focus.focus(w, cx);
+                        if !w.is_window_active() {
+                            w.activate_window();
+                        }
+                    }
+                });
+            });
+            w.refresh();
+        })?;
         if std::env::args().any(|a| a == "--smoke-test") {
             handle.update(cx, |_, w, cx| {
                 view.update(cx, |v, cx| {
@@ -117,7 +131,14 @@ impl Overlay {
                 })
             })?;
         }
-        Ok(handle)
+        Ok((handle, view))
+    }
+    pub(crate) fn can_switch_display(&self) -> bool {
+        self.selection.is_none() && self.anchor.is_none() && self.editor.is_none()
+    }
+    #[cfg(test)]
+    pub(crate) fn display_id(&self) -> u32 {
+        self.display.id
     }
     fn begin_edit(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         if self.editor.is_some() {
@@ -459,6 +480,13 @@ impl Render for Overlay {
                     cx.notify();
                 }),
             )
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" && (this.editor.is_none() || this.resizing.is_some())
+                {
+                    app::close_overlays(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, w, cx| {
                 if this.editor.is_some() {
                     if e.keystroke.modifiers.shift
@@ -494,7 +522,6 @@ impl Render for Overlay {
                     return;
                 }
                 match e.keystroke.key.as_str() {
-                    "escape" => app::close_overlays(cx),
                     "enter" => this.finish(w, cx),
                     "c" => {
                         let x = (this.hover.x.max(0.) as u32).min(this.display.image.width() - 1);
@@ -685,26 +712,14 @@ mod tests {
                 image: std::sync::Arc::new(image::RgbaImage::new(400, 300)),
                 windows,
             };
-            let handle = Overlay::open_prepared(
+            Overlay::open_prepared(
                 display.clone(),
                 crate::app::texture(&display.image),
                 CaptureMode::Screenshot,
                 snip_core::geometry::Point::new(-100., 40.),
                 cx,
             )
-            .unwrap();
-            let view = handle
-                .update(cx, |root, _, cx| {
-                    root.downcast::<gpui_kit::base::Root>()
-                        .unwrap()
-                        .read(cx)
-                        .view()
-                        .clone()
-                        .downcast::<Overlay>()
-                        .unwrap()
-                })
-                .unwrap();
-            (handle, view)
+            .unwrap()
         })
     }
     #[gpui_kit::test]

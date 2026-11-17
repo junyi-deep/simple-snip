@@ -429,3 +429,9 @@ Windows OCR 的应用测试检查独立进程异常退出能返回普通错误�
 [v0.0.20 标签流水线](https://github.com/junyi-deep/simple-snip/actions/runs/44017583223) 的 Windows AMD64、macOS ARM64 构建和发布任务全部通过。原生 CI 通过 Windows 122 项、macOS 114 项 Rust 测试，各跳过 3 项默认原生权限测试；Windows 两项 OCR 子进程测试均通过。本机 macOS ARM64 Release 构建和原生窗口生命周期 smoke 通过。
 
 [v0.0.20 Release](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.20) 的 Windows ZIP、macOS ZIP / DMG 和 SHA256SUMS 已下载核验。三个包的尺寸与 SHA256 与 GitHub 下载资产匹配，ZIP CRC、DMG 校验、Windows AMD64 / PE32+ / GUI 和 macOS ARM64 / Info.plist 双版本 0.0.20 均正确。Windows OCR 原报告的偶发崩溃仍缺真机复现，异常退出及无效请求由自动测试覆盖。
+
+## 2026-11-17：issue #6 截图焦点、跨屏与文字对齐
+
+macOS ARM64 本机通过格式、编译、Clippy 和 117 项常规测试，另有 3 项原生权限测试保持 ignored。截图测试从打开窗口开始执行真实 GPUI 键盘事件，验证无需点击即可 Esc 取消，跨屏后也能取消。合成双屏覆盖负坐标、不同 DPI、显示器间隙、单一活动窗口、旧窗口内容释放，以及拖拽期间保持当前屏。文字回归先复现光标中心比点击点低 16 个逻辑像素，再通过实际 GPUI 画布点击检查输入框左边及光标垂直中心落在点击坐标，并保留已有文本重编辑和提交回归。
+
+本机仅一块在线显示器，桌面自动化检查因系统锁屏未能执行。真机复测时，在另一应用前台按 F1 后直接按 Esc；再次按 F1，将指针移到另一个显示器，确认只有目标屏出现截图界面，再拖选或按 Esc。进入标注后用文本工具点击画布，检查空输入的光标中心是否与点击点同高。

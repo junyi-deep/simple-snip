@@ -213,11 +213,19 @@ fn present(
     show: bool,
     cx: &mut App,
 ) {
+    let Ok(expected_root) = handle.update(cx, |root, _, _| root.entity_id()) else {
+        return;
+    };
     cx.spawn(async move |cx| {
-        let native = handle.update(cx, |_, w, _| {
-            crate::app::raw(w).map(|raw| (raw, w.scale_factor()))
+        // Escape or a monitor transition can park this window before the
+        // deferred native placement runs. Do not show the parked root.
+        let native = handle.update(cx, |root, w, _| {
+            if root.entity_id() != expected_root {
+                return None;
+            }
+            crate::app::raw(w).ok().map(|raw| (raw, w.scale_factor()))
         });
-        if let Ok(Ok((raw, scale))) = native {
+        if let Ok(Some((raw, scale))) = native {
             if let Some(WindowBounds::Windowed(b)) = requested_bounds {
                 let bounds = snip_core::geometry::Rect::new(
                     f32::from(b.origin.x),
