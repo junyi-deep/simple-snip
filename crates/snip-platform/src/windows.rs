@@ -16,7 +16,7 @@ use windows::{
         },
         Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
         Graphics::Gdi::ScreenToClient,
-        System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
+        System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
         UI::WindowsAndMessaging::*,
     },
 };
@@ -361,7 +361,7 @@ struct Apartment;
 impl Drop for Apartment {
     fn drop(&mut self) {
         unsafe {
-            CoUninitialize();
+            RoUninitialize();
         }
     }
 }
@@ -388,7 +388,7 @@ impl OcrEngine for NativeOcr {
     fn recognize(&self, image: &RgbaImage, cancel: &Cancellation) -> Result<OcrResult> {
         ensure!(!cancel.cancelled(), "识别已取消");
         unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+            RoInitialize(RO_INIT_MULTITHREADED)?;
         }
         let _apartment = Apartment;
         let max = WinOcr::MaxImageDimension()?;

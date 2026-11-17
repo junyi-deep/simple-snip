@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "simple-snip"
-version = "0.0.19"
+version = "0.0.20"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
@@ -43,6 +43,9 @@ debug = 1
 lto = "thin"
 strip = true
 
+
+[target.'cfg(target_os = "windows")'.dependencies]
+serde_json = "1"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 embed-resource = "3"

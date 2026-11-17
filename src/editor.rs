@@ -13,8 +13,8 @@ use gpui_kit::{
 use image::RgbaImage;
 use snip_core::{
     annotation::{Annotation, ArrowStyle, Document, Tool},
-    geometry::{ImageTransform, Point as ImagePoint, Rect},
-    ocr::{Cancellation, OcrEngine, OcrResult},
+    geometry::{ImageTransform, Point as ImagePoint, Rect, SelectionHandle, resize_selection},
+    ocr::{Cancellation, OcrResult},
 };
 use snip_platform::{CapturedDisplay, ClipboardProvider};
 use std::sync::Arc;
@@ -78,6 +78,58 @@ pub enum EditorHost {
 pub struct ActiveCaptureEditor(pub WeakEntity<EditorView>);
 impl Global for ActiveCaptureEditor {}
 
+#[derive(Clone, Copy)]
+enum GeometryHandle {
+    Edge(SelectionHandle),
+    Endpoint(usize),
+}
+
+struct GeometryDrag {
+    handle: GeometryHandle,
+    start: ImagePoint,
+    bounds: Rect,
+    points: Vec<ImagePoint>,
+    checkpointed: bool,
+}
+
+/// The positions are in source pixels, so both drawing and hit testing can
+/// use the same transform for zoomed, rotated, or mirrored pins.
+fn geometry_handles(annotation: &Annotation) -> Vec<(GeometryHandle, ImagePoint)> {
+    if matches!(annotation.tool, Tool::Line | Tool::Arrow) && annotation.points.len() == 2 {
+        return annotation
+            .points
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, p)| (GeometryHandle::Endpoint(i), p))
+            .collect();
+    }
+    if !(annotation.tool.is_shape()
+        || matches!(
+            annotation.tool,
+            Tool::Polyline | Tool::Curve | Tool::Pen | Tool::Highlight
+        ))
+        || annotation.points.len() < 2
+    {
+        return vec![];
+    }
+    let r = annotation.bounds();
+    use SelectionHandle::*;
+    [
+        (NorthWest, r.x, r.y),
+        (North, r.x + r.width * 0.5, r.y),
+        (NorthEast, r.right(), r.y),
+        (East, r.right(), r.y + r.height * 0.5),
+        (SouthEast, r.right(), r.bottom()),
+        (South, r.x + r.width * 0.5, r.bottom()),
+        (SouthWest, r.x, r.bottom()),
+        (West, r.x, r.y + r.height * 0.5),
+    ]
+    .into_iter()
+    .map(|(handle, x, y)| (GeometryHandle::Edge(handle), ImagePoint::new(x, y)))
+    .collect()
+}
+
 /// It never opens an application editor window.
 pub struct EditorView {
     pub doc: Document,
@@ -108,6 +160,8 @@ pub struct EditorView {
     last_wheel: Option<std::time::Instant>,
     draft: Option<Annotation>,
     selected: Option<usize>,
+    geometry_drag: Option<GeometryDrag>,
+    moving_annotation: bool,
     last: Option<ImagePoint>,
     scale: f32,
     origin: Point<Pixels>,
@@ -246,6 +300,8 @@ impl EditorView {
             last_wheel: None,
             draft: None,
             selected: None,
+            geometry_drag: None,
+            moving_annotation: false,
             last: None,
             scale: f32::from(view_bounds.size.width) / initial.width() as f32,
             origin: view_bounds.origin,
@@ -312,6 +368,9 @@ impl EditorView {
         self.preferences = cx.global::<PreferencesStore>().value.clone();
         self.tool = tool;
         self.selected = None;
+        self.geometry_drag = None;
+        self.last = None;
+        self.last_wheel = None;
         let style = self.preferences.style(tool);
         self.width = style.width;
         self.color = style.color;
@@ -367,9 +426,7 @@ impl EditorView {
                     "b" => Tool::Blur,
                     _ => Tool::Eraser,
                 };
-                let tool = if tool == Tool::Rectangle {
-                    self.preferences.shape
-                } else if tool == Tool::Line {
+                let tool = if tool == Tool::Line {
                     self.preferences.line
                 } else {
                     tool
@@ -483,12 +540,89 @@ impl EditorView {
                 draft.points.dedup();
             }
             if draft.points.len() > 1 {
-                self.pending_annotations
-                    .push((draft.clone(), self.generation + 1));
-                self.doc.add(draft);
-                self.refresh(cx);
+                self.add_selected(draft, cx);
             }
         }
+    }
+    fn add_selected(&mut self, annotation: Annotation, cx: &mut Context<Self>) {
+        self.pending_annotations
+            .push((annotation.clone(), self.generation + 1));
+        self.doc.add(annotation);
+        self.selected = Some(self.doc.objects.len() - 1);
+        self.last_wheel = None;
+        self.refresh(cx);
+    }
+    fn geometry_handle_at(&self, mouse: Point<Pixels>) -> Option<GeometryHandle> {
+        let object = self.doc.objects.get(self.selected?)?;
+        geometry_handles(object)
+            .into_iter()
+            .find_map(|(handle, p)| {
+                let p = self.transform.forward(p);
+                let position = self.origin + point(px(p.x * self.scale), px(p.y * self.scale));
+                ((position.x - mouse.x).abs() <= px(5.) && (position.y - mouse.y).abs() <= px(5.))
+                    .then_some(handle)
+            })
+    }
+    fn resize_geometry(&mut self, p: ImagePoint, cx: &mut Context<Self>) {
+        let Some(drag) = self.geometry_drag.as_mut() else {
+            return;
+        };
+        let Some(index) = self.selected.filter(|&i| i < self.doc.objects.len()) else {
+            return;
+        };
+        let limit = Rect::new(
+            0.,
+            0.,
+            self.doc.original.width() as f32,
+            self.doc.original.height() as f32,
+        );
+        let dx = p.x - drag.start.x;
+        let dy = p.y - drag.start.y;
+        if !drag.checkpointed && dx == 0. && dy == 0. {
+            return;
+        }
+        let points = match drag.handle {
+            GeometryHandle::Endpoint(i) => {
+                let mut points = drag.points.clone();
+                points[i].x = (points[i].x + dx).clamp(0., limit.width);
+                points[i].y = (points[i].y + dy).clamp(0., limit.height);
+                points
+            }
+            GeometryHandle::Edge(handle) => {
+                use SelectionHandle::*;
+                let old = drag.bounds;
+                let x = if matches!(handle, NorthWest | West | SouthWest) {
+                    old.x
+                } else {
+                    old.right()
+                };
+                let y = if matches!(handle, NorthWest | North | NorthEast) {
+                    old.y
+                } else {
+                    old.bottom()
+                };
+                let new = resize_selection(old, handle, ImagePoint::new(x + dx, y + dy), limit);
+                drag.points
+                    .iter()
+                    .map(|p| {
+                        ImagePoint::new(
+                            new.x + (p.x - old.x) * (new.width / old.width),
+                            new.y + (p.y - old.y) * (new.height / old.height),
+                        )
+                    })
+                    .collect()
+            }
+        };
+        if points == self.doc.objects[index].points {
+            return;
+        }
+        if !drag.checkpointed {
+            self.doc.checkpoint();
+            self.pending_annotations.clear();
+            drag.checkpointed = true;
+        }
+        self.doc.objects[index].points = points;
+        self.refresh(cx);
     }
     fn paint_filter(&mut self, p: ImagePoint, checkpoint: bool, cx: &mut Context<Self>) {
         let radius = (self.width * 3.).clamp(3., 256.);
@@ -544,6 +678,7 @@ impl EditorView {
         self.draft = None;
         self.last = None;
         self.selected = None;
+        self.geometry_drag = None;
         self.pointer = None;
         self.refresh(cx);
         let editor = cx.entity().downgrade();
@@ -671,6 +806,7 @@ impl EditorView {
                 },
             );
             self.width = self.doc.objects[i].width;
+            self.pending_annotations.clear();
             self.refresh(cx);
         } else if self.tool != Tool::Select {
             self.width = (self.width
@@ -696,11 +832,18 @@ impl EditorView {
         }
         self.remember_fields(cx, 1);
     }
+    fn over_geometry_handle(&self) -> bool {
+        self.geometry_drag.is_some()
+            || self
+                .pointer
+                .is_some_and(|p| self.geometry_handle_at(p + self.origin).is_some())
+    }
     fn cursor_indicator(&self) -> Option<AnyElement> {
         let p = self.pointer?;
         if self.text_anchor.is_some()
             || matches!(self.tool, Tool::Select | Tool::Text)
             || self.ocr.is_some()
+            || self.over_geometry_handle()
         {
             return None;
         }
@@ -913,18 +1056,30 @@ impl EditorView {
         self.ocr_busy = true;
         self.cancel = Cancellation::default();
         let cancel = self.cancel.clone();
+        let request = cancel.clone();
         let document = self.doc.render_snapshot();
         let generation = self.generation;
         self.message = "正在本地识别…".into();
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 let image = document.flatten();
-                snip_platform::NativeOcr.recognize(&image, &cancel)
+                #[cfg(target_os = "windows")]
+                {
+                    crate::windows_ocr::recognize(&image, &cancel)
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    snip_core::ocr::OcrEngine::recognize(&snip_platform::NativeOcr, &image, &cancel)
+                }
             })
             .await;
             let _ = this.update(cx, |v, cx| {
                 v.ocr_busy = false;
-                if v.generation != generation {
+                if request.cancelled() || v.generation != generation {
+                    if v.message == "正在本地识别…" {
+                        v.message.clear();
+                    }
+                    cx.notify();
                     return;
                 }
                 match result {
@@ -990,6 +1145,21 @@ impl EditorView {
             self.commit_text(cx);
         }
         self.last_wheel = None;
+        self.geometry_drag = None;
+        self.last = None;
+        self.moving_annotation = false;
+        if let Some(handle) = self.geometry_handle_at(e.position)
+            && let Some(object) = self.selected.and_then(|index| self.doc.objects.get(index))
+        {
+            self.geometry_drag = Some(GeometryDrag {
+                handle,
+                start: p,
+                bounds: object.bounds(),
+                points: object.points.clone(),
+                checkpointed: false,
+            });
+            return;
+        }
         match self.tool {
             Tool::Select => {
                 self.selected = self.doc.hit(p);
@@ -1007,7 +1177,6 @@ impl EditorView {
                 }
                 self.sync_size(w, cx);
                 if self.selected.is_some() {
-                    self.doc.checkpoint();
                     self.last = Some(p);
                 }
             }
@@ -1039,6 +1208,7 @@ impl EditorView {
                         draft.points.push(p);
                     }
                 } else {
+                    self.selected = None;
                     self.draft = Some(Annotation {
                         tool: self.tool,
                         points: vec![p, p],
@@ -1053,17 +1223,20 @@ impl EditorView {
                 let number = self.next_number;
                 self.next_number = number.saturating_add(1);
                 self.remember(cx);
-                self.doc.add(Annotation {
-                    tool: Tool::Number,
-                    points: vec![p],
-                    color: self.color,
-                    width: self.width,
-                    text: number.to_string(),
-                    arrow_style: ArrowStyle::default(),
-                });
-                self.refresh(cx);
+                self.add_selected(
+                    Annotation {
+                        tool: Tool::Number,
+                        points: vec![p],
+                        color: self.color,
+                        width: self.width,
+                        text: number.to_string(),
+                        arrow_style: ArrowStyle::default(),
+                    },
+                    cx,
+                );
             }
             _ => {
+                self.selected = None;
                 self.draft = Some(Annotation {
                     tool: self.tool,
                     points: vec![p, p],
@@ -1103,6 +1276,14 @@ impl EditorView {
             return;
         }
         cx.notify();
+        if self.geometry_drag.is_some() {
+            if e.dragging() {
+                self.resize_geometry(p, cx);
+            } else {
+                self.geometry_drag = None;
+            }
+            return;
+        }
         if let Some(draft) = &mut self.draft
             && draft.tool == Tool::Polyline
         {
@@ -1134,11 +1315,37 @@ impl EditorView {
             cx.notify();
         }
         if let (Some(i), Some(last)) = (self.selected, self.last)
-            && let Some(object) = self.doc.objects.get_mut(i)
+            && i < self.doc.objects.len()
+            && p != last
         {
-            object.translate(p.x - last.x, p.y - last.y);
+            if !self.moving_annotation {
+                self.doc.checkpoint();
+                self.moving_annotation = true;
+            }
+            self.doc.objects[i].translate(p.x - last.x, p.y - last.y);
             self.last = Some(p);
             self.refresh(cx);
+        }
+    }
+    fn pointer_up(&mut self, e: &MouseUpEvent, cx: &mut Context<Self>) {
+        self.ocr_drag = false;
+        self.last = None;
+        self.moving_annotation = false;
+        if self.geometry_drag.is_some() {
+            self.resize_geometry(self.image_point(e.position), cx);
+            self.geometry_drag = None;
+            cx.notify();
+        }
+        if self
+            .draft
+            .as_ref()
+            .is_some_and(|a| a.tool == Tool::Polyline)
+        {
+            return;
+        }
+        if let Some(draft) = self.draft.take() {
+            self.add_selected(draft, cx);
+            cx.notify();
         }
     }
     fn toolbar_width(&self) -> f32 {
@@ -1248,14 +1455,16 @@ impl EditorView {
                     ))
                     .selected(
                         (self.tool == tool
-                            || tool == Tool::Rectangle && self.tool.is_shape()
+                            || tool == Tool::Rectangle
+                                && matches!(
+                                    self.tool,
+                                    Tool::RoundedRectangle | Tool::Diamond | Tool::Triangle
+                                )
                             || tool == Tool::Line && self.tool.is_line())
                             && self.ocr.is_none(),
                     )
                     .on_click(cx.listener(move |v, _, w, cx| {
-                        let tool = if tool == Tool::Rectangle {
-                            v.preferences.shape
-                        } else if tool == Tool::Line {
+                        let tool = if tool == Tool::Line {
                             v.preferences.line
                         } else {
                             tool
@@ -1593,11 +1802,12 @@ impl Render for EditorView {
         let ocr = self.ocr.clone();
         let selection = self.ocr_start.zip(self.ocr_end);
         let hover = self.ocr_hover;
-        let selected_bounds = self
+        let selected = self
             .selected
             .filter(|_| self.text_anchor.is_none())
-            .and_then(|i| self.doc.objects.get(i))
-            .map(|a| a.bounds());
+            .and_then(|i| self.doc.objects.get(i));
+        let selected_bounds = selected.map(Annotation::bounds);
+        let selected_handles = selected.map_or_else(Vec::new, geometry_handles);
         let canvas = canvas(
             move |bounds, _, cx| {
                 cx.defer(move |cx| {
@@ -1714,7 +1924,8 @@ impl Render for EditorView {
                     if let Ok(path) = border.build() {
                         window.paint_path(path, rgb(0x1688ff));
                     }
-                    for p in corners {
+                    for &(_, p) in &selected_handles {
+                        let p = map(p);
                         window.paint_quad(
                             fill(
                                 Bounds::new(p - point(px(2.5), px(2.5)), size(px(5.), px(5.))),
@@ -1786,6 +1997,8 @@ impl Render for EditorView {
             .relative()
             .cursor(if self.ocr.is_some() {
                 CursorStyle::IBeam
+            } else if self.over_geometry_handle() {
+                CursorStyle::PointingHand
             } else {
                 match self.tool {
                     Tool::Select => CursorStyle::Arrow,
@@ -1813,19 +2026,11 @@ impl Render for EditorView {
             .on_mouse_move(cx.listener(|v, e, _, cx| v.moving(e, cx)))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|v, _, _, cx| {
-                    v.ocr_drag = false;
-                    v.last = None;
-                    if v.draft.as_ref().is_some_and(|a| a.tool == Tool::Polyline) {
-                        return;
-                    }
-                    if let Some(a) = v.draft.take() {
-                        v.pending_annotations.push((a.clone(), v.generation + 1));
-                        v.doc.add(a);
-                        v.refresh(cx);
-                    }
-                    cx.notify();
-                }),
+                cx.listener(|v, e, _, cx| v.pointer_up(e, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|v, e, _, cx| v.pointer_up(e, cx)),
             )
             .children(
                 self.pending_annotations
@@ -2479,6 +2684,119 @@ mod tests {
             .expect("test editor window");
             (window, built.unwrap())
         })
+    }
+
+    #[gpui_kit::test]
+    fn rectangle_shortcut_returns_to_rectangle_after_ellipse(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        window_focus_for_test(window, &editor, cx);
+        for (key, tool) in [
+            ("2", super::Tool::Rectangle),
+            ("3", super::Tool::Ellipse),
+            ("2", super::Tool::Rectangle),
+        ] {
+            cx.simulate_keystrokes(window, key);
+            cx.update(|cx| assert_eq!(editor.read(cx).tool, tool));
+        }
+    }
+
+    fn window_focus_for_test(
+        window: AnyWindowHandle,
+        editor: &Entity<EditorView>,
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| v.focus_canvas(w, cx));
+                    let _ = w.draw(cx);
+                })
+                .unwrap();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn drawn_rectangle_is_selected_and_wheel_changes_that_object(cx: &mut TestAppContext) {
+        use gpui_kit::{MouseButton, ScrollDelta, ScrollWheelEvent, VisualTestContext};
+        let (window, editor) = editor(cx);
+        window_focus_for_test(window, &editor, cx);
+        cx.simulate_keystrokes(window, "2");
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        let start = point(px(470.), px(670.));
+        let end = point(px(530.), px(740.));
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        cx.update(|cx| {
+            let v = editor.read(cx);
+            assert_eq!(v.doc.objects.len(), 1);
+            assert_eq!(v.selected, Some(0));
+            assert_eq!(v.doc.objects[0].width, 3.);
+        });
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        visual.simulate_event(ScrollWheelEvent {
+            position: point(px(500.), px(700.)),
+            delta: ScrollDelta::Lines(point(0., 1.)),
+            ..Default::default()
+        });
+        cx.update(|cx| assert_eq!(editor.read(cx).doc.objects[0].width, 4.));
+
+        // The default selection allows resizing immediately while the rectangle
+        // tool remains active. Select mode can then reopen the same handles.
+        for (from, to, expected) in [
+            (
+                end,
+                point(px(550.), px(750.)),
+                super::Rect::new(40., 40., 160., 160.),
+            ),
+            (
+                point(px(550.), px(750.)),
+                point(px(570.), px(760.)),
+                super::Rect::new(40., 40., 200., 180.),
+            ),
+        ] {
+            visual.update(|w, cx| {
+                let _ = w.draw(cx);
+            });
+            visual.simulate_mouse_down(from, MouseButton::Left, Default::default());
+            visual.simulate_mouse_move(to, Some(MouseButton::Left), Default::default());
+            visual.simulate_mouse_up(to, MouseButton::Left, Default::default());
+            cx.update(|cx| {
+                let v = editor.read(cx);
+                assert_eq!(v.doc.objects.len(), 1, "the handle must win over drawing");
+                assert_eq!(v.doc.objects[0].bounds(), expected);
+                assert_eq!(v.doc.objects[0].width, 4.);
+            });
+            cx.simulate_keystrokes(window, "1");
+            visual.update(|w, cx| {
+                let _ = w.draw(cx);
+            });
+            let center = point(px(500.), px(700.));
+            visual.simulate_mouse_down(center, MouseButton::Left, Default::default());
+            visual.simulate_mouse_up(center, MouseButton::Left, Default::default());
+            cx.update(|cx| assert_eq!(editor.read(cx).selected, Some(0)));
+        }
+        cx.update(|cx| {
+            editor.update(cx, |v, _| {
+                v.doc.undo();
+                assert_eq!(
+                    v.doc.objects[0].bounds(),
+                    super::Rect::new(40., 40., 160., 160.)
+                );
+                v.doc.undo();
+                assert_eq!(
+                    v.doc.objects[0].bounds(),
+                    super::Rect::new(40., 40., 120., 140.)
+                );
+                assert_eq!(v.doc.objects[0].width, 4.);
+            })
+        });
     }
 
     #[gpui_kit::test]

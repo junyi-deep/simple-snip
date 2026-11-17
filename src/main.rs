@@ -17,10 +17,23 @@ mod pin;
 mod settings;
 mod task_toolbar;
 mod window_pool;
+#[cfg(target_os = "windows")]
+mod windows_ocr;
 pub fn is_docs_demo() -> bool {
     cfg!(debug_assertions) && std::env::args().any(|arg| arg == "--docs-demo")
 }
 fn main() {
+    #[cfg(target_os = "windows")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--ocr-worker")
+    {
+        if windows_ocr::run_from_stdio().is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

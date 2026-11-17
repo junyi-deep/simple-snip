@@ -1,6 +1,7 @@
 use crate::geometry::{Point, Rect};
 use anyhow::Result;
 use image::RgbaImage;
+use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -15,13 +16,13 @@ impl Cancellation {
         self.0.load(Ordering::Relaxed)
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OcrWord {
     pub text: String,
     pub bounds: Rect,
     pub confidence: Option<f32>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OcrLine {
     pub text: String,
     pub bounds: Rect,
@@ -29,7 +30,7 @@ pub struct OcrLine {
     pub confidence: Option<f32>,
     pub language: Option<String>,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct OcrResult {
     pub lines: Vec<OcrLine>,
 }
