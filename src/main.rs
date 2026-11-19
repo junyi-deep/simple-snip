@@ -16,6 +16,7 @@ mod perf_probe;
 mod pin;
 mod settings;
 mod task_toolbar;
+mod ui;
 mod window_pool;
 #[cfg(target_os = "windows")]
 mod windows_ocr;
@@ -91,7 +92,7 @@ fn main() {
         }
     };
     let application = gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(ui::Assets)
         .with_quit_mode(gpui_kit::QuitMode::Explicit);
     application.on_reopen(app::open_settings);
     application.run(move |cx| {

@@ -189,7 +189,7 @@ fn capture_frame(display: u32, rect: Rect, excluded: u32) -> anyhow::Result<Rgba
 }
 
 fn toolbar_placement(selected: Rect, screen: Rect, gif: bool) -> Rect {
-    let width = if gif { 900. } else { 740. };
+    let width = if gif { 620. } else { 592. };
     place_toolbar(
         selected,
         screen,
@@ -197,7 +197,7 @@ fn toolbar_placement(selected: Rect, screen: Rect, gif: bool) -> Rect {
         if screen.width < width + 16. {
             192.
         } else {
-            128.
+            108.
         },
     )
 }
@@ -677,25 +677,38 @@ impl TaskToolbar {
 }
 impl Render for TaskToolbar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = if self.gif {
-            format!(
-                "GIF · {} × {} · {:.1} 秒",
-                self.rect.width as u32,
-                self.rect.height as u32,
-                self.control.elapsed_ms.load(Ordering::Relaxed) as f64 / 1000.
+        let (title, measure) = if self.gif {
+            let title = if self.control.paused.load(Ordering::Relaxed) && self.recording {
+                "录制已暂停"
+            } else if self.recording {
+                "正在录制 GIF"
+            } else if self.path.is_some() {
+                "GIF 已就绪"
+            } else {
+                "GIF 录制"
+            };
+            (
+                title,
+                format!(
+                    "{} × {} px  /  {:.1} 秒",
+                    self.rect.width as u32,
+                    self.rect.height as u32,
+                    self.control.elapsed_ms.load(Ordering::Relaxed) as f64 / 1000.
+                ),
             )
         } else if let Some((width, height, frames)) = self.summary {
-            format!(
-                "长截图 · {} × {} · {} 段{}",
-                width,
-                height,
-                frames,
-                if self.busy { " · 采集中" } else { "" }
+            (
+                if self.busy {
+                    "正在采集长截图"
+                } else {
+                    "长截图"
+                },
+                format!("{width} × {height} px  /  {frames} 段"),
             )
         } else if self.busy {
-            "长截图 · 正在采集首帧".into()
+            ("正在采集长截图", "首帧".into())
         } else {
-            "长截图 · 等待采集".into()
+            ("长截图", "等待采集".into())
         };
         let mut controls = div().h_flex().gap_1().flex_wrap();
         let display = self.display.clone();
@@ -704,7 +717,7 @@ impl Render for TaskToolbar {
         controls = controls.child(
             Button::new("session-mode")
                 .small()
-                .label(if self.gif { "GIF ▾" } else { "长截图 ▾" })
+                .label(if self.gif { "GIF" } else { "长截图" })
                 .disabled(self.recording)
                 .dropdown_menu(move |menu, _, _| {
                     let other = display.clone();
@@ -733,7 +746,7 @@ impl Render for TaskToolbar {
                             );
                         }),
                     )
-                    .item(PopupMenuItem::new("重新截图 F1").on_click(move |_, _, cx| {
+                    .item(PopupMenuItem::new("重新截图").on_click(move |_, _, cx| {
                         app::send(cx, Event::CloseTask(handle));
                         app::command(cx, app::Command::Capture);
                     }))
@@ -744,6 +757,7 @@ impl Render for TaskToolbar {
                 Button::new("rate-minus")
                     .small()
                     .label("−")
+                    .accessibility_label("降低采集参数")
                     .disabled(self.recording)
                     .on_click(cx.listener(|v, _, w, cx| {
                         v.rate = v
@@ -755,7 +769,7 @@ impl Render for TaskToolbar {
                     })),
             )
             .child(
-                div().w(px(72.)).child(
+                div().w(px(56.)).child(
                     Input::new(&self.rate_input)
                         .small()
                         .readonly(self.recording)
@@ -770,6 +784,7 @@ impl Render for TaskToolbar {
                 Button::new("rate-plus")
                     .small()
                     .label("+")
+                    .accessibility_label("提高采集参数")
                     .disabled(self.recording)
                     .on_click(cx.listener(|v, _, w, cx| {
                         v.rate = (v.rate + if v.gif { 1 } else { 100 }).min(if v.gif {
@@ -885,14 +900,16 @@ impl Render for TaskToolbar {
         controls = controls.child(
             Button::new("capture-task-close")
                 .small()
+                .ghost()
+                .tooltip("关闭控制栏 (Esc)")
                 .label(if self.recording {
-                    "取消录制 Esc"
+                    "取消录制"
                 } else {
-                    "关闭 Esc"
+                    "关闭"
                 })
                 .on_click(cx.listener(|v, _, _, cx| v.close(cx))),
         );
-        div()
+        crate::ui::panel(cx)
             .id("capture-controls")
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
@@ -949,17 +966,22 @@ impl Render for TaskToolbar {
             .size_full()
             .min_w_0()
             .v_flex()
-            .gap_1()
+            .gap(px(6.))
             .p_2()
-            .rounded_md()
-            .bg(cx.theme().popover)
-            .text_color(cx.theme().popover_foreground)
-            .text_xs()
             .whitespace_normal()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(status))
-            .child(controls)
             .child(
                 div()
+                    .h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .items_center()
+                    .justify_between()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(crate::ui::detail(cx).child(measure)),
+            )
+            .child(controls)
+            .child(
+                crate::ui::detail(cx)
                     .id("capture-task-status")
                     .flex_1()
                     .min_h_0()
@@ -1019,15 +1041,32 @@ impl Drop for GifPreview {
     }
 }
 impl Render for GifPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
-            .bg(rgb(0x202020))
-            .text_color(rgb(0xffffff))
+            .relative()
+            .bg(cx.theme().muted)
             .when_some(self.texture.clone(), |d, t| {
                 d.child(img(t).size_full().object_fit(ObjectFit::Fill))
             })
-            .when(!self.message.is_empty(), |d| d.child(self.message.clone()))
+            .when(self.texture.is_none() || !self.message.is_empty(), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_2()
+                        .child(crate::ui::image_label().px_2().py_1().child(
+                            if self.message.is_empty() {
+                                "正在载入 GIF 预览…".into()
+                            } else {
+                                self.message.clone()
+                            },
+                        )),
+                )
+            })
     }
 }
 type PreviewFrame = crate::animation::FrameResult;
@@ -1153,7 +1192,7 @@ impl Render for RegionFrame {
         div()
             .size_full()
             .border_2()
-            .border_color(rgb(0x28d4de))
+            .border_color(rgb(crate::ui::IMAGE_FOCUS))
             .bg(transparent_black())
     }
 }

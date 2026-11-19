@@ -1,4 +1,7 @@
-use crate::app::{self, Event};
+use crate::{
+    app::{self, Event},
+    ui as design,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     component::{button::*, *},
@@ -14,6 +17,7 @@ pub enum CaptureMode {
 }
 pub struct Overlay {
     display: CapturedDisplay,
+    active: bool,
     texture: std::sync::Arc<RenderImage>,
     mode: CaptureMode,
     anchor: Option<ImagePoint>,
@@ -33,16 +37,16 @@ impl Overlay {
     ) -> anyhow::Result<AnyWindowHandle> {
         let texture = app::texture(&display.image);
         let cursor = snip_platform::cursor_position()?;
-        Self::open_prepared(display, texture, mode, cursor, cx).map(|(handle, _)| handle)
+        Self::open_prepared(display, texture, mode, cursor, true, cx).map(|(handle, _)| handle)
     }
     pub fn open_prepared(
         display: CapturedDisplay,
         texture: std::sync::Arc<RenderImage>,
         mode: CaptureMode,
         cursor: ImagePoint,
+        active: bool,
         cx: &mut App,
     ) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
-        let d = display.map.desktop;
         let hover = display.map.to_image(cursor);
         let (bounds, display_id) = app::display_bounds(&display, cx);
         let options = WindowOptions {
@@ -50,14 +54,14 @@ impl Overlay {
             display_id,
             titlebar: None,
             kind: WindowKind::Normal,
-            focus: d.contains(cursor),
+            focus: active,
             is_resizable: false,
             is_minimizable: false,
             is_movable: false,
             window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
         };
-        if d.contains(cursor) {
+        if active {
             cx.activate(true);
         }
         let (handle, view) = crate::window_pool::open(
@@ -76,10 +80,13 @@ impl Overlay {
                     },
                 );
                 let focus = cx.focus_handle();
-                focus.focus(window, cx);
+                if active {
+                    focus.focus(window, cx);
+                }
                 cx.new(|_| Self {
                     texture,
                     display,
+                    active,
                     mode,
                     anchor: None,
                     moving: None,
@@ -92,21 +99,26 @@ impl Overlay {
                 })
             },
         )?;
-        handle.update(cx, |_, w, _| {
-            let view = view.downgrade();
-            w.on_next_frame(move |w, cx| {
-                let _ = view.update(cx, |v, cx| {
-                    if v.editor.is_none() {
-                        v.focus.focus(w, cx);
-                        if !w.is_window_active() {
-                            w.activate_window();
+        if active {
+            handle.update(cx, |_, w, _| {
+                let view = view.downgrade();
+                w.on_next_frame(move |w, cx| {
+                    let _ = view.update(cx, |v, cx| {
+                        if v.active && v.editor.is_none() {
+                            v.focus.focus(w, cx);
+                            if !w.is_window_active() {
+                                w.activate_window();
+                            }
                         }
-                    }
+                    });
                 });
-            });
-            w.refresh();
-        })?;
-        if std::env::args().any(|a| a == "--smoke-test") {
+                w.refresh();
+            })?;
+        }
+        if active
+            && (std::env::args().any(|a| a == "--smoke-test")
+                || (crate::is_docs_demo() && std::env::args().any(|a| a == "annotation")))
+        {
             handle.update(cx, |_, w, cx| {
                 view.update(cx, |v, cx| {
                     let width = v.display.image.width() as f32;
@@ -135,6 +147,47 @@ impl Overlay {
     }
     pub(crate) fn can_switch_display(&self) -> bool {
         self.selection.is_none() && self.anchor.is_none() && self.editor.is_none()
+    }
+    pub(crate) fn activate_at(
+        &mut self,
+        cursor: ImagePoint,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.active = true;
+        self.hover = self.display.map.to_image(cursor);
+        self.focus.focus(w, cx);
+        if !w.is_window_active() {
+            w.activate_window();
+        }
+        cx.notify();
+    }
+    pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
+        self.active = false;
+        cx.notify();
+    }
+    fn accept_pointer(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.active {
+            return true;
+        }
+        if !app::claim_capture_display(self.display.id, cx) {
+            return false;
+        }
+        let cursor = self
+            .display
+            .map
+            .to_desktop(self.image_point(position, window));
+        self.activate_at(cursor, window, cx);
+        true
+    }
+    #[cfg(test)]
+    pub(crate) fn is_active(&self) -> bool {
+        self.active
     }
     #[cfg(test)]
     pub(crate) fn display_id(&self) -> u32 {
@@ -283,9 +336,9 @@ impl Overlay {
                     div()
                         .absolute()
                         .inset(px(2.))
-                        .bg(rgb(0xffffff))
+                        .bg(rgb(design::IMAGE_HANDLE))
                         .border_1()
-                        .border_color(rgb(0x1688ff)),
+                        .border_color(rgb(design::IMAGE_FOCUS)),
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -336,24 +389,23 @@ impl Render for Overlay {
         let s = window.viewport_size();
         let sx = f32::from(s.width) / self.display.image.width() as f32;
         let sy = f32::from(s.height) / self.display.image.height() as f32;
-        let region = self.selection.or_else(|| self.candidate());
+        let region = if self.active {
+            self.selection.or_else(|| self.candidate())
+        } else {
+            None
+        };
         let r = region.unwrap_or_default();
         let ui = Rect::new(r.x * sx, r.y * sy, r.width * sx, r.height * sy);
+        let clear = if self.active && self.selection.is_some() {
+            ui
+        } else {
+            Rect::default()
+        };
         let color = self.display.image.get_pixel(
             (self.hover.x.max(0.) as u32).min(self.display.image.width() - 1),
             (self.hover.y.max(0.) as u32).min(self.display.image.height() - 1),
         );
-        let guide = format!(
-            "{} × {} px   #{:02X}{:02X}{:02X}   RGB {}, {}, {}",
-            r.width as u32,
-            r.height as u32,
-            color[0],
-            color[1],
-            color[2],
-            color[0],
-            color[1],
-            color[2]
-        );
+        let guide = format!("{} × {} px", r.width as u32, r.height as u32);
         let mut root = div()
             .id("capture-overlay")
             .track_focus(&self.focus)
@@ -371,12 +423,12 @@ impl Render for Overlay {
                     move |bounds, _, w, _| {
                         let wdt = f32::from(bounds.size.width);
                         let hgt = f32::from(bounds.size.height);
-                        let dark = rgba(0x06101b88);
+                        let dark = rgba(design::CAPTURE_SCRIM);
                         for (x, y, width, height) in [
-                            (0., 0., wdt, ui.y),
-                            (0., ui.bottom(), wdt, hgt - ui.bottom()),
-                            (0., ui.y, ui.x, ui.height),
-                            (ui.right(), ui.y, wdt - ui.right(), ui.height),
+                            (0., 0., wdt, clear.y),
+                            (0., clear.bottom(), wdt, hgt - clear.bottom()),
+                            (0., clear.y, clear.x, clear.height),
+                            (clear.right(), clear.y, wdt - clear.right(), clear.height),
                         ] {
                             if width > 0. && height > 0. {
                                 w.paint_quad(fill(
@@ -391,7 +443,7 @@ impl Render for Overlay {
                                     point(px(ui.x), px(ui.y)),
                                     size(px(ui.width), px(ui.height)),
                                 ),
-                                rgb(0x28d4de),
+                                rgb(design::IMAGE_FOCUS),
                                 BorderStyle::Solid,
                             ));
                         }
@@ -404,6 +456,10 @@ impl Render for Overlay {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, w, cx| {
+                    if !this.accept_pointer(e.position, w, cx) {
+                        cx.defer(app::restore_capture_focus);
+                        return;
+                    }
                     if this.editor.is_some() {
                         return;
                     }
@@ -421,6 +477,9 @@ impl Render for Overlay {
                 }),
             )
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
+                if (!this.active && e.dragging()) || !this.accept_pointer(e.position, w, cx) {
+                    return;
+                }
                 let p = this.image_point(e.position, w);
                 if let Some((handle, r)) = this.resizing {
                     this.selection = Some(resize_selection(
@@ -462,6 +521,9 @@ impl Render for Overlay {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, w, cx| {
+                    if !this.active {
+                        return;
+                    }
                     if this.resizing.take().is_some() {
                         this.apply_resized_selection(w, cx);
                         return;
@@ -488,6 +550,9 @@ impl Render for Overlay {
                 }
             }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, w, cx| {
+                if !this.active {
+                    return;
+                }
                 if this.editor.is_some() {
                     if e.keystroke.modifiers.shift
                         && this
@@ -569,58 +634,77 @@ impl Render for Overlay {
                     _ => {}
                 }
             }));
+        if !self.active {
+            return root;
+        }
+        if region.is_some() {
+            root = root.child(
+                design::image_label()
+                    .absolute()
+                    .left(px(ui.x.clamp(0., (f32::from(s.width) - 104.).max(0.))))
+                    .top(px((ui.y - 24.).max(0.)))
+                    .px_2()
+                    .py(px(2.))
+                    .child(guide),
+            );
+        }
         let toolbar = snip_core::geometry::place_toolbar(
             ui,
             Rect::new(0., 0., f32::from(s.width), f32::from(s.height)),
-            490.,
-            70.,
+            280.,
+            40.,
         );
         let toolbar_x = toolbar.x;
         let toolbar_y = toolbar.y;
         if self.selection.is_some() && self.anchor.is_none() && self.editor.is_none() {
             root = root.child(
-                div()
+                design::panel(cx)
                     .absolute()
                     .left(px(toolbar_x))
                     .top(px(toolbar_y))
-                    .v_flex()
+                    .w(px(toolbar.width))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .gap_1()
-                    .bg(rgb(0x15212d))
-                    .text_color(rgb(0xf5fafc))
-                    .rounded_md()
-                    .p_2()
-                    .child(div().text_xs().child(guide.clone()))
+                    .p_1()
                     .child(
                         div()
                             .h_flex()
-                            .gap_2()
+                            .justify_end()
+                            .flex_wrap()
+                            .gap_1()
                             .child(
                                 Button::new("cancel")
                                     .small()
-                                    .label("取消 Esc")
+                                    .ghost()
+                                    .label("取消")
+                                    .tooltip("取消截图 (Esc)")
                                     .on_click(|_, _, cx| app::close_overlays(cx)),
                             )
-                            .child(Button::new("full").small().label("全屏 A").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.selection = Some(Rect::new(
-                                        0.,
-                                        0.,
-                                        this.display.image.width() as f32,
-                                        this.display.image.height() as f32,
-                                    ));
-                                    cx.notify();
-                                }),
-                            ))
+                            .child(
+                                Button::new("full")
+                                    .small()
+                                    .ghost()
+                                    .label("全屏")
+                                    .tooltip("选择当前屏幕 (A)")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.selection = Some(Rect::new(
+                                            0.,
+                                            0.,
+                                            this.display.image.width() as f32,
+                                            this.display.image.height() as f32,
+                                        ));
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 Button::new("confirm")
                                     .small()
                                     .primary()
                                     .label(match self.mode {
-                                        CaptureMode::Screenshot => "编辑选区 ↵",
-                                        CaptureMode::Long => "开始长截图 ↵",
-                                        CaptureMode::Gif => "设置录制 ↵",
+                                        CaptureMode::Screenshot => "编辑选区",
+                                        CaptureMode::Long => "开始长截图",
+                                        CaptureMode::Gif => "设置录制",
                                     })
+                                    .tooltip("确认选区 (Enter)")
                                     .on_click(cx.listener(|this, _, w, cx| this.finish(w, cx))),
                             ),
                     ),
@@ -640,20 +724,27 @@ impl Render for Overlay {
                         .child(editor.clone()),
                 );
             }
-            return root.children(self.resize_handles(ui, cx)).child(
-                div()
-                    .absolute()
-                    .left(px(ui.x))
-                    .top(px((ui.y - 22.).max(0.)))
-                    .text_xs()
-                    .bg(rgb(0x15212d))
-                    .text_color(rgb(0xffffff))
-                    .px_1()
-                    .child(guide),
-            );
+            return root.children(self.resize_handles(ui, cx));
         }
         if self.selection.is_some() && self.anchor.is_none() {
-            root = root.children(self.resize_handles(ui, cx));
+            return root.children(self.resize_handles(ui, cx));
+        }
+        if self.anchor.is_none() && f32::from(s.width) >= 340. {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top_4()
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        design::image_label()
+                            .px_3()
+                            .py_1()
+                            .child("拖动框选 / 单击选窗 / Esc 取消"),
+                    ),
+            );
         }
         let x = (self.hover.x.max(0.) as u32).min(self.display.image.width() - 1);
         let y = (self.hover.y.max(0.) as u32).min(self.display.image.height() - 1);
@@ -666,23 +757,31 @@ impl Render for Overlay {
         )
         .to_image();
         let zoom = image::imageops::resize(&crop, 104, 104, image::imageops::FilterType::Nearest);
-        let left = (self.hover.x * sx + 24.)
-            .min(f32::from(s.width) - 120.)
-            .max(8.);
-        let top = (self.hover.y * sy + 24.)
-            .min(f32::from(s.height) - 145.)
-            .max(8.);
+        let beside = |cursor: f32, viewport: f32, extent: f32| {
+            if cursor + 24. + extent <= viewport - 8. {
+                cursor + 24.
+            } else {
+                (cursor - extent - 16.).max(8.)
+            }
+        };
+        let left = beside(self.hover.x * sx, f32::from(s.width), 120.);
+        let top = beside(self.hover.y * sy, f32::from(s.height), 150.);
         root.child(
-            div()
+            design::image_label()
                 .absolute()
                 .left(px(left))
                 .top(px(top))
                 .v_flex()
-                .bg(rgb(0x15212d))
-                .text_color(rgb(0xf5fafc))
+                .items_center()
                 .p_1()
                 .child(img(app::texture(&zoom)).w(px(104.)).h(px(104.)))
-                .child(div().text_xs().child("C 复制 HEX")),
+                .child(format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2]))
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .child(format!("RGB {}, {}, {}", color[0], color[1], color[2])),
+                )
+                .child(div().text_size(px(10.)).child("C 复制色值")),
         )
     }
 }
@@ -717,6 +816,7 @@ mod tests {
                 crate::app::texture(&display.image),
                 CaptureMode::Screenshot,
                 snip_core::geometry::Point::new(-100., 40.),
+                true,
                 cx,
             )
             .unwrap()
@@ -825,6 +925,7 @@ mod tests {
                 |w, cx| {
                     let image = std::sync::Arc::new(image::RgbaImage::new(1600, 1200));
                     let view = cx.new(|cx| Overlay {
+                        active: true,
                         display: snip_platform::CapturedDisplay {
                             id: 0,
                             map: DisplayMap {

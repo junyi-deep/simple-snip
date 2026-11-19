@@ -7,6 +7,7 @@ use gpui_kit::{
         color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
         input::{Input, InputEvent, InputState},
         progress::Progress,
+        scroll::ScrollableElement,
         switch::Switch,
         *,
     },
@@ -53,6 +54,7 @@ fn merge_settings(mut current: Config, baseline: &Config, draft: &Config) -> Con
     merge!(
         show_settings_on_start,
         theme,
+        format,
         save_directory,
         hotkeys,
         gif.fps,
@@ -79,6 +81,7 @@ pub struct Settings {
     show_on_start: bool,
     gif_fps: u32,
     theme: String,
+    format: String,
     save_status: String,
     save_error: bool,
     pending: bool,
@@ -114,6 +117,7 @@ impl Settings {
         Self::build(cx).map(|(handle, _)| handle)
     }
     fn build(cx: &mut App) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
+        crate::ui::sync_system_theme(cx);
         let bounds = Bounds::centered(
             None,
             size(
@@ -134,6 +138,7 @@ impl Settings {
             },
             cx,
             |w, cx| {
+                crate::ui::watch_appearance(w);
                 app::prepare_window(w);
                 app::apply_style(
                     w,
@@ -236,6 +241,7 @@ impl Settings {
                         show_on_start: config.show_settings_on_start,
                         gif_fps: config.gif.fps,
                         theme: config.theme.clone(),
+                        format: config.format.clone(),
                         save_status: "修改后自动保存".into(),
                         save_error: false,
                         pending: false,
@@ -420,6 +426,7 @@ impl Settings {
             c.show_settings_on_start = self.show_on_start;
             c.gif.fps = self.gif_fps;
             c.theme = self.theme.clone();
+            c.format = self.format.clone();
             c.save_directory = self.save_path.read(cx).value().to_string().into();
             c.hotkeys.insert(
                 "screenshot".into(),
@@ -508,15 +515,7 @@ impl Settings {
                 cx.global_mut::<Runtime>().config = config.clone();
                 self.baseline = draft;
                 if config.theme != previous.theme {
-                    Theme::change(
-                        if config.theme == "dark" {
-                            ThemeMode::Dark
-                        } else {
-                            ThemeMode::Light
-                        },
-                        None,
-                        cx,
-                    );
+                    crate::ui::apply_theme(&config.theme, cx);
                 }
                 let pins: Vec<_> = cx
                     .global::<Runtime>()
@@ -541,6 +540,9 @@ impl Settings {
                 {
                     self.save_status = format!("已保存；快捷键尚未生效：{error}");
                     self.save_error = true;
+                }
+                if update_hotkeys {
+                    app::refresh_tray(cx);
                 }
                 cx.refresh_windows();
             }
@@ -681,31 +683,43 @@ impl Settings {
         }
     }
 }
-fn row(title: &str, description: &str, control: impl IntoElement) -> Div {
-    div()
-        .h_flex()
-        .items_center()
-        .justify_between()
-        .gap_6()
-        .py_3()
-        .border_b_1()
-        .border_color(rgb(0xdde3e8))
-        .child(
-            div()
-                .v_flex()
-                .gap_1()
-                .flex_1()
-                .min_w_0()
-                .whitespace_normal()
-                .child(title.to_string())
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x596977))
-                        .child(description.to_string()),
-                ),
-        )
-        .child(div().flex_shrink_0().child(control))
+#[derive(IntoElement)]
+struct SettingsRow {
+    title: SharedString,
+    description: SharedString,
+    control: AnyElement,
+}
+
+fn row(title: &str, description: &str, control: impl IntoElement) -> SettingsRow {
+    SettingsRow {
+        title: title.to_string().into(),
+        description: description.to_string().into(),
+        control: control.into_any_element(),
+    }
+}
+
+impl RenderOnce for SettingsRow {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        div()
+            .h_flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .py_3()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .v_flex()
+                    .gap(px(2.))
+                    .flex_1()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .child(div().font_weight(FontWeight::MEDIUM).child(self.title))
+                    .child(crate::ui::detail(cx).child(self.description)),
+            )
+            .child(div().flex_shrink_0().child(self.control))
+    }
 }
 impl Render for Settings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -723,29 +737,77 @@ impl Render for Settings {
             "外观",
             "关于、更新与权限",
         ];
+        let descriptions = [
+            "管理启动行为和图片内提示。",
+            "选择截图默认操作与标注样式。",
+            "设置浮动图片的边框与交互。",
+            "调整滚动截图的采集与拼接。",
+            "设置区域录制的时长与画质。",
+            "配置设备上的文字识别。",
+            "调整鼠标轨迹和录制时的可见性。",
+            "设置全局快捷键。留空即可停用。",
+            "管理保存位置、格式及最近导出。",
+            "为设置窗口、工具栏和菜单选择外观。",
+            "查看版本、软件更新与系统权限。",
+        ];
+        let icons = [
+            "settings-2",
+            "frame",
+            "square",
+            "gallery-vertical-end",
+            "play",
+            "case-sensitive",
+            "asterisk",
+            "square-terminal",
+            "folder-closed",
+            "palette",
+            "info",
+        ];
         let mut nav = div()
             .id("settings-navigation")
             .v_flex()
-            .w(px(200.))
+            .w(px(188.))
             .flex_shrink_0()
             .min_h_0()
-            .overflow_y_scroll()
-            .bg(cx.theme().muted)
+            .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
             .p_3()
-            .gap_1()
+            .gap(px(2.))
             .child(
                 div()
-                    .text_lg()
+                    .text_size(px(15.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .px_2()
-                    .py_4()
+                    .pt_3()
+                    .pb_4()
                     .child("Simple Snip"),
             );
         for (i, name) in names.iter().enumerate() {
             nav = nav.child(
                 Button::new(("section", i))
-                    .label(*name)
-                    .when(self.section == i, |b| b.primary())
+                    .ghost()
+                    .w_full()
+                    .h(px(32.))
+                    .tab_stop(true)
+                    .accessibility_label(*name)
+                    .child(
+                        div()
+                            .h_flex()
+                            .flex_1()
+                            .items_center()
+                            .gap_2()
+                            .px_1()
+                            .child(
+                                Icon::default()
+                                    .path(format!("icons/{}.svg", icons[i]))
+                                    .size(px(15.)),
+                            )
+                            .child(div().min_w_0().text_ellipsis().child(*name)),
+                    )
+                    .selected(self.section == i)
+                    .when(self.section == i, |b| b.font_weight(FontWeight::SEMIBOLD))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.section = i;
                         cx.notify();
@@ -753,32 +815,35 @@ impl Render for Settings {
             );
         }
         let mut content = div()
-            .id("settings-content")
+            .id(("settings-content", self.section))
             .v_flex()
-            .gap_3()
+            .gap(px(crate::ui::SPACE))
             .flex_1()
             .min_w_0()
             .min_h_0()
             .whitespace_normal()
-            .overflow_y_scroll()
             .p_6()
             .child(
                 div()
-                    .text_2xl()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .v_flex()
+                    .gap_1()
                     .mb_3()
-                    .child(names[self.section]),
+                    .child(
+                        div()
+                            .text_size(px(crate::ui::HEADING))
+                            .line_height(px(28.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(names[self.section]),
+                    )
+                    .child(crate::ui::detail(cx).child(descriptions[self.section])),
             )
             .when(self.section == 10 || self.update_busy, |d| {
                 d.child(
-                    div()
+                    crate::ui::panel(cx)
                         .id("update-status")
                         .v_flex()
                         .gap_2()
                         .p_3()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded_md()
                         .child(self.update_status.clone())
                         .when(self.update_busy || self.update_progress.is_some(), |d| {
                             d.child(
@@ -802,6 +867,7 @@ impl Render for Settings {
                             .gap_2()
                             .child(
                                 Switch::new("annotation-toast")
+                                    .accessibility_label("图片内提示")
                                     .checked(toast_enabled)
                                     .on_click(move |enabled, _, cx| {
                                         crate::editor::set_toast_preferences(
@@ -813,6 +879,7 @@ impl Render for Settings {
                             )
                             .children([1000, 2000, 3000, 5000].into_iter().map(|delay| {
                                 Button::new(("toast-delay", delay))
+                                    .small()
                                     .label(format!("{} 秒", delay / 1000))
                                     .selected(toast_delay == delay)
                                     .on_click(move |_, _, cx| {
@@ -828,6 +895,7 @@ impl Render for Settings {
                         "启动时显示偏好设置",
                         "关闭窗口后继续驻留菜单栏 / 系统托盘",
                         Switch::new("show-settings")
+                            .accessibility_label("启动时显示偏好设置")
                             .checked(self.show_on_start)
                             .on_click(cx.listener(|v, checked, _, cx| {
                                 v.show_on_start = *checked;
@@ -842,27 +910,49 @@ impl Render for Settings {
                             .child(
                                 Button::new("capture")
                                     .primary()
-                                    .label("区域截图 F1")
+                                    .label(crate::ui::hotkey_label(
+                                        "区域截图",
+                                        config.hotkeys.get("screenshot"),
+                                    ))
                                     .on_click(|_, _, cx| app::command(cx, Command::Capture)),
                             )
                             .child(
                                 Button::new("paste")
-                                    .label("剪贴板贴图 F3")
+                                    .label(crate::ui::hotkey_label(
+                                        "剪贴板贴图",
+                                        config.hotkeys.get("paste_image"),
+                                    ))
                                     .on_click(|_, _, cx| app::command(cx, Command::Paste)),
                             ),
                     )
                     .child(
-                        div()
+                        crate::ui::detail(cx)
                             .mt_5()
-                            .text_sm()
                             .child("图片保存在本地。截图、剪贴板与 OCR 不上传网络。"),
                     );
             }
             1 => {
-                content=content.child("拖动创建选区，单击吸附窗口。选区生成后可拖动八个边缘手柄调整宽高；画布聚焦时 Shift + 方向键按 1 像素微调大小。A 选择当前屏幕。").child("编辑器保留原始图像与独立标注；复制和保存时合成。Esc 可取消截图。").child(Button::new("take").primary().label("开始截图").on_click(|_,_,cx|app::command(cx,Command::Capture)));
+                content = content
+                    .child(row(
+                        "框选",
+                        "拖动框选，或单击高亮的窗口。可在框选前跨屏。",
+                        Button::new("take")
+                            .primary()
+                            .label("开始截图")
+                            .on_click(|_, _, cx| app::command(cx, Command::Capture)),
+                    ))
+                    .child(row(
+                        "调整选区",
+                        "拖动选区边缘的手柄，或用 Shift + 方向键微调宽高。",
+                        div(),
+                    ))
+                    .child(
+                        crate::ui::detail(cx)
+                            .mt_2()
+                            .child("A 选择当前屏幕 · Esc 取消"),
+                    );
             }
             2 => {
-                content=content.child("单击贴图选中并显示边框，失焦后隐藏边框。滚轮缩放；Command / Ctrl + 滚轮调整透明度；1 旋转、2 水平翻转、3 垂直翻转；空格编辑；T 切换穿透；双击隐藏；选中后 Esc 关闭（编辑时取消标注）。也可用 Command+W / Ctrl+W，或右键「关闭贴图」。这些操作仅在贴图内生效。").child(div().h_flex().gap_2().child(Button::new("hide").label("隐藏全部").on_click(|_,_,cx|app::command(cx,Command::HidePins))).child(Button::new("show").label("显示全部").on_click(|_,_,cx|app::command(cx,Command::ShowPins))).child(Button::new("restore").primary().label("恢复全部交互").on_click(|_,_,cx|app::command(cx,Command::RestorePins))));
                 content = content
                     .child(row(
                         "选中边框颜色",
@@ -882,24 +972,71 @@ impl Render for Settings {
                         "边框阴影",
                         "只改变桌面外观，不写入图片",
                         Switch::new("pin-shadow")
+                            .accessibility_label("贴图边框阴影")
                             .checked(self.pin_shadow)
                             .on_click(cx.listener(|v, checked, _, cx| {
                                 v.pin_shadow = *checked;
                                 v.save(cx);
                             })),
-                    ));
+                    ))
+                    .child(
+                        div()
+                            .mt_2()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("桌面贴图"),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("hide")
+                                    .label("隐藏全部")
+                                    .on_click(|_, _, cx| app::command(cx, Command::HidePins)),
+                            )
+                            .child(
+                                Button::new("show")
+                                    .label("显示全部")
+                                    .on_click(|_, _, cx| app::command(cx, Command::ShowPins)),
+                            )
+                            .child(
+                                Button::new("restore")
+                                    .label("恢复全部交互")
+                                    .on_click(|_, _, cx| app::command(cx, Command::RestorePins)),
+                            ),
+                    )
+                    .child(crate::ui::detail(cx).mt_2().child(
+                        "单击选中，滚轮缩放，空格标注，T 切换穿透。更多操作可在贴图上右击查看。",
+                    ))
+                    .child(
+                        crate::ui::detail(cx)
+                            .child("1 旋转 · 2 水平翻转 · 3 垂直翻转 · Esc 关闭（编辑时取消）"),
+                    );
             }
             3 => {
-                content=content.child("框选稳定内容，避开固定页头。选择后自动检测左右或上下滚动，请缓慢、小幅滚动；在区域右下控制栏暂停、继续、自动向下滚动或完成编辑。匹配异常会保留已有结果，可回滚重试。内存预算 256 MiB。").child(Button::new("long").primary().label("选择长截图区域").on_click(|_,_,cx|app::command(cx,Command::LongCapture)));
+                content =
+                    content
+                        .child(row(
+                            "滚动采集",
+                            "框选内容后，缓慢、小幅地水平或垂直滚动。",
+                            Button::new("long")
+                                .primary()
+                                .label("选择区域")
+                                .on_click(|_, _, cx| app::command(cx, Command::LongCapture)),
+                        ))
+                        .child(crate::ui::detail(cx).child(
+                            "避开固定页头。暂停、自动向下滚动和完成操作都在选区旁的控制栏中。",
+                        ));
             }
             4 => {
-                content = content.child("框选后使用区域右下控制栏开始、暂停 / 继续、停止保存或取消。控制栏保持可用，并从录制画面中排除。");
-                let mut rates = div().h_flex().gap_2();
+                let mut rates = div().h_flex().gap_1();
                 for fps in [5, 10, 15, 20, 30] {
                     rates = rates.child(
                         Button::new(("fps", fps as usize))
+                            .small()
                             .label(format!("{fps}"))
-                            .when(self.gif_fps == fps, |b| b.primary())
+                            .selected(self.gif_fps == fps)
                             .on_click(cx.listener(move |v, _, _, cx| {
                                 v.gif_fps = fps;
                                 v.save(cx);
@@ -907,30 +1044,38 @@ impl Render for Settings {
                     );
                 }
                 content = content
-                    .child(row(
-                        "采集帧率",
-                        "默认 15 FPS；编码按实际时间戳计算帧延迟",
-                        rates,
-                    ))
+                    .child(row("采集帧率", "帧 / 秒，默认 15", rates))
                     .child(row(
                         "最长录制（秒）",
                         "1–600，达到上限后自动完成",
-                        div().w_24().child(Input::new(&self.gif_seconds)),
+                        div()
+                            .w_24()
+                            .child(Input::new(&self.gif_seconds).aria_label("最长录制秒数")),
                     ))
                     .child(row(
                         "输出最大宽度",
                         "64–4096 像素，按比例缩小",
-                        div().w_24().child(Input::new(&self.gif_width)),
+                        div()
+                            .w_24()
+                            .child(Input::new(&self.gif_width).aria_label("GIF 最大宽度")),
                     ))
                     .child(
-                        Button::new("gif")
-                            .primary()
-                            .label("选择 GIF 录制区域")
-                            .on_click(|_, _, cx| app::command(cx, Command::Gif)),
+                        div().h_flex().mt_2().child(
+                            Button::new("gif")
+                                .primary()
+                                .label("选择 GIF 录制区域")
+                                .on_click(|_, _, cx| app::command(cx, Command::Gif)),
+                        ),
+                    )
+                    .child(
+                        crate::ui::detail(cx)
+                            .child("框选后可在控制栏开始、暂停或停止。控制栏会从录制画面中排除。"),
                     );
             }
             5 => {
-                content=content.child("使用系统原生离线 OCR。编辑器中点击「识别文字」，在图片上拖选文字后复制；支持跨行选择、全部复制与简单表格 TSV。").child("文字框以原图像素保存。系统识别语言不可用时会显示错误，不会阻塞其他图片操作。").child(Button::new("ocr").primary().label("识别剪贴板图片").on_click(|_,_,cx|app::command(cx,Command::Ocr)));
+                content = content
+                    .child(row("设备上的文字识别", "识别剪贴板中的图片，或在标注工具栏中开始。", Button::new("ocr").primary().label("识别剪贴板图片").on_click(|_, _, cx| app::command(cx, Command::Ocr))))
+                    .child(crate::ui::detail(cx).child("在图片上拖选并复制文字，支持跨行选择，也可导出简单表格为 TSV。图片与文字都在本地处理。"));
             }
             6 => {
                 content = content
@@ -939,6 +1084,7 @@ impl Render for Settings {
                             "在录屏和屏幕共享中显示",
                             "会议演示请共享整个屏幕；本工具截图、长截图和 GIF 采集期间自动排除拖尾",
                             Switch::new("trail-show-in-capture")
+                                .accessibility_label("在录屏和屏幕共享中显示拖尾")
                                 .checked(self.trail_show_in_capture)
                                 .on_click(cx.listener(|v, checked, _, cx| {
                                     v.trail_show_in_capture = *checked;
@@ -950,18 +1096,23 @@ impl Render for Settings {
                         "鼠标拖尾",
                         "独立透明穿透窗口；支持动画与自定义配色",
                         Switch::new("trail")
+                            .accessibility_label("鼠标拖尾")
                             .checked(!cx.global::<Runtime>().trails.is_empty())
                             .on_click(|_, _, cx| app::command(cx, Command::Trail)),
                     ))
                     .child(row(
                         "宽度",
                         "1–60 逻辑像素",
-                        div().w_24().child(Input::new(&self.trail_width)),
+                        div()
+                            .w_24()
+                            .child(Input::new(&self.trail_width).aria_label("鼠标拖尾宽度")),
                     ))
                     .child(row(
                         "生命周期（毫秒）",
                         "100–3000，静止时自然消失",
-                        div().w_24().child(Input::new(&self.trail_life)),
+                        div()
+                            .w_24()
+                            .child(Input::new(&self.trail_life).aria_label("鼠标拖尾生命周期")),
                     ))
                     .child(self.trail_options(cx));
             }
@@ -985,18 +1136,32 @@ impl Render for Settings {
                     .child(row(
                         "区域截图",
                         "留空禁用。例：F1、Alt+Shift+S",
-                        div().w_48().child(Input::new(&self.screenshot_key)),
+                        div()
+                            .w_48()
+                            .child(Input::new(&self.screenshot_key).aria_label("区域截图快捷键")),
                     ))
                     .child(row(
                         "剪贴板贴图",
                         "留空禁用。例：F3、Alt+Shift+P",
-                        div().w_48().child(Input::new(&self.paste_key)),
+                        div()
+                            .w_48()
+                            .child(Input::new(&self.paste_key).aria_label("剪贴板贴图快捷键")),
                     ));
                 for (name, input) in &self.optional {
+                    let label = match name.as_str() {
+                        "long_capture" => "长截图",
+                        "gif" => "GIF 录制",
+                        "ocr" => "文字识别",
+                        "mouse_trail" => "鼠标拖尾",
+                        "settings" => "偏好设置",
+                        _ => name,
+                    };
                     content = content.child(row(
-                        name,
+                        label,
                         "可选全局绑定，默认留空",
-                        div().w_48().child(Input::new(input)),
+                        div()
+                            .w_48()
+                            .child(Input::new(input).aria_label(label.to_owned())),
                     ));
                 }
                 content=content.child(div().text_sm().mt_3().child("macOS 的 F1 / F3 可能执行亮度或 Mission Control。请使用 Fn / Globe，或在键盘设置启用标准功能键，也可以在此改用组合键。"));
@@ -1006,90 +1171,126 @@ impl Render for Settings {
                     .child(row(
                         "保存目录",
                         "截图自动使用带毫秒时间戳的文件名",
-                        div().w(px(300.)).child(Input::new(&self.save_path)),
+                        div()
+                            .w(px(280.))
+                            .max_w_full()
+                            .child(Input::new(&self.save_path).aria_label("保存目录")),
+                    ))
+                    .child(row(
+                        "图片格式",
+                        "适用于普通截图和贴图的保存。",
+                        div().h_flex().gap_1().children(
+                            [("PNG", "png"), ("JPEG", "jpg")]
+                                .into_iter()
+                                .map(|(label, format)| {
+                                    Button::new(format)
+                                        .small()
+                                        .label(label)
+                                        .selected(config.format == format)
+                                        .on_click(cx.listener(move |v, _, _, cx| {
+                                            v.format = format.into();
+                                            v.save(cx);
+                                        }))
+                                }),
+                        ),
                     ))
                     .child(
                         div()
-                            .h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("png")
-                                    .label("PNG")
-                                    .when(config.format == "png", |b| b.primary())
-                                    .on_click(|_, _, cx| {
-                                        cx.global_mut::<Runtime>().config.format = "png".into();
-                                        cx.refresh_windows();
-                                    }),
-                            )
-                            .child(
-                                Button::new("jpg")
-                                    .label("JPEG")
-                                    .when(config.format == "jpg", |b| b.primary())
-                                    .on_click(|_, _, cx| {
-                                        cx.global_mut::<Runtime>().config.format = "jpg".into();
-                                        cx.refresh_windows();
-                                    }),
-                            ),
+                            .mt_3()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("最近保存"),
                     );
-                if let Ok(entries) = std::fs::read_dir(&config.save_directory) {
+                let entries = if crate::is_docs_demo() {
+                    Err(std::io::ErrorKind::NotFound.into())
+                } else {
+                    std::fs::read_dir(&config.save_directory)
+                };
+                if let Ok(entries) = entries {
                     let mut paths: Vec<_> = entries
                         .flatten()
                         .map(|e| e.path())
                         .filter(|p| {
-                            p.extension()
-                                .is_some_and(|e| ["png", "jpg", "gif"].iter().any(|s| e == *s))
+                            p.extension().is_some_and(|e| {
+                                ["png", "jpg", "jpeg", "gif"]
+                                    .iter()
+                                    .any(|s| e.eq_ignore_ascii_case(s))
+                            })
                         })
                         .collect();
                     paths.sort();
                     paths.reverse();
+                    if paths.is_empty() {
+                        content = content.child(
+                            crate::ui::detail(cx)
+                                .child("尚无记录。保存截图或录制后，可从这里将其重新贴到桌面。"),
+                        );
+                    }
                     for (i, path) in paths.into_iter().take(30).enumerate() {
                         let label = path.file_name().unwrap().to_string_lossy().to_string();
-                        content = content.child(Button::new(("history", i)).label(label).on_click(
-                            move |_, _, cx| {
-                                let path = path.clone();
-                                let tx = cx.global::<Runtime>().tx.clone();
-                                std::thread::spawn(move || {
-                                    let event = match image::open(&path) {
-                                        Ok(i) => {
-                                            let prepared = app::PreparedImage::new(
-                                                std::sync::Arc::new(i.into_rgba8()),
-                                            );
-                                            if path
-                                                .extension()
-                                                .is_some_and(|e| e.eq_ignore_ascii_case("gif"))
-                                            {
-                                                app::Event::AnimatedPin(
-                                                    prepared,
-                                                    crate::animation::Source::file(path),
-                                                )
-                                            } else {
-                                                app::Event::Pin(prepared, None)
+                        content = content.child(
+                            Button::new(("history", i))
+                                .ghost()
+                                .w_full()
+                                .accessibility_label(label.clone())
+                                .tooltip(label.clone())
+                                .child(div().flex_1().min_w_0().text_ellipsis().child(label))
+                                .on_click(move |_, _, cx| {
+                                    let path = path.clone();
+                                    let tx = cx.global::<Runtime>().tx.clone();
+                                    std::thread::spawn(move || {
+                                        let event = match image::open(&path) {
+                                            Ok(i) => {
+                                                let prepared = app::PreparedImage::new(
+                                                    std::sync::Arc::new(i.into_rgba8()),
+                                                );
+                                                if path
+                                                    .extension()
+                                                    .is_some_and(|e| e.eq_ignore_ascii_case("gif"))
+                                                {
+                                                    app::Event::AnimatedPin(
+                                                        prepared,
+                                                        crate::animation::Source::file(path),
+                                                    )
+                                                } else {
+                                                    app::Event::Pin(prepared, None)
+                                                }
                                             }
-                                        }
-                                        Err(e) => app::Event::Status(e.to_string()),
-                                    };
-                                    let _ = tx.send_blocking(event);
-                                });
-                            },
-                        ));
+                                            Err(e) => app::Event::Status(e.to_string()),
+                                        };
+                                        let _ = tx.send_blocking(event);
+                                    });
+                                }),
+                        );
                     }
+                } else {
+                    let message = match entries.unwrap_err().kind() {
+                        std::io::ErrorKind::NotFound => {
+                            "尚无记录。第一次保存图片时会创建保存目录。"
+                        }
+                        _ => "无法打开保存目录。请检查路径和读取权限。",
+                    };
+                    content = content.child(crate::ui::detail(cx).child(message));
                 }
             }
             9 => {
-                content = content.child("主题跟随 GPUI Kit。选择后立即应用。");
-                for (label, mode) in [("浅色", ThemeMode::Light), ("深色", ThemeMode::Dark)] {
-                    content = content.child(Button::new(label).label(label).on_click(cx.listener(
-                        move |v, _, _, cx| {
-                            v.theme = if mode == ThemeMode::Dark {
-                                "dark"
-                            } else {
-                                "light"
-                            }
-                            .into();
-                            v.save(cx);
-                        },
-                    )));
-                }
+                content = content.child(row(
+                    "外观模式",
+                    "选择后立即应用，并自动保存。",
+                    div().h_flex().gap_1().children(
+                        [("跟随系统", "system"), ("浅色", "light"), ("深色", "dark")]
+                            .into_iter()
+                            .map(|(label, mode)| {
+                                Button::new(label)
+                                    .small()
+                                    .label(label)
+                                    .selected(self.theme == mode)
+                                    .on_click(cx.listener(move |v, _, _, cx| {
+                                        v.theme = mode.into();
+                                        v.save(cx);
+                                    }))
+                            }),
+                    ),
+                ));
             }
             _ => {
                 let proxy_modes = div().h_flex().gap_1().children(
@@ -1120,17 +1321,23 @@ impl Render for Settings {
                         .child(row(
                             "代理地址",
                             "例如 http://127.0.0.1:7890",
-                            div().w_64().child(Input::new(&self.proxy_url)),
+                            div()
+                                .w_64()
+                                .child(Input::new(&self.proxy_url).aria_label("代理地址")),
                         ))
                         .child(row(
                             "用户名（可选）",
                             "仅用于代理认证",
-                            div().w_64().child(Input::new(&self.proxy_username)),
+                            div()
+                                .w_64()
+                                .child(Input::new(&self.proxy_username).aria_label("代理用户名")),
                         ))
                         .child(row(
                             "密码（可选）",
                             "仅本次运行有效，不保存到磁盘",
-                            div().w_64().child(Input::new(&self.proxy_password)),
+                            div()
+                                .w_64()
+                                .child(Input::new(&self.proxy_password).aria_label("代理密码")),
                         ));
                 }
                 content = content
@@ -1164,16 +1371,31 @@ impl Render for Settings {
                                 cx.open_url("https://github.com/junyi-deep/simple-snip/releases")
                             }),
                     );
-                content = content.child(format!("Simple Snip {}", env!("CARGO_PKG_VERSION")))
-                    .child("Rust · GPUI Kit 0.8.0 · Apache-2.0")
-                    .child(format!("配置：{}",Config::path().display()))
-                    .child(if snip_platform::screen_permission() {"屏幕录制权限预检：已授权"} else {"系统预检尚未确认权限；可重新验证当前应用。"})
-                    .child(Button::new("permission").label("重新验证屏幕录制权限").on_click(|_,_,cx|app::check_screen_permission(cx)))
-                    .when(snip_platform::screen_permission_settings_url().is_some(),|d|d.child(Button::new("permission-settings").label("打开屏幕录制设置").on_click(|_,_,cx| {
-                        if let Some(url)=snip_platform::screen_permission_settings_url(){cx.open_url(url);}
-                    })))
-                    .when(cfg!(target_os = "macos"), |d| d.child("本地 ad-hoc 测试包更新后签名会变化；已开启仍失败时，请在系统设置移除旧条目并重新添加当前应用包。"))
-                    .child("本机实际测试状态见 docs/TESTING.md；Windows 需要原生设备独立验收。");
+                if let Some(url) = snip_platform::screen_permission_settings_url() {
+                    content = content
+                        .child(div().mt_3().font_weight(FontWeight::SEMIBOLD).child("屏幕录制权限"))
+                        .child(crate::ui::detail(cx).child(if snip_platform::screen_permission() {
+                            "系统预检显示已授权。如果仍无法截图，可重新验证。"
+                        } else {
+                            "尚未确认授权。请在系统设置中允许当前这份 Simple Snip 读取屏幕。"
+                        }))
+                        .child(div().h_flex().flex_wrap().gap_2()
+                            .child(Button::new("permission").label("重新验证").on_click(|_, _, cx| app::check_screen_permission(cx)))
+                            .child(Button::new("permission-settings").label("打开系统设置").on_click(move |_, _, cx| cx.open_url(url))))
+                        .child(crate::ui::detail(cx).child("如果本地测试包更新后授权失效，请在系统设置中移除旧条目，再添加当前应用包。"));
+                }
+                content = content
+                    .child(
+                        div()
+                            .mt_3()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(concat!("Simple Snip ", env!("CARGO_PKG_VERSION"))),
+                    )
+                    .child(crate::ui::detail(cx).child("开源许可：Apache 2.0"))
+                    .child(
+                        crate::ui::detail(cx)
+                            .child(format!("配置文件：{}", Config::path().display())),
+                    );
             }
         }
         div()
@@ -1181,7 +1403,8 @@ impl Render for Settings {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .text_sm()
+            .text_size(px(crate::ui::BODY))
+            .line_height(px(19.))
             .child(
                 div()
                     .h_flex()
@@ -1189,8 +1412,12 @@ impl Render for Settings {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(nav)
-                    .child(content),
+                    .child(nav.overflow_y_scrollbar())
+                    .child(
+                        content
+                            .overflow_y_scrollbar()
+                            .id(("settings-scroll", self.section)),
+                    ),
             )
             .child(
                 div()
@@ -1203,11 +1430,13 @@ impl Render for Settings {
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(
-                        div()
+                        crate::ui::detail(cx)
                             .flex_1()
                             .min_w_0()
                             .whitespace_normal()
-                            .when(self.save_error, |d| d.text_color(cx.theme().danger))
+                            .when(self.save_error, |d| {
+                                d.text_color(crate::ui::danger_text(cx))
+                            })
                             .child(self.save_status.clone()),
                     ),
             )
@@ -1348,6 +1577,27 @@ mod tests {
                 assert_eq!(cx.global::<Runtime>().config.trail.show_in_capture, enabled)
             });
         }
+    }
+
+    #[gpui_kit::test]
+    fn appearance_and_export_format_apply_and_survive_reloading(cx: &mut TestAppContext) {
+        use gpui_kit::component::ActiveTheme;
+        let (_handle, view, directory) = fixture(cx);
+        cx.update(|cx| {
+            crate::ui::install_theme("light", cx);
+            assert!(!cx.theme().is_dark());
+            view.update(cx, |v, cx| {
+                v.theme = "dark".into();
+                v.format = "jpg".into();
+                v.save(cx);
+            });
+            assert!(cx.theme().is_dark());
+            assert_eq!(cx.global::<Runtime>().config.format, "jpg");
+        });
+        let (loaded, error) = Config::load(&directory.path().join("config.toml"));
+        assert!(error.is_none());
+        assert_eq!(loaded.theme, "dark");
+        assert_eq!(loaded.format, "jpg");
     }
 
     #[gpui_kit::test]

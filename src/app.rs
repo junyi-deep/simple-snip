@@ -89,11 +89,15 @@ impl PreparedCapture {
     }
 }
 struct CaptureNavigation {
-    frames: Vec<(CapturedDisplay, Arc<RenderImage>)>,
+    surfaces: Vec<CaptureSurface>,
     current: usize,
-    mode: CaptureMode,
-    overlay: Entity<Overlay>,
     _tracking: Option<Task<()>>,
+}
+struct CaptureSurface {
+    id: u32,
+    desktop: Rect,
+    window: AnyWindowHandle,
+    overlay: Entity<Overlay>,
 }
 impl Global for CaptureNavigation {}
 /// Pixel conversion is CPU work; prepare it on the capture/clipboard worker.
@@ -492,14 +496,8 @@ pub fn start(cx: &mut App, smoke_test: bool) {
         }
     })
     .detach();
-    let theme = match cx.global::<Runtime>().config.theme.as_str() {
-        "light" => Some(gpui_kit::component::ThemeMode::Light),
-        "dark" => Some(gpui_kit::component::ThemeMode::Dark),
-        _ => None,
-    };
-    if let Some(theme) = theme {
-        gpui_kit::component::Theme::change(theme, None, cx);
-    }
+    let theme = cx.global::<Runtime>().config.theme.clone();
+    crate::ui::install_theme(&theme, cx);
     if cx.global::<Runtime>().config.show_settings_on_start {
         open_settings(cx);
     }
@@ -526,19 +524,26 @@ fn tray_icon() -> gpui_tray::Icon {
     builder.build().expect("valid built-in icon")
 }
 fn menu(cx: &mut App) -> Vec<MenuItem> {
+    let hotkeys = &cx.global::<Runtime>().config.hotkeys;
     let active = cx
         .global::<Runtime>()
         .recordings
         .iter()
         .any(|c| !c.done.load(std::sync::atomic::Ordering::Relaxed));
     vec![
-        MenuItem::action("区域截图    F1", Capture),
+        MenuItem::action(
+            crate::ui::hotkey_label("区域截图", hotkeys.get("screenshot")),
+            Capture,
+        ),
         MenuItem::action("长截图…", LongCapture),
         MenuItem::action("GIF 录制…", Gif),
         MenuItem::action("暂停 / 继续当前录制", RecordingPause).disabled(!active),
         MenuItem::action("停止录制", RecordingStop).disabled(!active),
         MenuItem::action("取消当前录制", RecordingCancel).disabled(!active),
-        MenuItem::action("剪贴板贴图    F3", Paste),
+        MenuItem::action(
+            crate::ui::hotkey_label("剪贴板贴图", hotkeys.get("paste_image")),
+            Paste,
+        ),
         MenuItem::action("识别剪贴板图片文字…", Ocr),
         MenuItem::separator(),
         MenuItem::action("隐藏所有贴图", HidePins),
@@ -943,10 +948,28 @@ fn open_capture_session(
     mode: CaptureMode,
     cx: &mut App,
 ) -> anyhow::Result<()> {
-    let (display, texture) = prepared.frames[prepared.initial].clone();
-    let (handle, overlay) = Overlay::open_prepared(display, texture, mode, prepared.cursor, cx)?;
-    cx.global_mut::<Runtime>().overlays.push(handle);
-    let tracking = (prepared.frames.len() > 1).then(|| {
+    let mut surfaces = Vec::with_capacity(prepared.frames.len());
+    for (index, (display, texture)) in prepared.frames.into_iter().enumerate() {
+        let id = display.id;
+        let desktop = display.map.desktop;
+        let initial = index == prepared.initial;
+        match Overlay::open_prepared(display, texture, mode, prepared.cursor, initial, cx) {
+            Ok((window, overlay)) => {
+                cx.global_mut::<Runtime>().overlays.push(window);
+                surfaces.push(CaptureSurface {
+                    id,
+                    desktop,
+                    window,
+                    overlay,
+                });
+            }
+            Err(error) => {
+                close_overlays(cx);
+                return Err(error);
+            }
+        }
+    }
+    let tracking = (surfaces.len() > 1).then(|| {
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
@@ -956,7 +979,10 @@ fn open_capture_session(
                     let Some(capture) = cx.try_global::<CaptureNavigation>() else {
                         return false;
                     };
-                    if capture.overlay.read(cx).can_switch_display()
+                    if capture.surfaces[capture.current]
+                        .overlay
+                        .read(cx)
+                        .can_switch_display()
                         && let Ok(cursor) = snip_platform::cursor_position()
                     {
                         switch_capture_display(cursor, cx);
@@ -969,10 +995,8 @@ fn open_capture_session(
         })
     });
     cx.set_global(CaptureNavigation {
-        frames: prepared.frames,
+        surfaces,
         current: prepared.initial,
-        mode,
-        overlay,
         _tracking: tracking,
     });
     Ok(())
@@ -982,48 +1006,55 @@ fn switch_capture_display(cursor: ImagePoint, cx: &mut App) {
     let Some(capture) = cx.try_global::<CaptureNavigation>() else {
         return;
     };
-    if !capture.overlay.read(cx).can_switch_display()
-        || capture.frames[capture.current]
-            .0
-            .map
-            .desktop
-            .contains(cursor)
-    {
+    if capture.surfaces[capture.current].desktop.contains(cursor) {
         return;
     }
     let Some(next) = capture
-        .frames
+        .surfaces
         .iter()
-        .position(|(display, _)| display.map.desktop.contains(cursor))
+        .find(|surface| surface.desktop.contains(cursor))
     else {
         return;
     };
-    let [old] = cx.global::<Runtime>().overlays.as_slice() else {
-        return;
-    };
-    let old = *old;
-    let mode = capture.mode;
-    let (display, texture) = capture.frames[next].clone();
-    // Park the old overlay before presenting the new display, including when
-    // the native window pool can reuse the same handle on macOS.
-    if let Err(error) = old.update(cx, |_, w, cx| {
-        crate::window_pool::park(crate::window_pool::Role::Capture, w, cx);
+    let (id, window, overlay) = (next.id, next.window, next.overlay.clone());
+    if let Err(error) = window.update(cx, |_, w, cx| {
+        if claim_capture_display(id, cx) {
+            overlay.update(cx, |view, cx| view.activate_at(cursor, w, cx));
+        }
     }) {
-        tracing::warn!("无法切换截图窗口: {error}");
-        return;
+        close_overlays(cx);
+        status(cx, format!("无法切换截图屏幕：{error}"));
     }
-    match Overlay::open_prepared(display, texture, mode, cursor, cx) {
-        Ok((handle, overlay)) => {
-            cx.global_mut::<Runtime>().overlays[0] = handle;
-            let capture = cx.global_mut::<CaptureNavigation>();
-            capture.current = next;
-            capture.overlay = overlay;
-        }
-        Err(error) => {
-            cx.global_mut::<Runtime>().overlays.clear();
-            close_overlays(cx);
-            status(cx, format!("无法切换截图屏幕：{error}"));
-        }
+}
+
+pub(crate) fn claim_capture_display(id: u32, cx: &mut App) -> bool {
+    let Some(capture) = cx.try_global::<CaptureNavigation>() else {
+        return false;
+    };
+    let Some(next) = capture.surfaces.iter().position(|surface| surface.id == id) else {
+        return false;
+    };
+    if next == capture.current {
+        return true;
+    }
+    let old = capture.surfaces[capture.current].overlay.clone();
+    if !old.read(cx).can_switch_display() {
+        return false;
+    }
+    cx.global_mut::<CaptureNavigation>().current = next;
+    old.update(cx, |view, cx| view.deactivate(cx));
+    true
+}
+
+pub(crate) fn restore_capture_focus(cx: &mut App) {
+    if let Some(capture) = cx.try_global::<CaptureNavigation>() {
+        let _ = capture.surfaces[capture.current]
+            .window
+            .update(cx, |_, w, _| {
+                if !w.is_window_active() {
+                    w.activate_window();
+                }
+            });
     }
 }
 
@@ -1593,8 +1624,11 @@ mod capture_tests {
                 cx,
             );
             let capture = cx.global::<CaptureNavigation>();
-            assert_eq!(capture.overlay.read(cx).display_id(), 1);
-            capture.overlay.downgrade()
+            assert_eq!(capture.surfaces.len(), 2);
+            assert_eq!(capture.surfaces[0].overlay.read(cx).display_id(), 1);
+            assert!(capture.surfaces[0].overlay.read(cx).is_active());
+            assert!(!capture.surfaces[1].overlay.read(cx).is_active());
+            capture.surfaces[0].overlay.downgrade()
         });
         let window = cx.update(|cx| {
             // A pointer in the gap between monitors leaves the overlay alone.
@@ -1602,12 +1636,20 @@ mod capture_tests {
             assert_eq!(cx.global::<CaptureNavigation>().current, 0);
             switch_capture_display(Point::new(50., 40.), cx);
             let capture = cx.global::<CaptureNavigation>();
-            assert_eq!(capture.overlay.read(cx).display_id(), 2);
-            assert_eq!(cx.global::<Runtime>().overlays.len(), 1);
-            cx.global::<Runtime>().overlays[0]
+            assert_eq!(
+                capture.surfaces[capture.current]
+                    .overlay
+                    .read(cx)
+                    .display_id(),
+                2
+            );
+            assert!(!capture.surfaces[0].overlay.read(cx).is_active());
+            assert!(capture.surfaces[1].overlay.read(cx).is_active());
+            assert_eq!(cx.global::<Runtime>().overlays.len(), 2);
+            capture.surfaces[capture.current].window
         });
         cx.run_until_parked();
-        assert!(first.upgrade().is_none());
+        assert!(first.upgrade().is_some());
         let mut visual = VisualTestContext::from_window(window, cx);
         visual.update(|w, cx| {
             let _ = w.draw(cx);
@@ -1623,7 +1665,7 @@ mod capture_tests {
         visual.simulate_mouse_up(start, MouseButton::Left, Default::default());
         cx.update(|cx| {
             assert!(
-                cx.global::<CaptureNavigation>()
+                cx.global::<CaptureNavigation>().surfaces[1]
                     .overlay
                     .read(cx)
                     .can_switch_display()
@@ -1636,7 +1678,42 @@ mod capture_tests {
             switch_capture_display(Point::new(-100., 40.), cx);
             assert!(cx.global::<Runtime>().overlays.is_empty());
         });
+        cx.run_until_parked();
+        assert!(first.upgrade().is_none());
     }
+    #[gpui_kit::test]
+    fn first_drag_on_passive_display_claims_selection_before_pointer_poll(cx: &mut TestAppContext) {
+        use gpui_kit::{MouseButton, VisualTestContext, point, px};
+        cx.update(gpui_kit::init);
+        let _rx = cx.update(init_test_runtime);
+        let window = cx.update(|cx| {
+            super::open_capture_session(
+                PreparedCapture::at_cursor(displays(), Point::new(-100., 40.)).unwrap(),
+                CaptureMode::Screenshot,
+                cx,
+            )
+            .unwrap();
+            cx.global::<CaptureNavigation>().surfaces[1].window
+        });
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        let a = point(px(20.), px(30.));
+        let b = point(px(100.), px(90.));
+        visual.simulate_mouse_down(a, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(b, Some(MouseButton::Left), Default::default());
+        visual.simulate_mouse_up(b, MouseButton::Left, Default::default());
+        cx.update(|cx| {
+            switch_capture_display(Point::new(-100., 40.), cx);
+            let capture = cx.global::<CaptureNavigation>();
+            assert_eq!(capture.current, 1);
+            assert!(capture.surfaces[1].overlay.read(cx).is_active());
+            assert!(!capture.surfaces[1].overlay.read(cx).can_switch_display());
+            assert!(!capture.surfaces[0].overlay.read(cx).is_active());
+        });
+    }
+
     #[gpui_kit::test]
     fn escape_before_any_mouse_input_closes_capture(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -1664,7 +1741,7 @@ mod capture_tests {
         });
     }
     #[gpui_kit::test]
-    fn capture_results_never_create_parallel_overlays_and_can_restart(cx: &mut TestAppContext) {
+    fn capture_results_never_create_parallel_sessions_and_can_restart(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let _rx = cx.update(init_test_runtime);
         let first = cx.update(|cx| {
@@ -1675,8 +1752,8 @@ mod capture_tests {
                 ),
                 cx,
             );
-            assert_eq!(cx.global::<Runtime>().overlays.len(), 1);
-            cx.global::<Runtime>().overlays[0]
+            assert_eq!(cx.global::<Runtime>().overlays.len(), 2);
+            cx.global::<Runtime>().overlays.clone()
         });
         cx.update(|cx| {
             handle(
@@ -1686,7 +1763,7 @@ mod capture_tests {
                 ),
                 cx,
             );
-            assert_eq!(cx.global::<Runtime>().overlays, vec![first]);
+            assert_eq!(cx.global::<Runtime>().overlays, first);
             crate::app::close_overlays(cx);
         });
         cx.run_until_parked();
@@ -1699,7 +1776,7 @@ mod capture_tests {
                 ),
                 cx,
             );
-            assert_eq!(cx.global::<Runtime>().overlays.len(), 1);
+            assert_eq!(cx.global::<Runtime>().overlays.len(), 2);
             crate::app::close_overlays(cx);
         });
         cx.run_until_parked();

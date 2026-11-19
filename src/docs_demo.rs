@@ -18,10 +18,13 @@ use std::sync::{
 
 pub fn run(cx: &mut App) {
     crate::effects::stop(cx);
-    let mode = std::env::args()
-        .skip_while(|a| a != "--docs-demo")
-        .nth(1)
-        .unwrap_or_else(|| "capture".into());
+    let mut args = std::env::args().skip_while(|a| a != "--docs-demo").skip(1);
+    let mode = args.next().unwrap_or_else(|| "capture".into());
+    let section = args
+        .next()
+        .and_then(|index| index.parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(10);
     let screen = cx
         .displays()
         .into_iter()
@@ -34,6 +37,23 @@ pub fn run(cx: &mut App) {
             let image = smol::unblock(|| make_page(1440, 960)).await?;
             cx.update(|cx| -> anyhow::Result<()> {
                 match mode.as_str() {
+                    "settings-light" | "settings-dark" => {
+                        let (preference, width, height) = if mode == "settings-dark" {
+                            ("dark", 760., 540.)
+                        } else {
+                            ("light", 900., 660.)
+                        };
+                        cx.global_mut::<Runtime>().config.theme = preference.into();
+                        cx.global_mut::<Runtime>().config.save_directory =
+                            "/Example/Simple Snip".into();
+                        crate::ui::apply_theme(preference, cx);
+                        let handle = crate::settings::Settings::open_section(section, cx)?;
+                        handle.update(cx, |_, window, cx| {
+                            window.resize(size(px(width), px(height)));
+                            window.bounds_changed(cx);
+                        })?;
+                        cx.global_mut::<Runtime>().settings = Some(handle);
+                    }
                     "trail" => {
                         cx.global_mut::<Runtime>().config.trail.animation = TrailAnimation::Comet;
                         cx.global_mut::<Runtime>().config.trail.color_mode =
@@ -80,7 +100,7 @@ pub fn run(cx: &mut App) {
                             .pins
                             .insert(pin_id, app::PinRecord { handle, view });
                     }
-                    "gif" => {
+                    "gif" | "long-controls" => {
                         backdrop(image.clone(), bounds, cx)?;
                         let display = snip_platform::CapturedDisplay {
                             id,
@@ -102,7 +122,7 @@ pub fn run(cx: &mut App) {
                         crate::task_toolbar::open(
                             display,
                             Rect::new(260., 180., 640., 360.),
-                            true,
+                            mode == "gif",
                             cx,
                         )?;
                     }

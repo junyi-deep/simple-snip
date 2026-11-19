@@ -1,5 +1,13 @@
 # 实际测试记录
 
+## 2026-11-19：UI 重设计
+
+本机 Apple Silicon 的真实 GPUI 窗口截图、尺寸与待验收项见 [ui-visual-verification.md](ui-visual-verification.md)。模拟双屏回归覆盖启动时两窗口共存、跨屏首拖即取得活动选区、开始框选后锁定、Esc 释放冻结帧。macOS Debug 原生 smoke 通过托盘、置顶/透明贴图、点击穿透恢复、多次创建与回收和采集控制栏生命周期。额外运行 `cargo test --locked -p snip-platform --test native -- --ignored`，3 项通过：真实桌面连续采集、Retina 区域边界和中英混合 OCR。未记录真实桌面图像。
+
+`cargo fmt --all -- --check`、`cargo check --locked --workspace`、`cargo clippy --locked --workspace --all-targets -- -D warnings`、`cargo test --locked --workspace`（119 项常规测试通过）与 macOS ARM64 Release 构建通过。`block 0.1.6` 仍由工具链报告既有的未来兼容警告。
+
+尝试在 macOS 执行 `cargo check --locked --workspace --target x86_64-pc-windows-msvc`，锁定依赖 `gpui-pre` 的资源编译在 `NotAttempted("llvm-rc")` 处停止；本次没有 Windows 构建或桌面验收结果。
+
 ## 2026-11-01：本地 Debug 录屏授权身份修复
 
 用户反馈当前 Debug `.app` 已添加录屏开关但仍被拒绝。本机只读检查确认代码签名有效、签名方式为 ad-hoc；系统 tccd 日志明确显示 `Failed to match existing code requirement`，旧授权记录绑定的 cdhash 与当前构建不一致。不能将开关 on 当作当前代码已经获得授权，也不是通过绕过预检修复。

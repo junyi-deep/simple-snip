@@ -26,6 +26,7 @@ pub fn open<V: Render>(
     cx: &mut App,
     build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
 ) -> anyhow::Result<(AnyWindowHandle, Entity<V>)> {
+    crate::ui::sync_system_theme(cx);
     #[cfg(target_os = "windows")]
     if role == Role::Capture {
         let candidates = cx
@@ -116,6 +117,7 @@ pub fn open<V: Render>(
         ..options
     };
     let result = gpui_kit::open_window(options, cx, |w, cx| {
+        crate::ui::watch_appearance(w);
         #[cfg(target_os = "windows")]
         if let Ok(raw) = crate::app::raw(w) {
             // No image has been mounted or presented yet.

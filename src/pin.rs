@@ -626,7 +626,11 @@ impl Render for PinView {
                                             (bounds.size.height - thickness).max(px(0.)),
                                         ),
                                     ),
-                                    rgb(if highlighted { 0x00b7ff } else { border }),
+                                    rgb(if highlighted {
+                                        crate::ui::IMAGE_FOCUS
+                                    } else {
+                                        border
+                                    }),
                                     BorderStyle::Solid,
                                 )
                                 .border_widths(thickness),
@@ -668,16 +672,12 @@ impl Render for PinView {
             .p(px(margin))
             .child(frame)
             .children(notice.map(|text| {
-                div()
+                crate::ui::image_label()
                     .absolute()
                     .bottom_2()
                     .right_2()
                     .px_2()
                     .py_1()
-                    .rounded_sm()
-                    .bg(rgba(0x15212de8))
-                    .text_color(rgb(0xffffff))
-                    .text_xs()
                     .child(text)
             }))
             .on_mouse_down(

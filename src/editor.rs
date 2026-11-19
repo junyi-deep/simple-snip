@@ -1,4 +1,5 @@
 use crate::app::{self, Event, Runtime};
+use crate::ui as design;
 use gpui_kit::{
     component::{
         button::*,
@@ -1374,7 +1375,7 @@ impl EditorView {
         } else {
             0.
         };
-        base.max(options) + 8.
+        base.max(options) + 10.
     }
     fn host_height(&self, cx: &App) -> f32 {
         self.toolbar_height()
@@ -1385,7 +1386,7 @@ impl EditorView {
             }
     }
     fn toolbar_height(&self) -> f32 {
-        34. + if self.tool != Tool::Select || self.selected.is_some() || self.ocr.is_some() {
+        36. + if self.tool != Tool::Select || self.selected.is_some() || self.ocr.is_some() {
             38.
         } else {
             0.
@@ -1441,24 +1442,24 @@ impl EditorView {
             .id("annotation-tools-strip")
             .h_flex()
             .gap(px(1.))
+            .w_full()
             .justify_start()
             .flex_nowrap()
             .overflow_x_scroll();
         if let Some((display, rect)) = self.capture_context.clone() {
             strip = strip.child(capture_mode_button(display, rect));
+            strip = strip.child(design::divider(cx));
         }
         for (i, (label, tool)) in tools.into_iter().enumerate() {
+            if matches!(tool, Tool::Rectangle | Tool::Pen | Tool::Mosaic) {
+                strip = strip.child(design::divider(cx));
+            }
             strip = strip.child(
                 Button::new(("tool", i))
-                    .xsmall()
+                    .small()
                     .flex_shrink_0()
                     .ghost()
                     .icon(tool_icon(tool))
-                    .child(
-                        div()
-                            .text_size(px(9.))
-                            .child(["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "B", "E"][i]),
-                    )
                     .when(tool == Tool::Number, |b| {
                         b.label(self.next_number.to_string())
                     })
@@ -1502,30 +1503,37 @@ impl EditorView {
             ("完成编辑", "done"),
             ("取消编辑", "close"),
         ];
-        strip = strip.child(div().h_5().w(px(1.)).mx_1().bg(cx.theme().border));
+        strip = strip.child(design::divider(cx));
         for (i, (label, name)) in actions.into_iter().enumerate() {
             if name == "done" && matches!(self.host, EditorHost::Capture) {
                 continue;
             }
+            if name == "ocr" || name == "save" {
+                strip = strip.child(design::divider(cx));
+            }
             strip = strip.child(
                 Button::new(("action", i))
-                    .xsmall()
+                    .small()
                     .flex_shrink_0()
                     .ghost()
+                    .when(
+                        name == "copy" && matches!(self.host, EditorHost::Capture),
+                        |b| b.primary(),
+                    )
                     .icon(action_icon(name))
                     .accessibility_label(label)
                     .tooltip(format!(
-                        "{} · {}",
+                        "{} ({})",
                         label,
                         match name {
-                            "undo" => "Ctrl/Cmd+Z",
-                            "redo" => "Ctrl/Cmd+Shift+Z",
-                            "save" => "Ctrl/Cmd+S",
-                            "copy" => "Ctrl/Cmd+C",
-                            "close" => "Esc",
-                            "done" => "Space",
-                            "ocr" => "O",
-                            _ => "P",
+                            "undo" => design::shortcut("Z", "⌘Z"),
+                            "redo" => design::shortcut("Shift+Z", "⇧⌘Z"),
+                            "save" => design::shortcut("S", "⌘S"),
+                            "copy" => design::shortcut("C", "⌘C"),
+                            "close" => "Esc".into(),
+                            "done" => "Space".into(),
+                            "ocr" => "O".into(),
+                            _ => "P".into(),
                         }
                     ))
                     .on_click(cx.listener(move |v, _, _, cx| {
@@ -1555,11 +1563,10 @@ impl EditorView {
         }
         let width = self
             .toolbar_width()
-            .min(f32::from(w.viewport_size().width) - 16.)
-            .max(260.);
+            .min((f32::from(w.viewport_size().width) - 16.).max(1.));
         let has_options =
             self.tool != Tool::Select || self.selected.is_some() || self.ocr.is_some();
-        let height = 34. + if has_options { 38. } else { 0. };
+        let height = self.toolbar_height();
         let image_w = f32::from(self.view_size.width);
         let image_h = f32::from(self.view_size.height);
         let ox = f32::from(self.origin.x);
@@ -1577,7 +1584,7 @@ impl EditorView {
         );
         let global_x = placement.x;
         let global_y = placement.y;
-        let mut panel = div()
+        let mut panel = design::panel(cx)
             .id("floating-annotation-toolbar")
             .when(matches!(self.host, EditorHost::Capture), |d| {
                 d.absolute()
@@ -1590,17 +1597,17 @@ impl EditorView {
             .items_start()
             .gap_1()
             .p_1()
-            .rounded_md()
-            .bg(cx.theme().popover)
-            .text_color(cx.theme().popover_foreground)
-            .shadow_md()
+            .shadow_sm()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(strip);
         if self.ocr.is_some() {
             panel =
                 panel.child(
                     div()
+                        .id("annotation-ocr-options")
                         .h_flex()
+                        .w_full()
+                        .overflow_x_scroll()
                         .gap_1()
                         .child(
                             Button::new("selection-text")
@@ -1629,7 +1636,12 @@ impl EditorView {
                                     cx.notify();
                                 })),
                         )
-                        .child(div().flex_1().child(Input::new(&self.text).xsmall()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(80.))
+                                .child(Input::new(&self.text).xsmall().aria_label("修正识别文字")),
+                        )
                         .child(Button::new("correct").xsmall().label("修正行").on_click(
                             cx.listener(|v, _, _, cx| {
                                 let index = v.ocr_start.map_or(0, |(line, _)| line);
@@ -1937,17 +1949,17 @@ impl Render for EditorView {
                     }
                     border.line_to(corners[0]);
                     if let Ok(path) = border.build() {
-                        window.paint_path(path, rgb(0x1688ff));
+                        window.paint_path(path, rgb(design::IMAGE_FOCUS));
                     }
                     for &(_, p) in &selected_handles {
                         let p = map(p);
                         window.paint_quad(
                             fill(
                                 Bounds::new(p - point(px(2.5), px(2.5)), size(px(5.), px(5.))),
-                                rgb(0xffffff),
+                                rgb(design::IMAGE_HANDLE),
                             )
                             .border_widths(px(1.))
-                            .border_color(rgb(0x1688ff)),
+                            .border_color(rgb(design::IMAGE_FOCUS)),
                         );
                     }
                 }
@@ -1962,9 +1974,9 @@ impl Render for EditorView {
                                 (i, j) >= a && (i, j) <= b
                             });
                             let color = if selected {
-                                rgba(0x2597f785)
+                                rgba(design::OCR_SELECTED)
                             } else if hover == Some((i, j)) {
-                                rgba(0x2597f74c)
+                                rgba(design::OCR_HOVER)
                             } else {
                                 rgba(0x00000000)
                             };
@@ -2029,9 +2041,11 @@ impl Render for EditorView {
             }))
             .size_full()
             .child(
-                img(self.texture.clone())
-                    .size_full()
-                    .object_fit(ObjectFit::Fill),
+                div().absolute().inset_0().overflow_hidden().child(
+                    img(self.texture.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Fill),
+                ),
             )
             .child(canvas)
             .on_mouse_down(
@@ -2126,8 +2140,12 @@ impl Render for EditorView {
                         move |_, _, w, cx| {
                             if let Some(text_bounds) = text_frame_bounds(input.read(cx)) {
                                 w.paint_quad(
-                                    outline(text_bounds, rgb(0x1688ff), BorderStyle::Solid)
-                                        .border_widths(px(1.)),
+                                    outline(
+                                        text_bounds,
+                                        rgb(design::IMAGE_FOCUS),
+                                        BorderStyle::Solid,
+                                    )
+                                    .border_widths(px(1.)),
                                 );
                             }
                             if input.read(cx).focus_handle(cx).is_focused(w)
@@ -2161,14 +2179,10 @@ impl Render for EditorView {
                         .top(px(4.))
                         .left(px(8.))
                         .right(px(8.))
-                        .text_xs()
-                        .text_color(rgb(0xffffff))
                         .child(
-                            div()
+                            design::image_label()
                                 .px_2()
                                 .py_1()
-                                .rounded_sm()
-                                .bg(rgba(0x202020dc))
                                 .child(self.message.clone()),
                         ),
                 )
@@ -2221,7 +2235,7 @@ fn text_frame_bounds(input: &InputState) -> Option<Bounds<Pixels>> {
 #[inline(never)]
 fn capture_mode_button(display: CapturedDisplay, rect: Rect) -> AnyElement {
     Button::new("capture-mode")
-        .xsmall()
+        .small()
         .flex_shrink_0()
         .label("截图 ▾")
         .dropdown_menu(move |menu, _, _| {
@@ -2304,42 +2318,35 @@ fn arrow_style_button(editor: WeakEntity<EditorView>) -> AnyElement {
         .into_any_element()
 }
 
-fn svg_icon(path: &str) -> Icon {
-    Icon::default().data(format!("<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.65' stroke-linecap='round' stroke-linejoin='round'>{path}</svg>").as_bytes())
-}
 fn tool_icon(tool: Tool) -> Icon {
-    svg_icon(match tool {
-        Tool::Select => "<path d='m5 3 14 9-7 1-4 7z'/>",
-        Tool::Rectangle | Tool::RoundedRectangle | Tool::Diamond | Tool::Triangle => {
-            "<rect x='4' y='5' width='16' height='14' rx='1'/>"
-        }
-        Tool::Ellipse => "<ellipse cx='12' cy='12' rx='8' ry='7'/>",
-        Tool::Line | Tool::Polyline | Tool::Curve => "<path d='m4 20 16-16'/>",
-        Tool::Arrow => "<path d='M5 19 19 5M8 5h11v11'/>",
-        Tool::Pen => "<path d='m4 19 3-7L17 2l5 5-10 10zM4 19l8-2M14 5l5 5'/>",
-        Tool::Highlight => "<path d='m8 15 8-11 5 4-9 10zM8 15l-4 6 8-3M3 22h17'/>",
-        Tool::Number => "<circle cx='12' cy='12' r='9'/><path d='m10 8 2-1v10m-2 0h4'/>",
-        Tool::Text => "<path d='M4 5h16M12 5v15M8 20h8'/>",
-        Tool::Mosaic => "<path d='M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z'/>",
-        Tool::Blur => {
-            "<path d='M12 3C9 8 5 11 5 15a7 7 0 0 0 14 0c0-4-4-7-7-12zM8 15a4 4 0 0 0 4 4'/>"
-        }
-        Tool::Eraser => {
-            "<path d='m4 14 9-10a2 2 0 0 1 3 0l5 5a2 2 0 0 1 0 3l-7 8H9zM7 11l9 9M13 21h8'/>"
-        }
+    use gpui_kit::assets::IconName as Glyph;
+    Icon::new(match tool {
+        Tool::Select => Glyph::MousePointer2,
+        Tool::Rectangle | Tool::RoundedRectangle | Tool::Diamond | Tool::Triangle => Glyph::Square,
+        Tool::Ellipse => Glyph::Circle,
+        Tool::Line | Tool::Polyline | Tool::Curve => Glyph::Slash,
+        Tool::Arrow => Glyph::ArrowUpRight,
+        Tool::Pen => Glyph::Pencil,
+        Tool::Highlight => Glyph::Highlighter,
+        Tool::Number => Glyph::ListOrdered,
+        Tool::Text => Glyph::Type,
+        Tool::Mosaic => Glyph::Grid2x2,
+        Tool::Blur => Glyph::Droplet,
+        Tool::Eraser => Glyph::Eraser,
     })
 }
 fn action_icon(name: &str) -> Icon {
-    svg_icon(match name {
-        "undo" => "<path d='M8 5 3 10l5 5M3 10h10a7 7 0 0 1 7 7'/>",
-        "redo" => "<path d='m16 5 5 5-5 5M21 10H11a7 7 0 0 0-7 7'/>",
-        "ocr" => "<path d='M3 8V3h5M16 3h5v5M21 16v5h-5M8 21H3v-5M7 8h10M12 8v9'/>",
-        "save" => "<path d='M5 3h12l4 4v14H3V3zM7 3v6h10V3M7 21v-8h10v8'/>",
-        "copy" => "<rect x='8' y='8' width='13' height='13' rx='1'/><path d='M16 8V3H3v13h5'/>",
-        "pin" => "<path d='m8 3 12 12M15 3l6 6-4 1-4 7-6-6 7-4zM10 14l-7 7'/>",
-        "done" => "<path d='m4 12 5 5L20 6'/>",
-        _ => "<path d='m5 5 14 14M19 5 5 19'/>",
-    })
+    use gpui_kit::assets::IconName as Glyph;
+    match name {
+        "undo" => Icon::new(Glyph::Undo2),
+        "redo" => Icon::new(Glyph::Redo2),
+        "ocr" => Icon::new(Glyph::ScanText),
+        "save" => Icon::new(Glyph::Save),
+        "copy" => Icon::new(Glyph::Copy),
+        "pin" => Icon::new(Glyph::Pin),
+        "done" => Icon::new(Glyph::Check),
+        _ => Icon::default().path("icons/close.svg"),
+    }
 }
 
 pub fn identity(image: &RgbaImage) -> ImageTransform {
@@ -2999,11 +3006,11 @@ mod tests {
                 .update(cx, |_, w, cx| {
                     editor.update(cx, |v, cx| {
                         v.choose_tool(super::Tool::Arrow, w, cx);
-                        assert_eq!(v.toolbar_height(), 72.);
+                        assert_eq!(v.toolbar_height(), 74.);
                         v.color_picker.update(cx, |p, cx| p.set_open(true, cx));
                         assert!(v.host_height(cx) >= 492.);
                         v.color_picker.update(cx, |p, cx| p.set_open(false, cx));
-                        assert_eq!(v.host_height(cx), 72.);
+                        assert_eq!(v.host_height(cx), 74.);
                         assert_eq!(v.export_action(2), 4);
                         v.choose_tool(super::Tool::Text, w, cx);
                         v.begin_text(ImagePoint::new(20., 20.), None, w, cx);
@@ -3188,7 +3195,7 @@ mod tests {
             let v = editor.read(cx);
             assert!(v.toolbar_rows[0] > 0.);
             assert!(v.toolbar_width() < 1000., "{}", v.toolbar_width());
-            assert!((v.toolbar_width() - v.toolbar_rows[0] - 8.).abs() < 1.);
+            assert!((v.toolbar_width() - v.toolbar_rows[0] - 10.).abs() < 1.);
         });
     }
 
