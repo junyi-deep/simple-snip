@@ -17,6 +17,7 @@ mod pin;
 mod settings;
 mod task_toolbar;
 mod ui;
+mod updates;
 mod window_pool;
 #[cfg(target_os = "windows")]
 mod windows_ocr;

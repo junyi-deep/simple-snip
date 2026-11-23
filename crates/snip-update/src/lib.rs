@@ -1,4 +1,4 @@
-//! Explicit, offline-until-requested GitHub release checks. No screenshot data
+//! GitHub release checks performed off the UI thread. No screenshot data
 //! enters this module. Passwords are session-only and never part of Config.
 use anyhow::{Context, Result, bail, ensure};
 mod install;
@@ -283,6 +283,7 @@ mod tests {
             proxy_mode: ProxyMode::Http,
             proxy_url: format!("http://{address}"),
             proxy_username: "test".into(),
+            ..Default::default()
         };
         assert!(
             client(&config, "pass")

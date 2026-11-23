@@ -6,7 +6,7 @@ use gpui_kit::{
         button::*,
         color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
         input::{Input, InputEvent, InputState},
-        progress::Progress,
+        notification::{Notification, NotificationDelivery},
         scroll::ScrollableElement,
         switch::Switch,
         *,
@@ -70,7 +70,10 @@ fn merge_settings(mut current: Config, baseline: &Config, draft: &Config) -> Con
         pin.border_color,
         pin.border_width,
         pin.shadow,
-        updates
+        updates.auto_check,
+        updates.proxy_mode,
+        updates.proxy_url,
+        updates.proxy_username
     );
     current
 }
@@ -109,7 +112,9 @@ pub struct Settings {
     update_busy: bool,
     update_status: String,
     update_progress: Option<f32>,
-    update_release: Option<snip_update::Release>,
+    auto_check: bool,
+    last_update_notice: Option<String>,
+    page_transition: usize,
     optional: Vec<(String, Entity<InputState>)>,
 }
 impl Settings {
@@ -117,12 +122,13 @@ impl Settings {
         Self::build(cx).map(|(handle, _)| handle)
     }
     fn build(cx: &mut App) -> anyhow::Result<(AnyWindowHandle, Entity<Self>)> {
+        crate::updates::init(cx);
         crate::ui::sync_system_theme(cx);
         let bounds = Bounds::centered(
             None,
             size(
-                px(900.),
-                px(if crate::is_docs_demo() { 800. } else { 660. }),
+                px(820.),
+                px(if crate::is_docs_demo() { 690. } else { 574. }),
             ),
             cx,
         );
@@ -133,7 +139,7 @@ impl Settings {
                     title: Some("Simple Snip · 偏好设置".into()),
                     ..Default::default()
                 }),
-                window_min_size: Some(size(px(760.), px(540.))),
+                window_min_size: Some(size(px(720.), px(490.))),
                 ..Default::default()
             },
             cx,
@@ -195,9 +201,23 @@ impl Settings {
                 let trail_secondary = cx.new(|cx| {
                     ColorPickerState::new(w, cx).default_value(color(&config.trail.secondary_color))
                 });
-                let proxy_password = cx.new(|cx| InputState::new(w, cx).masked(true));
+                let password = cx
+                    .try_global::<crate::updates::Updates>()
+                    .map(|v| v.password.clone())
+                    .unwrap_or_default();
+                let proxy_password =
+                    cx.new(|cx| InputState::new(w, cx).masked(true).default_value(password));
                 cx.new(|cx| {
                     let mut subscriptions = vec![
+                        cx.subscribe(
+                            &proxy_password,
+                            |_: &mut Self, input, event: &InputEvent, cx| {
+                                if matches!(event, InputEvent::Change) {
+                                    let value = input.read(cx).value().to_string();
+                                    cx.global_mut::<crate::updates::Updates>().password = value;
+                                }
+                            },
+                        ),
                         cx.observe(&trail_primary, |_: &mut Self, _, cx| cx.notify()),
                         cx.observe(&trail_secondary, |_, _, cx| cx.notify()),
                         cx.observe(&trail_width, |_, _, cx| cx.notify()),
@@ -282,7 +302,9 @@ impl Settings {
                             }
                             _ => "手动检查 GitHub Release；截图和识别内容不会发送。".into(),
                         },
-                        update_release: None,
+                        auto_check: config.updates.auto_check,
+                        last_update_notice: None,
+                        page_transition: 0,
                         optional,
                     }
                 })
@@ -308,6 +330,7 @@ impl Settings {
             async {}
         });
         view.update(cx, |v, _| v._subscriptions.push(on_quit));
+        crate::updates::attach(h, &view, cx);
         Ok((h, view))
     }
     #[cfg(debug_assertions)]
@@ -409,7 +432,6 @@ impl Settings {
     }
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self.pending = true;
-        self.save_status = "等待输入完成，自动保存…".into();
         self.save_error = false;
         self.autosave = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -505,6 +527,7 @@ impl Settings {
                 {
                     self.save_status = format!("自动保存失败：{error}。请检查配置目录权限后重试。");
                     self.save_error = true;
+                    self.notify_save_error(cx);
                     cx.notify();
                     return;
                 }
@@ -551,56 +574,99 @@ impl Settings {
                 self.save_error = true;
             }
         }
+        if self.save_error {
+            self.notify_save_error(cx);
+        }
+        cx.notify();
+    }
+    fn notify_save_error(&self, cx: &mut Context<Self>) {
+        let message = self.save_status.clone();
+        if let Some(handle) = cx.global::<Runtime>().settings {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, w, cx| crate::ui::notify(w, message, true, cx));
+            });
+        }
+    }
+    pub(crate) fn show_section(&mut self, section: usize, cx: &mut Context<Self>) {
+        if self.section != section {
+            self.section = section;
+            self.page_transition = self.page_transition.wrapping_add(1);
+            cx.notify();
+        }
+    }
+    pub(crate) fn notify_update(&mut self, tag: &str, w: &mut Window, cx: &mut Context<Self>) {
+        if self.last_update_notice.as_deref() == Some(tag) {
+            return;
+        }
+        self.last_update_notice = Some(tag.into());
+        tracing::debug!(tag, "showing update notification");
+        let view = cx.entity().downgrade();
+        let detail = format!("{tag} 已发布 · 点此查看");
+        w.push_notification(
+            Notification::new()
+                .content(move |_, _, _| {
+                    div()
+                        .debug_selector(|| "update-notice-body".to_string())
+                        .child(detail.clone())
+                        .into_any_element()
+                })
+                .id::<crate::updates::Updates>()
+                .title("发现新版本")
+                .delivery(NotificationDelivery::InApp)
+                .placement(Anchor::TopRight)
+                .autohide(false)
+                .on_click(move |_, _, cx| {
+                    let _ = view.update(cx, |v, cx| v.show_section(10, cx));
+                }),
+            cx,
+        );
+    }
+    fn set_automatic_updates(&mut self, enabled: bool, w: &mut Window, cx: &mut Context<Self>) {
+        let mut config = cx.global::<Runtime>().config.clone();
+        if config.updates.auto_check == enabled {
+            return;
+        }
+        config.updates.auto_check = enabled;
+        if !crate::is_docs_demo()
+            && let Err(error) = config.save(&self.config_path)
+        {
+            crate::ui::notify(w, format!("无法保存自动更新设置：{error}"), true, cx);
+            return;
+        }
+        cx.global_mut::<Runtime>().config = config;
+        self.auto_check = enabled;
+        self.baseline.updates.auto_check = enabled;
+        if enabled && !crate::is_docs_demo() {
+            crate::updates::automatic(cx);
+        }
         cx.notify();
     }
     fn proxy_config(&self, cx: &App) -> UpdateConfig {
         UpdateConfig {
+            auto_check: self.auto_check,
             proxy_mode: self.proxy_mode,
             proxy_url: self.proxy_url.read(cx).value().trim().to_string(),
             proxy_username: self.proxy_username.read(cx).value().to_string(),
         }
     }
-    fn check_updates(&mut self, cx: &mut Context<Self>) {
+    fn check_updates(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         if self.update_busy {
             return;
         }
         let config = self.proxy_config(cx);
-        if let Err(e) = snip_update::validate_proxy(&config) {
-            self.update_status = e.to_string();
-            cx.notify();
+        if let Err(error) = snip_update::validate_proxy(&config) {
+            crate::ui::notify(w, error.to_string(), true, cx);
             return;
         }
-        let password = self.proxy_password.read(cx).value().to_string();
-        self.update_busy = true;
-        self.update_progress = None;
-        self.update_release = None;
-        self.update_status = "正在检查 GitHub 发布版本…".into();
-        cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
-                snip_update::check(&config, &password, env!("CARGO_PKG_VERSION"))
-            })
-            .await;
-            let _ = this.update(cx, |v, cx| {
-                v.update_busy = false;
-                match result {
-                    Ok(Some(release)) => {
-                        v.update_status = format!("发现 {}，可一键升级并重启。", release.tag_name);
-                        v.update_release = Some(release);
-                    }
-                    Ok(None) => v.update_status = "当前已是最新版本（或尚无公开稳定版本）。".into(),
-                    Err(e) => v.update_status = format!("检查失败：{e}"),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        cx.global_mut::<crate::updates::Updates>().password =
+            self.proxy_password.read(cx).value().to_string();
+        crate::updates::check(config, true, cx);
     }
     fn download_update(&mut self, cx: &mut Context<Self>) {
         if self.update_busy {
             return;
         }
-        let Some(release) = self.update_release.clone() else {
+        let Some(release) = cx.global::<crate::updates::Updates>().release.clone() else {
             return;
         };
         let config = self.proxy_config(cx);
@@ -639,7 +705,15 @@ impl Settings {
                 let finished = matches!(event, DownloadEvent::Done(_));
                 if this
                     .update(cx, |v, cx| {
+                        let failed = matches!(&event, DownloadEvent::Done(Err(_)));
                         v.apply_download_event(event);
+                        if failed && let Some(handle) = cx.global::<Runtime>().settings {
+                            let message = v.update_status.clone();
+                            cx.defer(move |cx| {
+                                let _ = handle
+                                    .update(cx, |_, w, cx| crate::ui::notify(w, message, true, cx));
+                            });
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -685,6 +759,7 @@ impl Settings {
 }
 #[derive(IntoElement)]
 struct SettingsRow {
+    icon: Option<&'static str>,
     title: SharedString,
     description: SharedString,
     control: AnyElement,
@@ -692,12 +767,82 @@ struct SettingsRow {
 
 fn row(title: &str, description: &str, control: impl IntoElement) -> SettingsRow {
     SettingsRow {
+        icon: None,
         title: title.to_string().into(),
         description: description.to_string().into(),
         control: control.into_any_element(),
     }
 }
 
+impl SettingsRow {
+    fn icon(mut self, glyph: &'static str) -> Self {
+        self.icon = Some(glyph);
+        self
+    }
+}
+fn glyph(name: &str, size: f32) -> Icon {
+    Icon::default()
+        .path(format!("icons/{name}.svg"))
+        .size(px(size))
+}
+fn key_hint(key: &'static str, label: &'static str, cx: &App) -> Div {
+    div()
+        .h_flex()
+        .gap_1()
+        .items_center()
+        .child(
+            div()
+                .px_1()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().popover)
+                .text_size(px(10.))
+                .child(key),
+        )
+        .child(crate::ui::detail(cx).child(label))
+}
+fn appearance_sample(mode: &str) -> impl IntoElement {
+    let panel = |dark: bool| {
+        let (surface, rail, text, accent) = if dark {
+            (0x222832, 0x151920, 0xaab8cc, 0x91b7ff)
+        } else {
+            (0xf8f9fc, 0xe9eef7, 0x64728a, 0x275fc2)
+        };
+        div()
+            .flex_1()
+            .h_full()
+            .h_flex()
+            .overflow_hidden()
+            .bg(rgb(surface))
+            .child(div().w_1_4().h_full().bg(rgb(rail)))
+            .child(
+                div()
+                    .flex_1()
+                    .v_flex()
+                    .gap_1()
+                    .p_2()
+                    .child(div().w_1_2().h(px(4.)).rounded_full().bg(rgb(text)))
+                    .child(
+                        div()
+                            .w_3_4()
+                            .h(px(3.))
+                            .rounded_full()
+                            .bg(rgb(text))
+                            .opacity(0.48),
+                    )
+                    .child(div().w_1_3().h(px(6.)).rounded(px(2.)).bg(rgb(accent))),
+            )
+    };
+    div()
+        .w_full()
+        .h(px(48.))
+        .h_flex()
+        .overflow_hidden()
+        .rounded(px(5.))
+        .when(mode != "dark", |d| d.child(panel(false)))
+        .when(mode != "light", |d| d.child(panel(true)))
+}
 impl RenderOnce for SettingsRow {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         div()
@@ -705,9 +850,23 @@ impl RenderOnce for SettingsRow {
             .items_center()
             .justify_between()
             .gap_4()
-            .py_3()
+            .py_2()
             .border_b_1()
             .border_color(cx.theme().border)
+            .when_some(self.icon, |d, icon| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(28.))
+                        .flex_shrink_0()
+                        .rounded_md()
+                        .bg(cx.theme().muted)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(glyph(icon, 14.)),
+                )
+            })
             .child(
                 div()
                     .v_flex()
@@ -716,7 +875,9 @@ impl RenderOnce for SettingsRow {
                     .min_w_0()
                     .whitespace_normal()
                     .child(div().font_weight(FontWeight::MEDIUM).child(self.title))
-                    .child(crate::ui::detail(cx).child(self.description)),
+                    .when(!self.description.is_empty(), |d| {
+                        d.child(crate::ui::detail(cx).child(self.description))
+                    }),
             )
             .child(div().flex_shrink_0().child(self.control))
     }
@@ -735,20 +896,7 @@ impl Render for Settings {
             "快捷键",
             "保存与历史",
             "外观",
-            "关于、更新与权限",
-        ];
-        let descriptions = [
-            "管理启动行为和图片内提示。",
-            "选择截图默认操作与标注样式。",
-            "设置浮动图片的边框与交互。",
-            "调整滚动截图的采集与拼接。",
-            "设置区域录制的时长与画质。",
-            "配置设备上的文字识别。",
-            "调整鼠标轨迹和录制时的可见性。",
-            "设置全局快捷键。留空即可停用。",
-            "管理保存位置、格式及最近导出。",
-            "为设置窗口、工具栏和菜单选择外观。",
-            "查看版本、软件更新与系统权限。",
+            "软件更新",
         ];
         let icons = [
             "settings-2",
@@ -761,12 +909,12 @@ impl Render for Settings {
             "square-terminal",
             "folder-closed",
             "palette",
-            "info",
+            "download",
         ];
         let mut nav = div()
             .id("settings-navigation")
             .v_flex()
-            .w(px(188.))
+            .w(px(158.))
             .flex_shrink_0()
             .min_h_0()
             .bg(cx.theme().sidebar)
@@ -780,16 +928,40 @@ impl Render for Settings {
                     .text_size(px(15.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .px_2()
-                    .pt_3()
-                    .pb_4()
-                    .child("Simple Snip"),
+                    .py_2()
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(25.))
+                                    .rounded_md()
+                                    .bg(cx.theme().primary)
+                                    .text_color(cx.theme().primary_foreground)
+                                    .child(Icon::default().path("icons/frame.svg").size(px(15.))),
+                            )
+                            .child("Simple Snip"),
+                    ),
             );
         for (i, name) in names.iter().enumerate() {
+            if let Some(group) = match i {
+                0 => Some("工作流"),
+                6 => Some("偏好"),
+                10 => Some("应用"),
+                _ => None,
+            } {
+                nav = nav.child(crate::ui::detail(cx).px_2().mt_2().child(group));
+            }
             nav = nav.child(
                 Button::new(("section", i))
                     .ghost()
                     .w_full()
-                    .h(px(32.))
+                    .h(px(29.))
                     .tab_stop(true)
                     .accessibility_label(*name)
                     .child(
@@ -798,7 +970,27 @@ impl Render for Settings {
                             .flex_1()
                             .items_center()
                             .gap_2()
-                            .px_1()
+                            .relative()
+                            .px_2()
+                            .when(self.section == i, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .h(px(13.))
+                                        .w(px(2.))
+                                        .rounded_full()
+                                        .bg(cx.theme().primary)
+                                        .with_animation(
+                                            ("nav-indicator", self.page_transition),
+                                            Animation::new(std::time::Duration::from_millis(170))
+                                                .with_easing(|t| 1. - (1. - t).powi(3)),
+                                            |marker, t| {
+                                                marker.h(px(5. + t * 8.)).opacity(0.4 + t * 0.6)
+                                            },
+                                        ),
+                                )
+                            })
                             .child(
                                 Icon::default()
                                     .path(format!("icons/{}.svg", icons[i]))
@@ -809,99 +1001,99 @@ impl Render for Settings {
                     .selected(self.section == i)
                     .when(self.section == i, |b| b.font_weight(FontWeight::SEMIBOLD))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.section = i;
-                        cx.notify();
+                        this.show_section(i, cx);
                     })),
             );
         }
         let mut content = div()
             .id(("settings-content", self.section))
             .v_flex()
-            .gap(px(crate::ui::SPACE))
+            .gap_1()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .whitespace_normal()
-            .p_6()
+            .px_5()
+            .py_4()
             .child(
                 div()
-                    .v_flex()
-                    .gap_1()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
                     .mb_3()
+                    .child(
+                        Icon::default()
+                            .path(format!("icons/{}.svg", icons[self.section]))
+                            .size(px(19.))
+                            .text_color(cx.theme().primary),
+                    )
                     .child(
                         div()
                             .text_size(px(crate::ui::HEADING))
                             .line_height(px(28.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(names[self.section]),
-                    )
-                    .child(crate::ui::detail(cx).child(descriptions[self.section])),
-            )
-            .when(self.section == 10 || self.update_busy, |d| {
-                d.child(
-                    crate::ui::panel(cx)
-                        .id("update-status")
-                        .v_flex()
-                        .gap_2()
-                        .p_3()
-                        .child(self.update_status.clone())
-                        .when(self.update_busy || self.update_progress.is_some(), |d| {
-                            d.child(
-                                Progress::new("update-progress")
-                                    .accessibility_label("自动更新进度")
-                                    .value(self.update_progress.unwrap_or(0.))
-                                    .loading(self.update_progress.is_none()),
-                            )
-                        }),
-                )
-            });
+                    ),
+            );
+        let updates = cx.global::<crate::updates::Updates>();
+        let checking = updates.checking;
+        let release = updates
+            .release
+            .as_ref()
+            .map(|release| release.tag_name.clone());
         match self.section {
             0 => {
                 let (toast_enabled, toast_delay) = crate::editor::toast_preferences(cx);
                 content = content
-                    .child(row(
-                        "图片内提示",
-                        "提示开关和显示时间",
-                        div()
-                            .h_flex()
-                            .gap_2()
-                            .child(
-                                Switch::new("annotation-toast")
-                                    .accessibility_label("图片内提示")
-                                    .checked(toast_enabled)
-                                    .on_click(move |enabled, _, cx| {
-                                        crate::editor::set_toast_preferences(
-                                            *enabled,
-                                            toast_delay,
-                                            cx,
-                                        )
-                                    }),
-                            )
-                            .children([1000, 2000, 3000, 5000].into_iter().map(|delay| {
-                                Button::new(("toast-delay", delay))
-                                    .small()
-                                    .label(format!("{} 秒", delay / 1000))
-                                    .selected(toast_delay == delay)
-                                    .on_click(move |_, _, cx| {
-                                        crate::editor::set_toast_preferences(
-                                            toast_enabled,
-                                            delay,
-                                            cx,
-                                        )
-                                    })
-                            })),
-                    ))
-                    .child(row(
-                        "启动时显示偏好设置",
-                        "关闭窗口后继续驻留菜单栏 / 系统托盘",
-                        Switch::new("show-settings")
-                            .accessibility_label("启动时显示偏好设置")
-                            .checked(self.show_on_start)
-                            .on_click(cx.listener(|v, checked, _, cx| {
-                                v.show_on_start = *checked;
-                                v.save(cx);
-                            })),
-                    ))
+                    .child(
+                        row(
+                            "标注提示",
+                            "显示时长",
+                            div()
+                                .h_flex()
+                                .gap_2()
+                                .child(
+                                    Switch::new("annotation-toast")
+                                        .accessibility_label("图片内提示")
+                                        .checked(toast_enabled)
+                                        .on_click(move |enabled, _, cx| {
+                                            crate::editor::set_toast_preferences(
+                                                *enabled,
+                                                toast_delay,
+                                                cx,
+                                            )
+                                        }),
+                                )
+                                .children([1000, 2000, 3000, 5000].into_iter().map(|delay| {
+                                    Button::new(("toast-delay", delay))
+                                        .small()
+                                        .label(format!("{} 秒", delay / 1000))
+                                        .selected(toast_delay == delay)
+                                        .on_click(move |_, _, cx| {
+                                            crate::editor::set_toast_preferences(
+                                                toast_enabled,
+                                                delay,
+                                                cx,
+                                            )
+                                        })
+                                })),
+                        )
+                        .icon("bell"),
+                    )
+                    .child(
+                        row(
+                            "启动时打开设置",
+                            "",
+                            Switch::new("show-settings")
+                                .accessibility_label("启动时显示偏好设置")
+                                .checked(self.show_on_start)
+                                .on_click(cx.listener(|v, checked, _, cx| {
+                                    v.show_on_start = *checked;
+                                    v.save(cx);
+                                })),
+                        )
+                        .icon("settings-2"),
+                    )
                     .child(
                         div()
                             .h_flex()
@@ -910,6 +1102,8 @@ impl Render for Settings {
                             .child(
                                 Button::new("capture")
                                     .primary()
+                                    .small()
+                                    .icon(glyph("frame", 14.))
                                     .label(crate::ui::hotkey_label(
                                         "区域截图",
                                         config.hotkeys.get("screenshot"),
@@ -918,59 +1112,62 @@ impl Render for Settings {
                             )
                             .child(
                                 Button::new("paste")
+                                    .small()
+                                    .icon(glyph("pin", 14.))
                                     .label(crate::ui::hotkey_label(
                                         "剪贴板贴图",
                                         config.hotkeys.get("paste_image"),
                                     ))
                                     .on_click(|_, _, cx| app::command(cx, Command::Paste)),
                             ),
-                    )
-                    .child(
-                        crate::ui::detail(cx)
-                            .mt_5()
-                            .child("图片保存在本地。截图、剪贴板与 OCR 不上传网络。"),
                     );
             }
             1 => {
                 content = content
-                    .child(row(
-                        "框选",
-                        "拖动框选，或单击高亮的窗口。可在框选前跨屏。",
-                        Button::new("take")
-                            .primary()
-                            .label("开始截图")
-                            .on_click(|_, _, cx| app::command(cx, Command::Capture)),
-                    ))
-                    .child(row(
-                        "调整选区",
-                        "拖动选区边缘的手柄，或用 Shift + 方向键微调宽高。",
-                        div(),
-                    ))
                     .child(
-                        crate::ui::detail(cx)
+                        row(
+                            "区域截图",
+                            "单击选窗或拖动框选",
+                            Button::new("take")
+                                .primary()
+                                .small()
+                                .icon(glyph("frame", 14.))
+                                .label("开始截图")
+                                .on_click(|_, _, cx| app::command(cx, Command::Capture)),
+                        )
+                        .icon("frame"),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .flex_wrap()
+                            .gap_3()
                             .mt_2()
-                            .child("A 选择当前屏幕 · Esc 取消"),
+                            .child(key_hint("A", "选择当前屏幕", cx))
+                            .child(key_hint("Shift + ↑↓←→", "微调宽高", cx))
+                            .child(key_hint("Esc", "取消", cx)),
                     );
             }
+
             2 => {
                 content = content
                     .child(row(
                         "选中边框颜色",
-                        "#RRGGBB，默认蓝色；未选中时不显示",
+                        "",
                         div()
                             .w_40()
                             .child(ColorPicker::new(&self.pin_border_color).label("边框颜色")),
                     ))
                     .child(row(
                         "选中边框粗细",
-                        "0–8 逻辑像素，0 表示隐藏选中边框",
+                        "0–8 px",
                         div()
                             .w_24()
                             .child(Input::new(&self.pin_border_width).aria_label("贴图边框粗细")),
                     ))
                     .child(row(
                         "边框阴影",
-                        "只改变桌面外观，不写入图片",
+                        "",
                         Switch::new("pin-shadow")
                             .accessibility_label("贴图边框阴影")
                             .checked(self.pin_shadow)
@@ -992,43 +1189,54 @@ impl Render for Settings {
                             .gap_2()
                             .child(
                                 Button::new("hide")
+                                    .small()
+                                    .icon(glyph("eye-off", 14.))
                                     .label("隐藏全部")
                                     .on_click(|_, _, cx| app::command(cx, Command::HidePins)),
                             )
                             .child(
                                 Button::new("show")
+                                    .small()
+                                    .icon(glyph("eye", 14.))
                                     .label("显示全部")
                                     .on_click(|_, _, cx| app::command(cx, Command::ShowPins)),
                             )
                             .child(
                                 Button::new("restore")
+                                    .small()
+                                    .icon(glyph("mouse-pointer-2", 14.))
                                     .label("恢复全部交互")
                                     .on_click(|_, _, cx| app::command(cx, Command::RestorePins)),
                             ),
                     )
-                    .child(crate::ui::detail(cx).mt_2().child(
-                        "单击选中，滚轮缩放，空格标注，T 切换穿透。更多操作可在贴图上右击查看。",
-                    ))
                     .child(
-                        crate::ui::detail(cx)
-                            .child("1 旋转 · 2 水平翻转 · 3 垂直翻转 · Esc 关闭（编辑时取消）"),
+                        div()
+                            .h_flex()
+                            .flex_wrap()
+                            .gap_3()
+                            .mt_2()
+                            .child(key_hint("Space", "标注", cx))
+                            .child(key_hint("T", "穿透", cx))
+                            .child(key_hint("Esc", "关闭", cx)),
                     );
             }
             3 => {
-                content =
-                    content
-                        .child(row(
-                            "滚动采集",
-                            "框选内容后，缓慢、小幅地水平或垂直滚动。",
-                            Button::new("long")
-                                .primary()
-                                .label("选择区域")
-                                .on_click(|_, _, cx| app::command(cx, Command::LongCapture)),
-                        ))
-                        .child(crate::ui::detail(cx).child(
-                            "避开固定页头。暂停、自动向下滚动和完成操作都在选区旁的控制栏中。",
-                        ));
+                content = content.child(
+                    row(
+                        "滚动采集",
+                        "支持横向 / 纵向",
+                        Button::new("long")
+                            .primary()
+                            .small()
+                            .icon(glyph("gallery-vertical-end", 14.))
+                            .label("选择区域")
+                            .tooltip("框选后缓慢滚动，避开固定页头")
+                            .on_click(|_, _, cx| app::command(cx, Command::LongCapture)),
+                    )
+                    .icon("gallery-vertical-end"),
+                );
             }
+
             4 => {
                 let mut rates = div().h_flex().gap_1();
                 for fps in [5, 10, 15, 20, 30] {
@@ -1063,19 +1271,34 @@ impl Render for Settings {
                         div().h_flex().mt_2().child(
                             Button::new("gif")
                                 .primary()
-                                .label("选择 GIF 录制区域")
+                                .small()
+                                .icon(glyph("play", 14.))
+                                .label("选择录制区域")
                                 .on_click(|_, _, cx| app::command(cx, Command::Gif)),
                         ),
-                    )
-                    .child(
-                        crate::ui::detail(cx)
-                            .child("框选后可在控制栏开始、暂停或停止。控制栏会从录制画面中排除。"),
                     );
             }
             5 => {
-                content = content
-                    .child(row("设备上的文字识别", "识别剪贴板中的图片，或在标注工具栏中开始。", Button::new("ocr").primary().label("识别剪贴板图片").on_click(|_, _, cx| app::command(cx, Command::Ocr))))
-                    .child(crate::ui::detail(cx).child("在图片上拖选并复制文字，支持跨行选择，也可导出简单表格为 TSV。图片与文字都在本地处理。"));
+                content =
+                    content
+                        .child(
+                            row(
+                                "本地文字识别",
+                                "支持普通文本和简单表格",
+                                Button::new("ocr")
+                                    .primary()
+                                    .small()
+                                    .icon(glyph("scan-text", 14.))
+                                    .label("识别剪贴板图片")
+                                    .on_click(|_, _, cx| app::command(cx, Command::Ocr)),
+                            )
+                            .icon("scan-text"),
+                        )
+                        .child(div().h_flex().gap_2().mt_2().child(key_hint(
+                            "O",
+                            "在标注中识别",
+                            cx,
+                        )));
             }
             6 => {
                 content = content
@@ -1117,32 +1340,17 @@ impl Render for Settings {
                     .child(self.trail_options(cx));
             }
             7 => {
-                let registration = match cx.global::<Runtime>().hotkeys.as_ref() {
-                    Some(keys) => keys
-                        .registration_error()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| "快捷键注册正常".into()),
-                    None => "快捷键服务暂未就绪，后台每 5 秒自动重试".into(),
-                };
                 content = content
-                    .child(
-                        div()
-                            .text_sm()
-                            .p_3()
-                            .rounded_md()
-                            .bg(cx.theme().muted)
-                            .child(registration),
-                    )
                     .child(row(
                         "区域截图",
-                        "留空禁用。例：F1、Alt+Shift+S",
+                        "F1 · 留空停用",
                         div()
                             .w_48()
                             .child(Input::new(&self.screenshot_key).aria_label("区域截图快捷键")),
                     ))
                     .child(row(
                         "剪贴板贴图",
-                        "留空禁用。例：F3、Alt+Shift+P",
+                        "F3 · 留空停用",
                         div()
                             .w_48()
                             .child(Input::new(&self.paste_key).aria_label("剪贴板贴图快捷键")),
@@ -1158,13 +1366,36 @@ impl Render for Settings {
                     };
                     content = content.child(row(
                         label,
-                        "可选全局绑定，默认留空",
+                        "",
                         div()
                             .w_48()
                             .child(Input::new(input).aria_label(label.to_owned())),
                     ));
                 }
-                content=content.child(div().text_sm().mt_3().child("macOS 的 F1 / F3 可能执行亮度或 Mission Control。请使用 Fn / Globe，或在键盘设置启用标准功能键，也可以在此改用组合键。"));
+                if let Some(error) = cx
+                    .global::<Runtime>()
+                    .hotkeys
+                    .as_ref()
+                    .and_then(|keys| keys.registration_error())
+                {
+                    let error = error.to_owned();
+                    content = content.child(
+                        div().h_flex().mt_2().child(
+                            Button::new("hotkey-diagnostics")
+                                .small()
+                                .ghost()
+                                .icon(glyph("info", 14.))
+                                .label("查看注册问题")
+                                .on_click(move |_, w, cx| {
+                                    crate::ui::notify(w, error.clone(), true, cx);
+                                }),
+                        ),
+                    );
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    content = content.child(div().mt_2().child(key_hint("Fn", "标准功能键", cx)));
+                }
             }
             8 => {
                 content = content
@@ -1273,25 +1504,47 @@ impl Render for Settings {
                 }
             }
             9 => {
-                content = content.child(row(
-                    "外观模式",
-                    "选择后立即应用，并自动保存。",
-                    div().h_flex().gap_1().children(
-                        [("跟随系统", "system"), ("浅色", "light"), ("深色", "dark")]
-                            .into_iter()
-                            .map(|(label, mode)| {
-                                Button::new(label)
-                                    .small()
-                                    .label(label)
-                                    .selected(self.theme == mode)
-                                    .on_click(cx.listener(move |v, _, _, cx| {
-                                        v.theme = mode.into();
-                                        v.save(cx);
-                                    }))
-                            }),
+                content = content.child(
+                    div().h_flex().gap_2().children(
+                        [
+                            ("跟随系统", "system", "monitor"),
+                            ("浅色", "light", "sun"),
+                            ("深色", "dark", "moon"),
+                        ]
+                        .into_iter()
+                        .map(|(label, mode, icon)| {
+                            Button::new(mode)
+                                .w(px(125.))
+                                .h(px(81.))
+                                .px_2()
+                                .py_1()
+                                .accessibility_label(label)
+                                .selected(self.theme == mode)
+                                .child(
+                                    div()
+                                        .v_flex()
+                                        .w_full()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(appearance_sample(mode))
+                                        .child(
+                                            div()
+                                                .h_flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(glyph(icon, 12.))
+                                                .child(label),
+                                        ),
+                                )
+                                .on_click(cx.listener(move |v, _, _, cx| {
+                                    v.theme = mode.into();
+                                    v.save(cx);
+                                }))
+                        }),
                     ),
-                ));
+                );
             }
+
             _ => {
                 let proxy_modes = div().h_flex().gap_1().children(
                     [
@@ -1311,11 +1564,54 @@ impl Render for Settings {
                             }))
                     }),
                 );
-                content = content.child(row(
-                    "更新代理",
-                    "默认跟随系统代理；自定义 HTTP 代理用于检查和下载",
-                    proxy_modes,
-                ));
+                content = content
+                    .child(row(
+                        "自动检查更新",
+                        "启动时和每小时",
+                        Switch::new("auto-update-check")
+                            .accessibility_label("自动检查更新")
+                            .checked(self.auto_check)
+                            .on_click(cx.listener(|v, checked, w, cx| {
+                                v.set_automatic_updates(*checked, w, cx);
+                            })),
+                    ))
+                    .child(row(
+                        "当前版本",
+                        concat!("v", env!("CARGO_PKG_VERSION")),
+                        Button::new("check-updates")
+                            .small()
+                            .icon(Icon::default().path("icons/refresh-cw.svg").size(px(13.)))
+                            .label(if checking {
+                                "检查中…"
+                            } else {
+                                "检查更新"
+                            })
+                            .disabled(checking || self.update_busy)
+                            .on_click(cx.listener(|v, _, w, cx| v.check_updates(w, cx))),
+                    ))
+                    .when_some(release, |d, version| {
+                        d.child(row(
+                            "可用版本",
+                            &version,
+                            Button::new("download-update")
+                                .small()
+                                .primary()
+                                .icon(Icon::default().path("icons/download.svg").size(px(13.)))
+                                .label(if self.update_busy {
+                                    format!("{}%", self.update_progress.unwrap_or(0.) as u32)
+                                } else {
+                                    "安装并重启".into()
+                                })
+                                .tooltip(if self.update_busy {
+                                    self.update_status.clone()
+                                } else {
+                                    "重启前请保存当前采集".into()
+                                })
+                                .disabled(self.update_busy || checking)
+                                .on_click(cx.listener(|v, _, _, cx| v.download_update(cx))),
+                        ))
+                    })
+                    .child(row("更新代理", "", proxy_modes));
                 if self.proxy_mode == ProxyMode::Http {
                     content = content
                         .child(row(
@@ -1340,62 +1636,62 @@ impl Render for Settings {
                                 .child(Input::new(&self.proxy_password).aria_label("代理密码")),
                         ));
                 }
-                content = content
-                    .child(
-                        div()
-                            .h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("check-updates")
-                                    .label("检查更新")
-                                    .disabled(self.update_busy)
-                                    .on_click(cx.listener(|v, _, _, cx| v.check_updates(cx))),
-                            )
-                            .when(self.update_release.is_some(), |d| {
-                                d.child(
-                                    Button::new("download-update")
-                                        .label("升级并重启")
-                                        .tooltip(
-                                            "自动下载、校验并替换；重启会结束当前采集，请先保存",
-                                        )
-                                        .disabled(self.update_busy)
-                                        .on_click(cx.listener(|v, _, _, cx| v.download_update(cx))),
-                                )
-                            }),
-                    )
-                    .child(
+                content = content.child(
+                    div().h_flex().child(
                         Button::new("github-releases")
+                            .small()
                             .ghost()
+                            .icon(
+                                Icon::default()
+                                    .path("icons/external-link.svg")
+                                    .size(px(13.)),
+                            )
                             .label("GitHub 发布页")
                             .on_click(|_, _, cx| {
                                 cx.open_url("https://github.com/junyi-deep/simple-snip/releases")
                             }),
-                    );
+                    ),
+                );
                 if let Some(url) = snip_platform::screen_permission_settings_url() {
                     content = content
-                        .child(div().mt_3().font_weight(FontWeight::SEMIBOLD).child("屏幕录制权限"))
-                        .child(crate::ui::detail(cx).child(if snip_platform::screen_permission() {
-                            "系统预检显示已授权。如果仍无法截图，可重新验证。"
-                        } else {
-                            "尚未确认授权。请在系统设置中允许当前这份 Simple Snip 读取屏幕。"
-                        }))
-                        .child(div().h_flex().flex_wrap().gap_2()
-                            .child(Button::new("permission").label("重新验证").on_click(|_, _, cx| app::check_screen_permission(cx)))
-                            .child(Button::new("permission-settings").label("打开系统设置").on_click(move |_, _, cx| cx.open_url(url))))
-                        .child(crate::ui::detail(cx).child("如果本地测试包更新后授权失效，请在系统设置中移除旧条目，再添加当前应用包。"));
+                        .child(
+                            div()
+                                .mt_3()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("屏幕录制权限"),
+                        )
+                        .child(
+                            crate::ui::detail(cx).child(if snip_platform::screen_permission() {
+                                "已授权"
+                            } else {
+                                "尚未授权"
+                            }),
+                        )
+                        .child(
+                            div()
+                                .h_flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    Button::new("permission")
+                                        .label("重新验证")
+                                        .on_click(|_, _, cx| app::check_screen_permission(cx)),
+                                )
+                                .child(
+                                    Button::new("permission-settings")
+                                        .label("打开系统设置")
+                                        .on_click(move |_, _, cx| cx.open_url(url)),
+                                ),
+                        );
                 }
                 content = content
                     .child(
                         div()
                             .mt_3()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(concat!("Simple Snip ", env!("CARGO_PKG_VERSION"))),
+                            .child("关于 Simple Snip"),
                     )
-                    .child(crate::ui::detail(cx).child("开源许可：Apache 2.0"))
-                    .child(
-                        crate::ui::detail(cx)
-                            .child(format!("配置文件：{}", Config::path().display())),
-                    );
+                    .child(crate::ui::detail(cx).child("开源许可 · Apache 2.0"));
             }
         }
         div()
@@ -1416,28 +1712,13 @@ impl Render for Settings {
                     .child(
                         content
                             .overflow_y_scrollbar()
-                            .id(("settings-scroll", self.section)),
-                    ),
-            )
-            .child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .px_5()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        crate::ui::detail(cx)
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .when(self.save_error, |d| {
-                                d.text_color(crate::ui::danger_text(cx))
-                            })
-                            .child(self.save_status.clone()),
+                            .id(("settings-scroll", self.section))
+                            .with_animation(
+                                ("settings-page-in", self.page_transition),
+                                Animation::new(std::time::Duration::from_millis(190))
+                                    .with_easing(|t| 1. - (1. - t).powi(3)),
+                                |body, t| body.opacity(0.78 + t * 0.22),
+                            ),
                     ),
             )
     }
@@ -1499,6 +1780,57 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(600));
         cx.run_until_parked();
     }
+    #[gpui_kit::test]
+    fn update_notice_is_deduplicated_and_click_opens_update_page(cx: &mut TestAppContext) {
+        use gpui_kit::{VisualTestContext, point, px};
+        let (handle, view, _) = fixture(cx);
+        let mut visual = VisualTestContext::from_window(handle, cx);
+        visual.update(|w, cx| {
+            view.update(cx, |v, cx| {
+                v.notify_update("v9.9.9", w, cx);
+                v.notify_update("v9.9.9", w, cx);
+                assert_eq!(v.section, 0);
+            });
+            assert_eq!(w.notifications(cx).len(), 1);
+            let _ = w.draw(cx);
+        });
+        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.run_until_parked();
+        visual.update(|w, cx| {
+            w.simulate_next_frame(cx);
+            let _ = w.draw(cx);
+        });
+        let bounds = visual
+            .debug_bounds("update-notice-body")
+            .expect("rendered update toast");
+        let position = point(bounds.left() + px(20.), bounds.top() + px(6.));
+        visual.simulate_mouse_move(position, None, Default::default());
+        visual.simulate_click(position, Default::default());
+        cx.update(|cx| assert_eq!(view.read(cx).section, 10));
+    }
+
+    #[gpui_kit::test]
+    fn disabling_automatic_updates_saves_even_if_a_draft_field_is_invalid(cx: &mut TestAppContext) {
+        let (handle, view, directory) = fixture(cx);
+        type_lifetime(handle, &view, "", cx);
+        cx.update(|cx| {
+            handle
+                .update(cx, |_, w, cx| {
+                    view.update(cx, |v, cx| v.set_automatic_updates(false, w, cx));
+                })
+                .unwrap();
+            assert!(!cx.global::<Runtime>().config.updates.auto_check);
+        });
+        wait_for_save(cx);
+        let (config, error) = Config::load(&directory.path().join("config.toml"));
+        assert!(error.is_none());
+        assert!(!config.updates.auto_check);
+        assert_eq!(
+            config.trail.lifetime_ms,
+            Config::default().trail.lifetime_ms
+        );
+    }
+
     #[gpui_kit::test]
     fn update_progress_renders_without_notifications_and_recovers_from_failure(
         cx: &mut TestAppContext,

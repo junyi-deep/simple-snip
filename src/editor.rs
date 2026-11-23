@@ -157,6 +157,7 @@ pub struct EditorView {
     _size_subscription: Subscription,
     capture_context: Option<(CapturedDisplay, Rect)>,
     text_index: Option<usize>,
+    text_tool: Tool,
     _text_subscription: Subscription,
     last_wheel: Option<std::time::Instant>,
     draft: Option<Annotation>,
@@ -178,11 +179,13 @@ pub struct EditorView {
     rendering: bool,
     dirty: bool,
     ocr: Option<Arc<OcrResult>>,
-    ocr_start: Option<(usize, usize)>,
-    ocr_end: Option<(usize, usize)>,
-    ocr_hover: Option<(usize, usize)>,
-    ocr_drag: bool,
+    ocr_text: SharedString,
+    ocr_scroll: ScrollHandle,
+    ocr_size: gpui_kit::Size<Pixels>,
+    ocr_resize: Option<(Point<Pixels>, gpui_kit::Size<Pixels>)>,
+    ocr_request: u64,
     ocr_busy: bool,
+    ocr_scanning: bool,
     cancel: Cancellation,
     session_cancel: Cancellation,
 }
@@ -226,7 +229,7 @@ impl EditorView {
         let size_input = cx.new(|cx| {
             InputState::new(w, cx).default_value(format!(
                 "{:.1}",
-                if matches!(preferences.tool, Tool::Text | Tool::Number) {
+                if preferences.tool.is_typographic() {
                     style.width * 6. + 12.
                 } else {
                     style.width
@@ -297,6 +300,7 @@ impl EditorView {
             pointer: None,
             text_anchor: None,
             text_index: None,
+            text_tool: Tool::Text,
             _text_subscription: text_subscription,
             last_wheel: None,
             draft: None,
@@ -321,11 +325,13 @@ impl EditorView {
             rendering: false,
             dirty: false,
             ocr: None,
-            ocr_start: None,
-            ocr_end: None,
-            ocr_hover: None,
-            ocr_drag: false,
+            ocr_text: SharedString::default(),
+            ocr_scroll: ScrollHandle::default(),
+            ocr_size: size(px(340.), px(124.)),
+            ocr_resize: None,
+            ocr_request: 0,
             ocr_busy: false,
+            ocr_scanning: false,
             cancel: Cancellation::default(),
             session_cancel: Cancellation::default(),
         }
@@ -435,6 +441,7 @@ impl EditorView {
                 self.choose_tool(tool, w, cx);
             }
             "o" if !modifier => self.recognize(cx),
+            "w" if !modifier => self.choose_tool(Tool::Watermark, w, cx),
             "p" if !modifier => self.export(2, cx),
             "enter" if self.tool == Tool::Polyline => self.finish_path(cx),
             "l" | "g" if self.capture_context.is_some() => {
@@ -464,30 +471,7 @@ impl EditorView {
                 }
                 self.refresh(cx);
             }
-            "c" if modifier => {
-                if self.ocr.is_some() {
-                    self.copy_text(false, false, cx);
-                } else {
-                    self.export(0, cx);
-                }
-            }
-            "a" if modifier && self.ocr.is_some() => {
-                let ocr = self.ocr.as_ref().unwrap();
-                self.ocr_start = ocr
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .find(|(_, l)| !l.words.is_empty())
-                    .map(|(i, _)| (i, 0));
-                self.ocr_end = ocr
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, l)| !l.words.is_empty())
-                    .map(|(i, l)| (i, l.words.len() - 1));
-                cx.notify();
-            }
+            "c" if modifier && self.ocr.is_none() && !self.ocr_busy => self.export(0, cx),
             "s" if modifier => self.export(1, cx),
             "backspace" | "delete" => {
                 if let Some(i) = self.selected.take().filter(|i| *i < self.doc.objects.len()) {
@@ -503,7 +487,7 @@ impl EditorView {
         self.capture_context = Some((display, rect));
     }
     fn display_size(&self) -> f32 {
-        if matches!(self.option_tool(), Tool::Text | Tool::Number) {
+        if self.option_tool().is_typographic() {
             self.width * 6. + 12.
         } else {
             self.width
@@ -513,7 +497,7 @@ impl EditorView {
         if !size.is_finite() || size <= 0. || size > 512. {
             return;
         }
-        let width = if matches!(self.option_tool(), Tool::Text | Tool::Number) {
+        let width = if self.option_tool().is_typographic() {
             (size.max(13.) - 12.) / 6.
         } else {
             size.clamp(0.5, 128.)
@@ -705,6 +689,14 @@ impl EditorView {
         let existing = index.and_then(|i| self.doc.objects.get(i)).cloned();
         self.text_anchor = Some(existing.as_ref().map_or(p, |a| a.points[0]));
         self.text_index = index;
+        self.text_tool = existing.as_ref().map_or(
+            if self.tool == Tool::Watermark {
+                Tool::Watermark
+            } else {
+                Tool::Text
+            },
+            |a| a.tool,
+        );
         let value = existing.map_or_else(String::new, |a| {
             self.width = a.width;
             self.color = a.color;
@@ -728,6 +720,15 @@ impl EditorView {
             self.refresh(cx);
         }
         cx.notify();
+    }
+    #[cfg(debug_assertions)]
+    pub(crate) fn fixture_watermark(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        self.choose_tool(Tool::Watermark, w, cx);
+        self.begin_text(ImagePoint::new(290., 310.), None, w, cx);
+        self.width = 4.;
+        self.text
+            .update(cx, |t, cx| t.set_value("Simple Snip", w, cx));
+        self.commit_text(cx);
     }
     fn text_top_left(&self, anchor: ImagePoint) -> ImagePoint {
         let mut point = self.transform.forward(anchor);
@@ -753,7 +754,7 @@ impl EditorView {
         if !text.trim().is_empty() {
             let font = self.width * 6. + 12.;
             let a = Annotation {
-                tool: Tool::Text,
+                tool: self.text_tool,
                 points: vec![
                     p,
                     ImagePoint::new(
@@ -804,18 +805,18 @@ impl EditorView {
             self.last_wheel = Some(now);
             self.doc.objects[i].width = (self.doc.objects[i].width
                 + delta.signum()
-                    * if matches!(self.doc.objects[i].tool, Tool::Text | Tool::Number) {
+                    * if self.doc.objects[i].tool.is_typographic() {
                         1. / 6.
                     } else {
                         1.
                     })
             .clamp(
-                if matches!(self.doc.objects[i].tool, Tool::Text | Tool::Number) {
+                if self.doc.objects[i].tool.is_typographic() {
                     1. / 6.
                 } else {
                     0.5
                 },
-                if matches!(self.doc.objects[i].tool, Tool::Text | Tool::Number) {
+                if self.doc.objects[i].tool.is_typographic() {
                     (512. - 12.) / 6.
                 } else {
                     128.
@@ -827,18 +828,18 @@ impl EditorView {
         } else if self.tool != Tool::Select {
             self.width = (self.width
                 + delta.signum()
-                    * if matches!(self.tool, Tool::Text | Tool::Number) {
+                    * if self.tool.is_typographic() {
                         1. / 6.
                     } else {
                         1.
                     })
             .clamp(
-                if matches!(self.tool, Tool::Text | Tool::Number) {
+                if self.tool.is_typographic() {
                     1. / 6.
                 } else {
                     0.5
                 },
-                if matches!(self.tool, Tool::Text | Tool::Number) {
+                if self.tool.is_typographic() {
                     (512. - 12.) / 6.
                 } else {
                     128.
@@ -857,7 +858,7 @@ impl EditorView {
     fn cursor_indicator(&self) -> Option<AnyElement> {
         let p = self.pointer?;
         if self.text_anchor.is_some()
-            || matches!(self.tool, Tool::Select | Tool::Text)
+            || (self.tool == Tool::Select || self.tool.is_text())
             || self.ocr.is_some()
             || self.over_geometry_handle()
         {
@@ -908,10 +909,11 @@ impl EditorView {
     fn clear_ocr(&mut self) {
         self.cancel.cancel();
         self.ocr = None;
-        self.ocr_start = None;
-        self.ocr_end = None;
-        self.ocr_hover = None;
-        self.ocr_drag = false;
+        self.ocr_scanning = false;
+        self.ocr_text = SharedString::default();
+        self.ocr_scroll = ScrollHandle::default();
+        self.ocr_resize = None;
+        self.ocr_request = self.ocr_request.wrapping_add(1);
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
@@ -1063,22 +1065,27 @@ impl EditorView {
             EditorHost::Pin(id) => app::send(cx, Event::ClosePinEditor(id)),
         }
     }
-    fn recognize(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn recognize(&mut self, cx: &mut Context<Self>) {
         self.commit_text(cx);
         if self.ocr_busy {
             return;
         }
         self.clear_ocr();
         self.ocr_busy = true;
+        self.ocr_scanning = true;
         self.cancel = Cancellation::default();
         let cancel = self.cancel.clone();
-        let request = cancel.clone();
+        let request = self.ocr_request;
         let document = self.doc.render_snapshot();
+        let transform = self.transform;
         let generation = self.generation;
-        self.message = "正在本地识别…".into();
+        self.message.clear();
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
-                let image = document.flatten();
+            let result = smol::unblock(move || -> anyhow::Result<OcrResult> {
+                if cancel.cancelled() {
+                    return Ok(OcrResult::default());
+                }
+                let (_, image) = render_document(document, transform)?;
                 #[cfg(target_os = "windows")]
                 {
                     crate::windows_ocr::recognize(&image, &cancel)
@@ -1091,23 +1098,20 @@ impl EditorView {
             .await;
             let _ = this.update(cx, |v, cx| {
                 v.ocr_busy = false;
-                if request.cancelled() || v.generation != generation {
-                    if v.message == "正在本地识别…" {
-                        v.message.clear();
-                    }
+                v.ocr_scanning = false;
+                if v.ocr_request != request || v.generation != generation {
                     cx.notify();
                     return;
                 }
                 match result {
-                    Ok(ocr) => {
-                        v.message = format!("{} 行文字 · 拖动选择后复制", ocr.lines.len());
-                        v.ocr = Some(Arc::new(ocr.selection_units()));
-                        v.ocr_start = None;
-                        v.ocr_end = None;
+                    Ok(result) => {
+                        tracing::debug!(lines = result.lines.len(), "OCR finished");
+                        v.ocr_text = result.text().into();
+                        v.ocr = Some(Arc::new(result));
                         v.tool = Tool::Select;
                         v.selected = None;
                     }
-                    Err(e) => v.message = e.to_string(),
+                    Err(error) => v.message = format!("识别失败：{error}"),
                 }
                 cx.notify();
             });
@@ -1115,26 +1119,31 @@ impl EditorView {
         .detach();
         cx.notify();
     }
-    fn copy_text(&mut self, all: bool, table: bool, cx: &mut Context<Self>) {
-        if let Some(ocr) = &self.ocr {
-            let text = if table {
-                ocr.tsv()
-            } else if all {
-                ocr.text()
-            } else if let (Some(a), Some(b)) = (self.ocr_start, self.ocr_end) {
-                ocr.selected_text(a, b)
-            } else {
-                String::new()
-            };
-            if text.is_empty() {
-                self.message = "请先拖动选择文字".into();
-                return;
-            }
+    #[cfg(debug_assertions)]
+    pub(crate) fn fixture_ocr_result(&mut self, cx: &mut Context<Self>) {
+        self.ocr = Some(Arc::new(OcrResult::default()));
+        self.ocr_text = "Capture ideas. Keep your flow.\n本周待办\n完善截图与贴图交互\n自由框选 / 独立贴图 / 原位标注\n本地处理，专注当下。".into();
+        self.tool = Tool::Select;
+        self.selected = None;
+        cx.notify();
+    }
+    fn copy_ocr(&mut self, table: bool, cx: &mut Context<Self>) {
+        let Some(result) = &self.ocr else {
+            return;
+        };
+        let text = if table {
+            result.tsv().into()
+        } else {
+            self.ocr_text.clone()
+        };
+        if !text.trim().is_empty() {
             self.toast_last.clear();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
             self.message = "文字已复制".into();
+            cx.notify();
         }
     }
+
     fn down(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(w, cx);
         let p = self.image_point(e.position);
@@ -1148,13 +1157,7 @@ impl EditorView {
         {
             return;
         }
-        if let Some(ocr) = &self.ocr {
-            if let Some(hit) = ocr.nearest_hit(p) {
-                self.ocr_start = Some(hit);
-                self.ocr_end = Some(hit);
-                self.ocr_drag = true;
-                cx.notify();
-            }
+        if self.ocr.is_some() || self.ocr_scanning {
             return;
         }
         if self.text_anchor.is_some() {
@@ -1186,7 +1189,7 @@ impl EditorView {
                     self.color_picker.update(cx, |picker, cx| {
                         picker.set_value(rgba(u32::from_be_bytes(self.color)), w, cx)
                     });
-                    if e.click_count == 2 && self.doc.objects[i].tool == Tool::Text {
+                    if e.click_count == 2 && self.doc.objects[i].tool.is_text() {
                         self.begin_text(p, Some(i), w, cx);
                         return;
                     }
@@ -1201,11 +1204,11 @@ impl EditorView {
                 self.doc.remove_at_radius(p, self.width * 2. + 4.);
                 self.refresh(cx);
             }
-            Tool::Text => {
+            Tool::Text | Tool::Watermark => {
                 let index = self
                     .doc
                     .hit(p)
-                    .filter(|i| self.doc.objects[*i].tool == Tool::Text);
+                    .filter(|i| self.doc.objects[*i].tool == self.tool);
                 self.begin_text(p, index, w, cx);
             }
             Tool::Mosaic | Tool::Blur => {
@@ -1277,18 +1280,7 @@ impl EditorView {
             None
         };
         let p = self.image_point(e.position);
-        if let Some(ocr) = &self.ocr {
-            let hover = ocr.hit(p);
-            let end = if self.ocr_drag && e.dragging() {
-                ocr.nearest_hit(p)
-            } else {
-                self.ocr_end
-            };
-            if self.ocr_hover != hover || self.ocr_end != end {
-                self.ocr_hover = hover;
-                self.ocr_end = end;
-                cx.notify();
-            }
+        if self.ocr.is_some() || self.ocr_scanning {
             return;
         }
         cx.notify();
@@ -1344,7 +1336,9 @@ impl EditorView {
         }
     }
     fn pointer_up(&mut self, e: &MouseUpEvent, cx: &mut Context<Self>) {
-        self.ocr_drag = false;
+        if self.ocr_resize.take().is_some() {
+            return;
+        }
         self.last = None;
         self.moving_annotation = false;
         if self.geometry_drag.is_some() {
@@ -1364,7 +1358,7 @@ impl EditorView {
             cx.notify();
         }
     }
-    fn toolbar_width(&self) -> f32 {
+    fn tools_width(&self) -> f32 {
         let base = if self.toolbar_rows[0] > 0. {
             self.toolbar_rows[0]
         } else {
@@ -1377,8 +1371,16 @@ impl EditorView {
         };
         base.max(options) + 10.
     }
+    fn toolbar_width(&self) -> f32 {
+        if self.ocr.is_some() {
+            self.tools_width().max(f32::from(self.ocr_size.width))
+        } else {
+            self.tools_width()
+        }
+    }
     fn host_height(&self, cx: &App) -> f32 {
         self.toolbar_height()
+            + if self.toast_visible { 34. } else { 0. }
             + if self.popup_open || self.color_picker.read(cx).is_open() {
                 420.
             } else {
@@ -1386,7 +1388,9 @@ impl EditorView {
             }
     }
     fn toolbar_height(&self) -> f32 {
-        36. + if self.tool != Tool::Select || self.selected.is_some() || self.ocr.is_some() {
+        36. + if self.ocr.is_some() {
+            4. + f32::from(self.ocr_size.height)
+        } else if self.tool != Tool::Select || self.selected.is_some() {
             38.
         } else {
             0.
@@ -1436,6 +1440,7 @@ impl EditorView {
             ("马赛克", Tool::Mosaic),
             ("高斯模糊", Tool::Blur),
             ("橡皮擦", Tool::Eraser),
+            ("文字水印", Tool::Watermark),
         ];
         let mut strip = div()
             .on_children_prepainted(row_measure(0))
@@ -1450,25 +1455,48 @@ impl EditorView {
             strip = strip.child(capture_mode_button(display, rect));
             strip = strip.child(design::divider(cx));
         }
+        let shortcuts = [
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "B", "E", "W",
+        ];
         for (i, (label, tool)) in tools.into_iter().enumerate() {
+            let shortcut = shortcuts[i];
             if matches!(tool, Tool::Rectangle | Tool::Pen | Tool::Mosaic) {
                 strip = strip.child(design::divider(cx));
             }
             strip = strip.child(
                 Button::new(("tool", i))
                     .small()
+                    .compact()
+                    .w(px(28.))
                     .flex_shrink_0()
                     .ghost()
-                    .icon(tool_icon(tool))
-                    .when(tool == Tool::Number, |b| {
-                        b.label(self.next_number.to_string())
-                    })
+                    .child(
+                        div()
+                            .relative()
+                            .size(px(23.))
+                            .flex()
+                            .justify_center()
+                            .items_center()
+                            .child(tool_icon(tool).size(px(14.)))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .bottom_0()
+                                    .right_0()
+                                    .text_size(px(8.))
+                                    .line_height(px(8.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(shortcut),
+                            ),
+                    )
                     .accessibility_label(label)
-                    .tooltip(format!(
-                        "{} [{}]",
-                        label,
-                        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "B", "E"][i]
-                    ))
+                    .tooltip(if tool == Tool::Number {
+                        format!("{label} [{shortcut}] · 下一个 {}", self.next_number)
+                    } else if tool == Tool::Watermark {
+                        format!("{label} [{shortcut}] · 在图片上点击输入")
+                    } else {
+                        format!("{label} [{shortcut}]")
+                    })
                     .selected(
                         (self.tool == tool
                             || tool == Tool::Rectangle
@@ -1477,7 +1505,8 @@ impl EditorView {
                                     Tool::RoundedRectangle | Tool::Diamond | Tool::Triangle
                                 )
                             || tool == Tool::Line && self.tool.is_line())
-                            && self.ocr.is_none(),
+                            && self.ocr.is_none()
+                            && !self.ocr_scanning,
                     )
                     .on_click(cx.listener(move |v, _, w, cx| {
                         let tool = if tool == Tool::Line {
@@ -1496,7 +1525,7 @@ impl EditorView {
         let actions = [
             ("撤销", "undo"),
             ("重做", "redo"),
-            ("本地 OCR", "ocr"),
+            ("识别文字", "ocr"),
             ("保存图片", "save"),
             ("复制图片", "copy"),
             ("贴到桌面", "pin"),
@@ -1521,6 +1550,8 @@ impl EditorView {
                         |b| b.primary(),
                     )
                     .icon(action_icon(name))
+                    .disabled(name == "ocr" && self.ocr_busy)
+                    .selected(name == "ocr" && (self.ocr_busy || self.ocr.is_some()))
                     .accessibility_label(label)
                     .tooltip(format!(
                         "{} ({})",
@@ -1565,8 +1596,10 @@ impl EditorView {
             .toolbar_width()
             .min((f32::from(w.viewport_size().width) - 16.).max(1.));
         let has_options =
-            self.tool != Tool::Select || self.selected.is_some() || self.ocr.is_some();
-        let height = self.toolbar_height();
+            self.ocr.is_none() && (self.tool != Tool::Select || self.selected.is_some());
+        let height = self
+            .toolbar_height()
+            .min((f32::from(w.viewport_size().height) - 16.).max(1.));
         let image_w = f32::from(self.view_size.width);
         let image_h = f32::from(self.view_size.height);
         let ox = f32::from(self.origin.x);
@@ -1586,13 +1619,8 @@ impl EditorView {
         let global_y = placement.y;
         let mut panel = design::panel(cx)
             .id("floating-annotation-toolbar")
-            .when(matches!(self.host, EditorHost::Capture), |d| {
-                d.absolute()
-                    .left(px(global_x - ox))
-                    .top(px(global_y - oy))
-                    .w(px(width))
-            })
-            .when(matches!(self.host, EditorHost::Pin(_)), |d| d.w_full())
+            .w(px(self.tools_width()))
+            .max_w_full()
             .v_flex()
             .items_start()
             .gap_1()
@@ -1600,71 +1628,7 @@ impl EditorView {
             .shadow_sm()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(strip);
-        if self.ocr.is_some() {
-            panel =
-                panel.child(
-                    div()
-                        .id("annotation-ocr-options")
-                        .h_flex()
-                        .w_full()
-                        .overflow_x_scroll()
-                        .gap_1()
-                        .child(
-                            Button::new("selection-text")
-                                .xsmall()
-                                .flex_shrink_0()
-                                .label("复制选中")
-                                .on_click(cx.listener(|v, _, _, cx| {
-                                    v.copy_text(false, false, cx);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(Button::new("all-text").xsmall().label("全部").on_click(
-                            cx.listener(|v, _, _, cx| {
-                                v.copy_text(true, false, cx);
-                                cx.notify();
-                            }),
-                        ))
-                        .child(
-                            Button::new("tsv")
-                                .xsmall()
-                                .flex_shrink_0()
-                                .label("TSV")
-                                .tooltip("仅适用于简单表格")
-                                .on_click(cx.listener(|v, _, _, cx| {
-                                    v.copy_text(true, true, cx);
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(80.))
-                                .child(Input::new(&self.text).xsmall().aria_label("修正识别文字")),
-                        )
-                        .child(Button::new("correct").xsmall().label("修正行").on_click(
-                            cx.listener(|v, _, _, cx| {
-                                let index = v.ocr_start.map_or(0, |(line, _)| line);
-                                if let Some(ocr) = &mut v.ocr
-                                    && let Some(line) = Arc::make_mut(ocr).lines.get_mut(index)
-                                {
-                                    let text = v.text.read(cx).value().to_string();
-                                    if !text.is_empty() {
-                                        line.text = text.clone();
-                                        line.words = vec![snip_core::ocr::OcrWord {
-                                            text,
-                                            bounds: line.bounds,
-                                            confidence: None,
-                                        }];
-                                        v.ocr_start = Some((index, 0));
-                                        v.ocr_end = Some((index, 0));
-                                    }
-                                }
-                                cx.notify();
-                            }),
-                        )),
-                );
-        } else if has_options {
+        if has_options {
             let mut options = div()
                 .on_children_prepainted(row_measure(1))
                 .id("annotation-options")
@@ -1709,7 +1673,11 @@ impl EditorView {
                             })),
                     );
             }
-            options = options.child(ColorPicker::new(&self.color_picker).small().label("颜色"));
+            options = options.child(
+                ColorPicker::new(&self.color_picker)
+                    .small()
+                    .accessibility_label("标注颜色"),
+            );
             options = options
                 .child(
                     Button::new("size-minus")
@@ -1768,20 +1736,248 @@ impl EditorView {
                         Button::new(("variant", i))
                             .xsmall()
                             .flex_shrink_0()
-                            .label(label)
+                            .icon(tool_icon(tool))
+                            .tooltip(label)
+                            .accessibility_label(label)
                             .selected(self.tool == tool)
                             .on_click(cx.listener(move |v, _, w, cx| v.choose_tool(tool, w, cx))),
                     );
                 }
             }
             if self.option_tool() == Tool::Arrow {
-                options = options.child(arrow_style_button(cx.entity().downgrade()));
+                options = options.child(arrow_style_button(
+                    self.arrow_style,
+                    cx.entity().downgrade(),
+                    cx,
+                ));
             }
             panel = panel.child(options);
         }
-        panel
+        let result_height = if matches!(self.host, EditorHost::Capture) {
+            self.ocr_size.height.min(px((height - 40.).max(32.)))
+        } else {
+            self.ocr_size.height
+        };
+        let toast = self.toast_visible.then(|| {
+            design::panel(cx)
+                .absolute()
+                .right_0()
+                .top(px(
+                    if matches!(self.host, EditorHost::Capture)
+                        && global_y + height + 36. > f32::from(w.viewport_size().height)
+                    {
+                        -33.
+                    } else {
+                        self.toolbar_height().min(height) + 4.
+                    },
+                ))
+                .max_w_full()
+                .px_2()
+                .py_1()
+                .shadow_sm()
+                .child(design::detail(cx).child(self.message.clone()))
+        });
+        div()
+            .id("annotation-anchor")
+            .when(matches!(self.host, EditorHost::Capture), |d| {
+                d.absolute()
+                    .left(px(global_x - ox))
+                    .top(px(global_y - oy))
+                    .w(px(width))
+            })
+            .when(matches!(self.host, EditorHost::Pin(_)), |d| {
+                d.w_full().relative()
+            })
+            .v_flex()
+            .gap_1()
+            .items_end()
+            .child(panel)
+            .when(self.ocr.is_some(), |d| {
+                d.child(self.ocr_panel(result_height, cx))
+            })
+            .when(self.ocr_resize.is_some(), |d| {
+                let moving = cx.entity().downgrade();
+                let ending = moving.clone();
+                d.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| {
+                            let moving = moving.clone();
+                            window.on_mouse_event(move |e: &MouseMoveEvent, phase, w, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    let _ = moving.update(cx, |v, cx| v.resize_ocr(e, w, cx));
+                                }
+                            });
+                            let ending = ending.clone();
+                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    let _ = ending.update(cx, |v, cx| {
+                                        v.ocr_resize = None;
+                                        cx.notify();
+                                    });
+                                }
+                            });
+                        },
+                    )
+                    .absolute()
+                    .size_0(),
+                )
+            })
+            .children(toast)
+    }
+    fn ocr_panel(&self, height: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
+        let empty = self.ocr_text.trim().is_empty();
+        design::panel(cx)
+            .id("ocr-result")
+            .relative()
+            .w(self.ocr_size.width)
+            .max_w_full()
+            .h(height)
+            .v_flex()
+            .overflow_hidden()
+            .shadow_sm()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .h_flex()
+                    .h(px(30.))
+                    .flex_shrink_0()
+                    .px_2()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(action_icon("ocr").size(px(13.)))
+                            .child("识别结果"),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("ocr-tsv")
+                                    .xsmall()
+                                    .ghost()
+                                    .disabled(empty)
+                                    .icon(Icon::new(gpui_kit::assets::IconName::Grid2x2))
+                                    .accessibility_label("复制表格 TSV")
+                                    .tooltip("复制表格 TSV")
+                                    .on_click(cx.listener(|v, _, _, cx| v.copy_ocr(true, cx))),
+                            )
+                            .child(
+                                Button::new("ocr-copy")
+                                    .xsmall()
+                                    .ghost()
+                                    .disabled(empty)
+                                    .icon(action_icon("copy"))
+                                    .accessibility_label("复制识别结果")
+                                    .tooltip("复制识别结果")
+                                    .on_click(cx.listener(|v, _, _, cx| v.copy_ocr(false, cx))),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .mt_1()
+                    .mb(px(2.))
+                    .child(
+                        div()
+                            .id(("ocr-result-scroll", self.ocr_request as usize))
+                            .size_full()
+                            .flex()
+                            .items_start()
+                            .overflow_scroll()
+                            .track_scroll(&self.ocr_scroll)
+                            .child(
+                                div()
+                                    .v_flex()
+                                    .flex_none()
+                                    .min_w_full()
+                                    .px_2()
+                                    .pr_3()
+                                    .when(empty, |d| d.text_color(cx.theme().muted_foreground))
+                                    .children(
+                                        (if empty {
+                                            "未识别到文字"
+                                        } else {
+                                            self.ocr_text.as_ref()
+                                        })
+                                        .lines()
+                                        .map(|line| {
+                                            div()
+                                                .whitespace_nowrap()
+                                                .flex_shrink_0()
+                                                .h(px(18.))
+                                                .line_height(px(18.))
+                                                .text_size(px(12.))
+                                                .child(SharedString::from(
+                                                    if line.is_empty() { " " } else { line }
+                                                        .to_owned(),
+                                                ))
+                                        }),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        gpui_kit::base::Scrollbar::new(&self.ocr_scroll)
+                            .mode(gpui_kit::base::ScrollbarMode::Always),
+                    ),
+            )
+            .child(div().h(px(14.)).flex_shrink_0())
+            .child(
+                div()
+                    .id("ocr-resize")
+                    .debug_selector(|| "ocr-resize-grip".to_string())
+                    .absolute()
+                    .left_0()
+                    .bottom_0()
+                    .size(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor(CursorStyle::ResizeUpRightDownLeft)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(gpui_kit::assets::IconName::MoveDiagonal2).size(px(10.)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|v, e: &MouseDownEvent, w, cx| {
+                            v.ocr_resize = Some((e.position + w.bounds().origin, v.ocr_size));
+                            cx.notify();
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+    }
+    fn resize_ocr(&mut self, e: &MouseMoveEvent, w: &Window, cx: &mut Context<Self>) -> bool {
+        if let Some((start, original)) = self.ocr_resize {
+            if !e.dragging() {
+                self.ocr_resize = None;
+                return false;
+            }
+            let delta = e.position + w.bounds().origin - start;
+            let next = size(
+                (original.width - delta.x).clamp(px(250.), px(1200.)),
+                (original.height + delta.y).clamp(px(124.), px(440.)),
+            );
+            if self.ocr_size != next {
+                self.ocr_size = next;
+                cx.notify();
+            }
+            return true;
+        }
+        false
     }
 }
+
 impl Render for EditorView {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !toast_preferences(cx).0 {
@@ -1822,13 +2018,10 @@ impl Render for EditorView {
             .chain(
                 self.pending_annotations
                     .iter()
-                    .filter(|(a, _)| a.tool != Tool::Text && a.tool != Tool::Number)
+                    .filter(|(a, _)| !a.tool.is_typographic())
                     .map(|(a, _)| a.clone()),
             )
             .collect();
-        let ocr = self.ocr.clone();
-        let selection = self.ocr_start.zip(self.ocr_end);
-        let hover = self.ocr_hover;
         let selected = self
             .selected
             .filter(|_| self.text_anchor.is_none())
@@ -1895,7 +2088,7 @@ impl Render for EditorView {
                                 }
                                 path.line_to(map(*first));
                                 if let Ok(path) = path.build() {
-                                    window.paint_path(path, rgba(u32::from_be_bytes(a.color)));
+                                    window.paint_path(path, rgba(u32::from_be_bytes(a.ink())));
                                 }
                             }
                         }
@@ -1963,36 +2156,6 @@ impl Render for EditorView {
                         );
                     }
                 }
-                if let Some(ocr) = &ocr {
-                    for (i, line) in ocr.lines.iter().enumerate() {
-                        for (j, word) in line.words.iter().enumerate() {
-                            let r = word.bounds;
-                            let a = map(ImagePoint::new(r.x, r.y));
-                            let b = map(ImagePoint::new(r.right(), r.bottom()));
-                            let selected = selection.is_some_and(|(a, b)| {
-                                let (a, b) = if a <= b { (a, b) } else { (b, a) };
-                                (i, j) >= a && (i, j) <= b
-                            });
-                            let color = if selected {
-                                rgba(design::OCR_SELECTED)
-                            } else if hover == Some((i, j)) {
-                                rgba(design::OCR_HOVER)
-                            } else {
-                                rgba(0x00000000)
-                            };
-                            if !selected && hover != Some((i, j)) {
-                                continue;
-                            }
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(a.x.min(b.x), a.y.min(b.y)),
-                                    size((a.x - b.x).abs(), (a.y - b.y).abs()),
-                                ),
-                                color,
-                            ));
-                        }
-                    }
-                }
             },
         )
         .absolute()
@@ -2006,15 +2169,6 @@ impl Render for EditorView {
         div()
             .id("inline-image-editor")
             .key_context("ImageAnnotation")
-            .capture_action(
-                cx.listener(|v, _: &gpui_kit::component::input::Copy, _, cx| {
-                    if v.ocr.is_some() {
-                        v.copy_text(false, false, cx);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }),
-            )
             .on_action(cx.listener(|v, _: &app::FocusAnnotationTools, _, cx| {
                 if let EditorHost::Pin(id) = v.host {
                     app::send(cx, Event::FocusPinToolbar(id));
@@ -2022,14 +2176,12 @@ impl Render for EditorView {
             }))
             .track_focus(&self.focus)
             .relative()
-            .cursor(if self.ocr.is_some() {
-                CursorStyle::IBeam
-            } else if self.over_geometry_handle() {
+            .cursor(if self.over_geometry_handle() {
                 CursorStyle::PointingHand
             } else {
                 match self.tool {
                     Tool::Select => CursorStyle::Arrow,
-                    Tool::Text => CursorStyle::IBeam,
+                    Tool::Text | Tool::Watermark => CursorStyle::IBeam,
                     _ => CursorStyle::Crosshair,
                 }
             })
@@ -2064,7 +2216,7 @@ impl Render for EditorView {
             .children(
                 self.pending_annotations
                     .iter()
-                    .filter(|(a, _)| a.tool == Tool::Text)
+                    .filter(|(a, _)| a.tool.is_text())
                     .map(|(a, _)| {
                         let p = self.transform.forward(a.points[0]);
                         let font = (a.width * 6. + 12.) * self.scale;
@@ -2123,12 +2275,9 @@ impl Render for EditorView {
                             .font_family(annotation_font_family())
                             .text_size(px(font))
                             .line_height(line_height)
-                            .text_color(rgba(
-                                ((self.color[0] as u32) << 24)
-                                    | ((self.color[1] as u32) << 16)
-                                    | ((self.color[2] as u32) << 8)
-                                    | self.color[3] as u32,
-                            )),
+                            .text_color(rgba(u32::from_be_bytes(
+                                self.text_tool.text_ink(self.color),
+                            ))),
                         line_height,
                     ))
             }))
@@ -2172,19 +2321,35 @@ impl Render for EditorView {
                     .size_full(),
                 )
             })
-            .when(self.toast_visible, |d| {
+            .when(self.ocr_scanning, |d| {
+                let h = f32::from(self.view_size.height).max(1.);
                 d.child(
                     div()
                         .absolute()
-                        .top(px(4.))
-                        .left(px(8.))
-                        .right(px(8.))
+                        .inset_0()
+                        .overflow_hidden()
+                        .bg(rgba(0x11192375))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .child(
-                            design::image_label()
-                                .px_2()
-                                .py_1()
-                                .child(self.message.clone()),
-                        ),
+                            div()
+                                .absolute()
+                                .h(px(2.))
+                                .w_full()
+                                .bg(rgb(design::IMAGE_FOCUS))
+                                .with_animation(
+                                    ("ocr-scan", self.ocr_request as usize),
+                                    Animation::new(std::time::Duration::from_millis(1350))
+                                        .repeat()
+                                        .with_max_fps(30.),
+                                    move |line, t| {
+                                        line.top(px(h * t))
+                                            .opacity(0.45 + 0.45 * (std::f32::consts::PI * t).sin())
+                                    },
+                                ),
+                        )
+                        .child(design::image_label().px_3().py_1().child("正在识别文字…")),
                 )
             })
             .children(toolbar)
@@ -2197,17 +2362,6 @@ impl Render for EditorView {
                 cx.stop_propagation();
             }))
             .capture_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                let modifier = if cfg!(target_os = "macos") {
-                    e.keystroke.modifiers.platform
-                } else {
-                    e.keystroke.modifiers.control
-                };
-                if modifier && e.keystroke.key == "c" && v.ocr.is_some() {
-                    v.copy_text(false, false, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                    return;
-                }
                 if e.keystroke.key == "escape" {
                     v.cancel(cx);
                     cx.stop_propagation();
@@ -2237,7 +2391,9 @@ fn capture_mode_button(display: CapturedDisplay, rect: Rect) -> AnyElement {
     Button::new("capture-mode")
         .small()
         .flex_shrink_0()
-        .label("截图 ▾")
+        .icon(Icon::default().path("icons/frame.svg"))
+        .accessibility_label("切换截图模式")
+        .tooltip("切换截图模式")
         .dropdown_menu(move |menu, _, _| {
             let long_display = display.clone();
             let gif_display = display.clone();
@@ -2268,11 +2424,13 @@ fn capture_mode_button(display: CapturedDisplay, rect: Rect) -> AnyElement {
 }
 
 #[inline(never)]
-fn arrow_style_button(editor: WeakEntity<EditorView>) -> AnyElement {
+fn arrow_style_button(current: ArrowStyle, editor: WeakEntity<EditorView>, cx: &App) -> AnyElement {
     let observer = editor.clone();
     Button::new("arrow-style-menu")
         .xsmall()
-        .label("箭头样式 ▾")
+        .child(arrow_preview(current, cx.theme().foreground))
+        .accessibility_label("选择箭头样式")
+        .tooltip("选择箭头样式")
         .dropdown_menu(move |menu, _, _| {
             let mut menu = menu;
             for (label, style) in [
@@ -2288,20 +2446,44 @@ fn arrow_style_button(editor: WeakEntity<EditorView>) -> AnyElement {
                 ("头细尾宽", ArrowStyle::TailWide),
             ] {
                 let editor = editor.clone();
-                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                    let _ = editor.update(cx, |v, cx| {
-                        v.arrow_style = style;
-                        v.remember_fields(cx, 4);
-                        if let Some(i) = v.selected.filter(|i| {
-                            *i < v.doc.objects.len() && v.doc.objects[*i].tool == Tool::Arrow
-                        }) {
-                            v.doc.checkpoint();
-                            v.doc.objects[i].arrow_style = style;
-                            v.refresh(cx);
-                        }
-                        cx.notify();
-                    });
-                }));
+                menu = menu.item(
+                    PopupMenuItem::element(move |_, cx| {
+                        let active = style == current;
+                        div()
+                            .id(label)
+                            .h_flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(86.))
+                            .h(px(22.))
+                            .tooltip(move |w, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(label).build(w, cx)
+                            })
+                            .child(arrow_preview(
+                                style,
+                                if active {
+                                    cx.theme().primary
+                                } else {
+                                    cx.theme().foreground
+                                },
+                            ))
+                    })
+                    .checked(style == current)
+                    .on_click(move |_, _, cx| {
+                        let _ = editor.update(cx, |v, cx| {
+                            v.arrow_style = style;
+                            v.remember_fields(cx, 4);
+                            if let Some(i) = v.selected.filter(|i| {
+                                *i < v.doc.objects.len() && v.doc.objects[*i].tool == Tool::Arrow
+                            }) {
+                                v.doc.checkpoint();
+                                v.doc.objects[i].arrow_style = style;
+                                v.refresh(cx);
+                            }
+                            cx.notify();
+                        });
+                    }),
+                );
             }
             menu
         })
@@ -2318,18 +2500,62 @@ fn arrow_style_button(editor: WeakEntity<EditorView>) -> AnyElement {
         .into_any_element()
 }
 
+fn arrow_preview(style: ArrowStyle, ink: Hsla) -> impl IntoElement {
+    let sample = Annotation {
+        tool: Tool::Arrow,
+        points: vec![ImagePoint::new(3., 9.), ImagePoint::new(47., 9.)],
+        color: [0; 4],
+        width: 2.6,
+        text: String::new(),
+        arrow_style: style,
+    };
+    let (shaft, head, filled) = sample.arrow_parts();
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, w, _| {
+            for (points, fill) in [(&shaft, true), (&head, filled)] {
+                let Some(first) = points.first() else {
+                    continue;
+                };
+                let map = |p: &ImagePoint| bounds.origin + point(px(p.x), px(p.y));
+                let mut path = if fill {
+                    PathBuilder::fill()
+                } else {
+                    PathBuilder::stroke(px(1.2))
+                };
+                path.move_to(map(first));
+                for p in points.iter().skip(1) {
+                    path.line_to(map(p));
+                }
+                path.close();
+                if let Ok(path) = path.build() {
+                    w.paint_path(path, ink);
+                }
+            }
+        },
+    )
+    .w(px(50.))
+    .h(px(18.))
+}
+
 fn tool_icon(tool: Tool) -> Icon {
     use gpui_kit::assets::IconName as Glyph;
     Icon::new(match tool {
         Tool::Select => Glyph::MousePointer2,
-        Tool::Rectangle | Tool::RoundedRectangle | Tool::Diamond | Tool::Triangle => Glyph::Square,
+        Tool::Rectangle => Glyph::Square,
+        Tool::RoundedRectangle => Glyph::RectangleHorizontal,
+        Tool::Diamond => Glyph::Diamond,
+        Tool::Triangle => Glyph::Triangle,
         Tool::Ellipse => Glyph::Circle,
-        Tool::Line | Tool::Polyline | Tool::Curve => Glyph::Slash,
+        Tool::Line => Glyph::Slash,
+        Tool::Polyline => Glyph::MoveDiagonal2,
+        Tool::Curve => Glyph::Spline,
         Tool::Arrow => Glyph::ArrowUpRight,
         Tool::Pen => Glyph::Pencil,
         Tool::Highlight => Glyph::Highlighter,
         Tool::Number => Glyph::ListOrdered,
         Tool::Text => Glyph::Type,
+        Tool::Watermark => Glyph::Stamp,
         Tool::Mosaic => Glyph::Grid2x2,
         Tool::Blur => Glyph::Droplet,
         Tool::Eraser => Glyph::Eraser,
@@ -2365,12 +2591,7 @@ pub fn render_document(
 ) -> anyhow::Result<(Document, Arc<RgbaImage>)> {
     static FONT: std::sync::OnceLock<Result<Arc<snip_core::fontdue::Font>, String>> =
         std::sync::OnceLock::new();
-    if doc.font.is_none()
-        && doc
-            .objects
-            .iter()
-            .any(|a| matches!(a.tool, Tool::Text | Tool::Number))
-    {
+    if doc.font.is_none() && doc.objects.iter().any(|a| a.tool.is_typographic()) {
         let font = FONT.get_or_init(|| {
             snip_platform::annotation_font()
                 .map_err(|e| e.to_string())
@@ -2459,16 +2680,6 @@ impl Render for FloatingToolbar {
             .relative()
             .track_focus(&self.focus)
             .key_context("AnnotationTools")
-            .capture_action(
-                cx.listener(|v, _: &gpui_kit::component::input::Copy, _, cx| {
-                    if let Some(editor) = &v.editor
-                        && editor.read(cx).ocr.is_some()
-                    {
-                        editor.update(cx, |v, cx| v.copy_text(false, false, cx));
-                        cx.stop_propagation();
-                    }
-                }),
-            )
             .on_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
                 if let Some(editor) = &v.editor {
                     let editing_input = {
@@ -2480,21 +2691,6 @@ impl Render for FloatingToolbar {
                     if !editing_input {
                         editor.update(cx, |v, cx| v.key_down(e, w, cx, false));
                     }
-                }
-            }))
-            .capture_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                let modifier = if cfg!(target_os = "macos") {
-                    e.keystroke.modifiers.platform
-                } else {
-                    e.keystroke.modifiers.control
-                };
-                if modifier
-                    && e.keystroke.key == "c"
-                    && let Some(editor) = &v.editor
-                    && editor.read(cx).ocr.is_some()
-                {
-                    editor.update(cx, |v, cx| v.copy_text(false, false, cx));
-                    cx.stop_propagation();
                 }
             }))
             .capture_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
@@ -3031,110 +3227,100 @@ mod tests {
         });
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exported_watermark_preserves_transparency_and_undo() {
+        let source = Arc::new(image::RgbaImage::new(250, 100));
+        let mut doc = snip_core::annotation::Document::new(source.clone());
+        doc.add(snip_core::annotation::Annotation {
+            tool: super::Tool::Watermark,
+            points: vec![ImagePoint::new(8., 8.), ImagePoint::new(200., 60.)],
+            color: [170, 40, 21, 255],
+            width: 4.,
+            text: "Simple Snip".into(),
+            arrow_style: Default::default(),
+        });
+        let (mut doc, output) = super::render_document(doc, super::identity(&source)).unwrap();
+        assert!(output.pixels().any(|p| p[3] > 80));
+        assert!(output.pixels().all(|p| p[3] <= 107));
+        assert_eq!(doc.original.as_ref(), source.as_ref());
+        doc.undo();
+        assert_eq!(doc.flatten(), *source);
+    }
+
     #[gpui_kit::test]
-    fn ctrl_c_copies_ocr_selection_even_when_toolbar_input_has_focus(cx: &mut TestAppContext) {
+    fn result_grip_resizes_the_ocr_box_independently(cx: &mut TestAppContext) {
+        use gpui_kit::{MouseButton, VisualTestContext};
+        let (window, editor) = editor(cx);
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|w, cx| {
+            editor.update(cx, |v, cx| {
+                v.host = EditorHost::Capture;
+                v.ocr = Some(Arc::new(super::OcrResult::default()));
+                v.ocr_text = format!("{}\ntwo\nthree\nfour\nfive", "wide text ".repeat(15)).into();
+                cx.notify();
+            });
+            let _ = w.draw(cx);
+            w.simulate_next_frame(cx);
+            let _ = w.draw(cx);
+        });
+        cx.update(|cx| {
+            let overflow = editor.read(cx).ocr_scroll.max_offset();
+            assert!(overflow.x > px(0.) && overflow.y > px(0.), "{overflow:?}");
+        });
+        let grip = visual
+            .debug_bounds("ocr-resize-grip")
+            .expect("resize grip is visible");
+        let start = grip.origin + point(px(6.), px(6.));
+        let end = start + point(px(-80.), px(38.));
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        cx.update(|cx| {
+            let v = editor.read(cx);
+            assert_eq!(v.ocr_size, size(px(420.), px(162.)));
+            assert!(v.ocr_resize.is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn ocr_keeps_clipboard_unchanged_until_explicit_copy(cx: &mut TestAppContext) {
         let (window, editor) = editor(cx);
         cx.update(|cx| {
             window
                 .update(cx, |_, w, cx| {
-                    editor.update(cx, |v, _| {
-                        v.host = EditorHost::Capture;
-                        v.ocr = Some(Arc::new(super::OcrResult {
-                            lines: vec![snip_core::ocr::OcrLine {
-                                text: "Hello world".into(),
-                                bounds: super::Rect::new(0., 0., 120., 20.),
-                                confidence: None,
-                                language: None,
-                                words: vec![
-                                    snip_core::ocr::OcrWord {
-                                        text: "Hello".into(),
-                                        bounds: super::Rect::new(0., 0., 40., 20.),
-                                        confidence: None,
-                                    },
-                                    snip_core::ocr::OcrWord {
-                                        text: "world".into(),
-                                        bounds: super::Rect::new(60., 0., 40., 20.),
-                                        confidence: None,
-                                    },
-                                ],
-                            }],
-                        }));
-                        v.ocr_start = Some((0, 0));
-                        v.ocr_end = Some((0, 1));
-                    });
-                    let _ = w.draw(cx);
-                    w.simulate_next_frame(cx);
-                    let _ = w.draw(cx);
-                    editor.update(cx, |v, cx| v.text.update(cx, |t, cx| t.focus(w, cx)));
-                })
-                .unwrap()
-        });
-        let copy = if cfg!(target_os = "macos") {
-            "cmd-c"
-        } else {
-            "ctrl-c"
-        };
-        cx.simulate_keystrokes(window, copy);
-        cx.update(|cx| {
-            assert_eq!(
-                cx.read_from_clipboard().and_then(|c| c.text()),
-                Some("Hello world".into())
-            )
-        });
-        cx.update(|cx| {
-            window
-                .update(cx, |_, w, cx| {
                     editor.update(cx, |v, cx| {
-                        v.ocr = Some(Arc::new(
-                            (**v.ocr.as_ref().unwrap()).clone().selection_units(),
-                        ));
+                        v.host = EditorHost::Capture;
+                        v.ocr = Some(Arc::new(super::OcrResult::default()));
+                        v.ocr_text = "Hello world".into();
                         v.focus_canvas(w, cx);
                     });
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into()));
                     let _ = w.draw(cx);
                 })
-                .unwrap()
+                .unwrap();
         });
-        let recognized = cx.update(|cx| editor.read(cx).ocr.clone().unwrap());
-        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
-        visual.simulate_mouse_down(
-            point(px(451.), px(655.)),
-            gpui_kit::MouseButton::Left,
-            Default::default(),
+        cx.simulate_keystrokes(
+            window,
+            if cfg!(target_os = "macos") {
+                "cmd-c"
+            } else {
+                "ctrl-c"
+            },
         );
-        visual.simulate_mouse_move(
-            point(px(474.), px(655.)),
-            Some(gpui_kit::MouseButton::Left),
-            Default::default(),
-        );
-        cx.update(|cx| {
-            assert_eq!(
-                editor.read(cx).ocr_end,
-                Some((0, 4)),
-                "drag must cross whitespace"
-            )
-        });
-        visual.simulate_mouse_move(
-            point(px(600.), px(670.)),
-            Some(gpui_kit::MouseButton::Left),
-            Default::default(),
-        );
-        visual.simulate_mouse_up(
-            point(px(600.), px(670.)),
-            gpui_kit::MouseButton::Left,
-            Default::default(),
-        );
-        cx.update(|cx| {
-            let v = editor.read(cx);
-            assert_eq!(v.ocr_end, Some((0, 9)));
-            assert!(!v.ocr_drag);
-            assert!(Arc::ptr_eq(v.ocr.as_ref().unwrap(), &recognized));
-        });
-        cx.simulate_keystrokes(window, copy);
         cx.update(|cx| {
             assert_eq!(
                 cx.read_from_clipboard().and_then(|c| c.text()),
+                Some("before".into())
+            );
+            editor.update(cx, |v, cx| v.copy_ocr(false, cx));
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|c| c.text()),
                 Some("Hello world".into())
-            )
+            );
         });
     }
 
@@ -3388,15 +3574,14 @@ mod tests {
             editor.update(cx, |v, _| {
                 let ocr = v.cancel.clone();
                 let session = v.session_cancel.clone();
-                v.ocr_start = Some((2, 3));
-                v.ocr_end = Some((3, 1));
+                v.ocr_text = "old recognition".into();
                 v.clear_ocr();
                 assert!(ocr.cancelled(), "switching tools must cancel stale OCR");
                 assert!(
                     !session.cancelled(),
                     "drawing after OCR must still allow copy/save/done"
                 );
-                assert!(v.ocr_start.is_none() && v.ocr_end.is_none());
+                assert!(v.ocr_text.is_empty());
                 session
             })
         });

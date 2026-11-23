@@ -19,6 +19,7 @@ pub enum Tool {
     Pen,
     Highlight,
     Text,
+    Watermark,
     Number,
     Mosaic,
     Blur,
@@ -50,6 +51,21 @@ pub struct Annotation {
     pub arrow_style: ArrowStyle,
 }
 impl Tool {
+    pub fn is_text(self) -> bool {
+        matches!(self, Self::Text | Self::Watermark)
+    }
+
+    pub fn is_typographic(self) -> bool {
+        self.is_text() || self == Self::Number
+    }
+
+    pub fn text_ink(self, mut color: [u8; 4]) -> [u8; 4] {
+        if self == Self::Watermark {
+            color[3] = u8::try_from((u16::from(color[3]) * 42 + 50) / 100).unwrap_or(0);
+        }
+        color
+    }
+
     pub fn is_shape(self) -> bool {
         matches!(
             self,
@@ -65,6 +81,9 @@ impl Tool {
     }
 }
 impl Annotation {
+    pub fn ink(&self) -> [u8; 4] {
+        self.tool.text_ink(self.color)
+    }
     pub fn path_points(&self) -> Vec<Point> {
         let r = self.bounds();
         match self.tool {
@@ -375,7 +394,7 @@ impl Document {
             if a.points.is_empty() {
                 continue;
             }
-            if a.tool == Tool::Text {
+            if a.tool.is_text() {
                 if let Some(font) = &self.font {
                     draw_text(&mut output, font, a);
                 }
@@ -680,7 +699,7 @@ fn draw_text(image: &mut RgbaImage, font: &fontdue::Font, a: &Annotation) {
             [255, 255, 255, 255]
         }
     } else {
-        a.color
+        a.ink()
     };
     for glyph in layout.glyphs() {
         let (metrics, bitmap) = font.rasterize_config(glyph.key);
@@ -692,11 +711,17 @@ fn draw_text(image: &mut RgbaImage, font: &fontdue::Font, a: &Annotation) {
                     continue;
                 }
                 let alpha = bitmap[y * metrics.width + x] as f32 / 255. * ink[3] as f32 / 255.;
-                let pixel = image.get_pixel_mut(px as u32, py as u32);
-                for c in 0..3 {
-                    pixel[c] = (pixel[c] as f32 * (1. - alpha) + ink[c] as f32 * alpha) as u8;
+                if alpha == 0. {
+                    continue;
                 }
-                pixel[3] = 255;
+                let pixel = image.get_pixel_mut(px as u32, py as u32);
+                let retained = pixel[3] as f32 / 255. * (1. - alpha);
+                let coverage = alpha + retained;
+                for c in 0..3 {
+                    pixel[c] = ((pixel[c] as f32 * retained + ink[c] as f32 * alpha) / coverage)
+                        .round() as u8;
+                }
+                pixel[3] = (coverage * 255.).round() as u8;
             }
         }
     }

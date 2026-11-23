@@ -37,17 +37,20 @@ pub fn run(cx: &mut App) {
             let image = smol::unblock(|| make_page(1440, 960)).await?;
             cx.update(|cx| -> anyhow::Result<()> {
                 match mode.as_str() {
-                    "settings-light" | "settings-dark" => {
+                    "settings-light" | "settings-dark" | "update-toast" => {
                         let (preference, width, height) = if mode == "settings-dark" {
-                            ("dark", 760., 540.)
+                            ("dark", 720., 490.)
                         } else {
-                            ("light", 900., 660.)
+                            ("light", 820., 574.)
                         };
                         cx.global_mut::<Runtime>().config.theme = preference.into();
                         cx.global_mut::<Runtime>().config.save_directory =
                             "/Example/Simple Snip".into();
                         crate::ui::apply_theme(preference, cx);
                         let handle = crate::settings::Settings::open_section(section, cx)?;
+                        if mode == "update-toast" {
+                            crate::updates::fixture_notice(cx);
+                        }
                         handle.update(cx, |_, window, cx| {
                             window.resize(size(px(width), px(height)));
                             window.bounds_changed(cx);

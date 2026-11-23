@@ -1,5 +1,13 @@
 # 实际测试记录
 
+## 2026-11-23：v0.0.23 设置、更新与标注
+
+格式化、编译、Clippy 和 124 项 macOS workspace 测试通过。新增回归覆盖启动与每小时间隔检查、关闭检查后不再请求、无效草稿时独立保存更新开关、通知去重及点击导航、OCR 复制前保留剪贴板、结果框两个方向的溢出与拖动、半透明水印合成与撤销。原生 Vision 在合成截图中识别 5 行。
+
+检查了设置默认浅色、最小深色、标注快捷键、箭头和水印的真实 GPUI 首帧。macOS 锁屏时 `screencapture` 无法取得动态重绘，用内置 OCR 数据检查了结果框布局，通知点击和拖动以 GPUI 事件回归为准。复现：`target/debug/simple-snip --docs-demo settings-dark 9`、`--docs-demo update-toast`、`--docs-demo ocr-result`（原生识别）、`--docs-demo ocr-preview`（合成五行文本）或 `--docs-demo watermark`。
+
+实拍：[通用设置](ui-screenshots/v0.0.23-settings.png)、[深色外观](ui-screenshots/v0.0.23-appearance.png)、[OCR 结果框](ui-screenshots/v0.0.23-ocr.png)、[文字水印](ui-screenshots/v0.0.23-watermark.png)。
+
 ## 2026-11-19：UI 重设计
 
 本机 Apple Silicon 的真实 GPUI 窗口截图、尺寸与待验收项见 [ui-visual-verification.md](ui-visual-verification.md)。模拟双屏回归覆盖启动时两窗口共存、跨屏首拖即取得活动选区、开始框选后锁定、Esc 释放冻结帧。macOS Debug 原生 smoke 通过托盘、置顶/透明贴图、点击穿透恢复、多次创建与回收和采集控制栏生命周期。额外运行 `cargo test --locked -p snip-platform --test native -- --ignored`，3 项通过：真实桌面连续采集、Retina 区域边界和中英混合 OCR。未记录真实桌面图像。

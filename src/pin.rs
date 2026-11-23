@@ -310,6 +310,9 @@ impl PinView {
         }
         Ok((handle, view))
     }
+    pub(crate) fn editor(&self) -> Option<Entity<EditorView>> {
+        self.editor.clone()
+    }
     fn open_toolbar(&mut self, w: &Window, cx: &mut Context<Self>) {
         if let Some(editor) = &self.editor {
             match crate::editor::open_toolbar(editor.clone(), w, cx) {

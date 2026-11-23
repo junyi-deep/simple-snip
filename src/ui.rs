@@ -7,18 +7,33 @@ gpui_kit::assets::icon_assets!(
     EditingIcons,
     [
         ArrowUpRight,
+        Bell,
         Circle,
+        Download,
+        Diamond,
         Droplet,
         Eraser,
+        ExternalLink,
+        Eye,
+        EyeOff,
         Grid2x2,
         Highlighter,
         ListOrdered,
+        MoveDiagonal2,
+        Monitor,
+        Moon,
         MousePointer2,
         Pencil,
         Pin,
+        RectangleHorizontal,
+        RefreshCw,
         Save,
         ScanText,
         Slash,
+        Spline,
+        Stamp,
+        Sun,
+        Triangle,
         Type,
     ]
 );
@@ -43,8 +58,7 @@ impl AssetSource for Assets {
 
 pub const BODY: f32 = 13.;
 pub const DETAIL: f32 = 12.;
-pub const HEADING: f32 = 22.;
-pub const SPACE: f32 = 8.;
+pub const HEADING: f32 = 21.;
 pub const CONTROL_RADIUS: f32 = 6.;
 pub const PANEL_RADIUS: f32 = 10.;
 pub const LABEL_RADIUS: f32 = 4.;
@@ -53,8 +67,6 @@ pub const IMAGE_FOCUS: u32 = 0x4797ff;
 pub const IMAGE_HANDLE: u32 = 0xf4f8ff;
 pub const IMAGE_LABEL: u32 = 0x1b2534ef;
 pub const IMAGE_LABEL_TEXT: u32 = 0xf0f5ff;
-pub const OCR_HOVER: u32 = 0x4797ff55;
-pub const OCR_SELECTED: u32 = 0x4797ff99;
 
 #[derive(Clone, Copy)]
 struct Palette {
@@ -71,7 +83,7 @@ struct Palette {
     on_primary: &'static str,
     primary_hover: &'static str,
     primary_active: &'static str,
-    danger_text: u32,
+    danger_text: &'static str,
 }
 
 const LIGHT: Palette = Palette {
@@ -88,7 +100,7 @@ const LIGHT: Palette = Palette {
     on_primary: "#fdfeff",
     primary_hover: "#2356ae",
     primary_active: "#1d4694",
-    danger_text: 0x9e293d,
+    danger_text: "#9e293d",
 };
 
 const DARK: Palette = Palette {
@@ -105,7 +117,7 @@ const DARK: Palette = Palette {
     on_primary: "#13233b",
     primary_hover: "#a5c4ff",
     primary_active: "#7ca7f5",
-    danger_text: 0xff97a4,
+    danger_text: "#ff97a4",
 };
 
 impl Palette {
@@ -128,6 +140,7 @@ impl Palette {
             sidebar_accent: color(self.selected),
             sidebar_accent_foreground: color(self.text),
             border: color(self.border),
+            danger: color(self.danger_text),
             input: color(self.input),
             ring: color(self.primary),
             button: color(self.surface),
@@ -211,11 +224,6 @@ pub fn sync_system_theme(cx: &mut App) {
     }
 }
 
-pub fn danger_text(cx: &App) -> Hsla {
-    let palette = if cx.theme().is_dark() { DARK } else { LIGHT };
-    rgb(palette.danger_text).into()
-}
-
 pub fn panel(cx: &App) -> Div {
     div()
         .rounded(px(PANEL_RADIUS))
@@ -260,4 +268,24 @@ pub fn hotkey_label(label: &str, binding: Option<&String>) -> String {
         Some(key) => format!("{label}  {key}"),
         None => label.into(),
     }
+}
+
+pub fn notify(window: &mut Window, message: impl Into<SharedString>, error: bool, cx: &mut App) {
+    use gpui_kit::component::{
+        WindowExt,
+        notification::{Notification, NotificationDelivery},
+    };
+    struct TransientNotice;
+    let notice = if error {
+        Notification::error(message)
+    } else {
+        Notification::info(message)
+    };
+    window.push_notification(
+        notice
+            .id::<TransientNotice>()
+            .delivery(NotificationDelivery::InApp)
+            .placement(Anchor::TopRight),
+        cx,
+    );
 }

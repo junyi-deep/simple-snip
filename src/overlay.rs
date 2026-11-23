@@ -117,7 +117,13 @@ impl Overlay {
         }
         if active
             && (std::env::args().any(|a| a == "--smoke-test")
-                || (crate::is_docs_demo() && std::env::args().any(|a| a == "annotation")))
+                || (crate::is_docs_demo()
+                    && std::env::args().any(|a| {
+                        matches!(
+                            a.as_str(),
+                            "annotation" | "ocr-result" | "ocr-preview" | "watermark"
+                        )
+                    })))
         {
             handle.update(cx, |_, w, cx| {
                 view.update(cx, |v, cx| {
@@ -133,7 +139,24 @@ impl Overlay {
                         v.begin_edit(w, cx);
                         if let Some(editor) = &v.editor {
                             editor.update(cx, |v, cx| {
-                                v.choose_tool(snip_core::annotation::Tool::Arrow, w, cx)
+                                v.choose_tool(snip_core::annotation::Tool::Arrow, w, cx);
+                                if crate::is_docs_demo()
+                                    && std::env::args().any(|a| a == "ocr-result")
+                                {
+                                    v.recognize(cx);
+                                }
+                                #[cfg(debug_assertions)]
+                                if crate::is_docs_demo()
+                                    && std::env::args().any(|a| a == "watermark")
+                                {
+                                    v.fixture_watermark(w, cx);
+                                }
+                                #[cfg(debug_assertions)]
+                                if crate::is_docs_demo()
+                                    && std::env::args().any(|a| a == "ocr-preview")
+                                {
+                                    v.fixture_ocr_result(cx);
+                                }
                             });
                         }
                         tracing::info!(

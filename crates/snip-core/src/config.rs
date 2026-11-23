@@ -59,12 +59,23 @@ pub enum ProxyMode {
     Direct,
     Http,
 }
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateConfig {
+    pub auto_check: bool,
     pub proxy_mode: ProxyMode,
     pub proxy_url: String,
     pub proxy_username: String,
+}
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            proxy_mode: ProxyMode::default(),
+            proxy_url: String::new(),
+            proxy_username: String::new(),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

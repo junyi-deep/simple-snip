@@ -43,6 +43,7 @@ pub enum Event {
     Pin(PreparedImage, Option<Bounds<Pixels>>),
     AnimatedPin(PreparedImage, crate::animation::Source),
     Edit(Arc<image::RgbaImage>),
+    Recognize(Arc<image::RgbaImage>),
     ApplyPin(
         u64,
         snip_core::annotation::Document,
@@ -226,8 +227,7 @@ pub fn status(cx: &mut App, message: impl Into<String>) {
     if let Some(handle) = cx.global::<Runtime>().settings {
         cx.defer(move |cx| {
             let _ = handle.update(cx, |_, w, cx| {
-                use gpui_kit::component::{WindowExt, notification::Notification};
-                w.push_notification(Notification::info(message), cx);
+                crate::ui::notify(w, message, false, cx);
             });
         });
     }
@@ -498,6 +498,9 @@ pub fn start(cx: &mut App, smoke_test: bool) {
     .detach();
     let theme = cx.global::<Runtime>().config.theme.clone();
     crate::ui::install_theme(&theme, cx);
+    if !smoke_test {
+        crate::updates::start(cx);
+    }
     if cx.global::<Runtime>().config.show_settings_on_start {
         open_settings(cx);
     }
@@ -611,7 +614,7 @@ pub(crate) fn read_clipboard_command(
             Ok(image) if matches!(cmd, Command::Paste) => {
                 Event::Pin(PreparedImage::new(image), None)
             }
-            Ok(image) => Event::Edit(image),
+            Ok(image) => Event::Recognize(image),
             Err(error) => Event::Status(format!("读取剪贴板失败：{error}")),
         };
         // Release before enqueueing: a subsequent key press can start another
@@ -696,27 +699,9 @@ pub(crate) fn handle(event: Event, cx: &mut App) {
                 }
                 crate::effects::raise(cx);
             }
-            Command::History => {
-                open_settings(cx);
-                status(
-                    cx,
-                    format!(
-                        "历史文件保存在 {}",
-                        cx.global::<Runtime>().config.save_directory.display()
-                    ),
-                );
-            }
+            Command::History => crate::updates::open_section(8, cx),
             Command::Settings => open_settings(cx),
-            Command::About => {
-                open_settings(cx);
-                status(
-                    cx,
-                    format!(
-                        "Simple Snip {} · Rust + GPUI Kit 0.8 · 图片与 OCR 全程离线",
-                        env!("CARGO_PKG_VERSION")
-                    ),
-                );
-            }
+            Command::About => crate::updates::open_section(10, cx),
             Command::RecordingPause | Command::RecordingStop | Command::RecordingCancel => {
                 for control in &cx.global::<Runtime>().recordings {
                     if control.done.load(std::sync::atomic::Ordering::Relaxed) {
@@ -889,6 +874,7 @@ pub(crate) fn handle(event: Event, cx: &mut App) {
             }
         }
         Event::Edit(image) => open_editor(image, cx),
+        Event::Recognize(image) => open_editor_with_ocr(image, true, cx),
         Event::ScreenPermissionDenied => screen_permission_dialog(cx),
         Event::Status(s) => status(cx, s),
         Event::Saved(result) => match result {
@@ -1158,11 +1144,17 @@ pub fn open_settings(cx: &mut App) {
     crate::effects::raise(cx);
 }
 pub fn open_editor(image: Arc<image::RgbaImage>, cx: &mut App) {
+    open_editor_with_ocr(image, false, cx);
+}
+fn open_editor_with_ocr(image: Arc<image::RgbaImage>, recognize: bool, cx: &mut App) {
     cx.activate(true);
     let id = cx.global::<Runtime>().next_pin;
     cx.global_mut::<Runtime>().next_pin += 1;
     match PinView::open(id, image, true, cx) {
         Ok((handle, view)) => {
+            if recognize && let Some(editor) = view.read(cx).editor() {
+                editor.update(cx, |v, cx| v.recognize(cx));
+            }
             cx.global_mut::<Runtime>()
                 .pins
                 .insert(id, PinRecord { handle, view });

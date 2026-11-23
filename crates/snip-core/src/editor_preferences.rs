@@ -71,7 +71,7 @@ impl EditorPreferences {
         prefs.toast_delay_ms = prefs.toast_delay_ms.clamp(500, 10000);
         prefs.next_number = prefs.next_number.max(1);
         prefs.styles.retain(|tool, style| {
-            let (min, max) = if matches!(tool, Tool::Text | Tool::Number) {
+            let (min, max) = if tool.is_typographic() {
                 (1. / 6., 500. / 6.)
             } else {
                 (0.5, 128.)
