@@ -2,23 +2,16 @@ use crate::WindowStyle;
 use anyhow::{Context, Result, ensure};
 use image::RgbaImage;
 use raw_window_handle::RawWindowHandle;
+use snip_core::ocr_config::RapidOptions;
 use snip_core::{
     geometry::{Point, Rect},
     ocr::{Cancellation, OcrEngine, OcrLine, OcrResult, OcrWord},
 };
-use windows::{
-    Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap},
-    Media::Ocr::OcrEngine as WinOcr,
-    Storage::Streams::DataWriter,
-    Win32::{
-        Foundation::{
-            COLORREF, GetLastError, HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR,
-        },
-        Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
-        Graphics::Gdi::ScreenToClient,
-        System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
-        UI::WindowsAndMessaging::*,
-    },
+use windows::Win32::{
+    Foundation::{COLORREF, GetLastError, HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR},
+    Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
+    Graphics::Gdi::ScreenToClient,
+    UI::WindowsAndMessaging::*,
 };
 
 /// Only geometry is needed for snapping. Avoid retrieving titles/process names
@@ -357,94 +350,89 @@ pub fn annotation_font() -> Result<Vec<u8>> {
         std::path::PathBuf::from(dir).join("Fonts/msyh.ttc"),
     )?)
 }
-struct Apartment;
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        unsafe {
-            RoUninitialize();
-        }
-    }
-}
 pub struct NativeOcr;
-// Windows OCR inserts a separator between Han characters. Keep Latin word
-// boundaries and intentional runs of whitespace, but restore normal Han text.
-fn ocr_line_text(text: &str) -> String {
-    let han = |c: char| matches!(c as u32, 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0x20000..=0x323af);
-    let chars: Vec<_> = text.chars().collect();
-    chars
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &c)| {
-            if c == ' ' && i > 0 && i + 1 < chars.len() && han(chars[i - 1]) && han(chars[i + 1]) {
-                None
-            } else {
-                Some(c)
-            }
-        })
-        .collect()
-}
-
 impl OcrEngine for NativeOcr {
     fn recognize(&self, image: &RgbaImage, cancel: &Cancellation) -> Result<OcrResult> {
-        ensure!(!cancel.cancelled(), "识别已取消");
-        unsafe {
-            RoInitialize(RO_INIT_MULTITHREADED)?;
-        }
-        let _apartment = Apartment;
-        let max = WinOcr::MaxImageDimension()?;
-        ensure!(
-            image.width() <= max && image.height() <= max,
-            "图片超过系统 OCR 的 {max}px 尺寸上限，请先裁剪图片"
-        );
-        let engine = WinOcr::TryCreateFromUserProfileLanguages().context(
-            "Windows OCR 不可用。请在系统语言设置中安装中文 / 英文语言包及 OCR 功能后重试",
-        )?;
-        let writer = DataWriter::new()?;
-        writer.WriteBytes(image.as_raw())?;
-        let buffer = writer.DetachBuffer()?;
-        let bitmap = SoftwareBitmap::CreateCopyFromBuffer(
-            &buffer,
-            BitmapPixelFormat::Rgba8,
-            image.width() as i32,
-            image.height() as i32,
-        )?;
-        let result = engine.RecognizeAsync(&bitmap)?.join()?;
-        ensure!(!cancel.cancelled(), "识别已取消");
-        let mut lines = vec![];
-        for line in result.Lines()? {
-            let mut words = vec![];
-            let mut bounds: Option<Rect> = None;
-            for word in line.Words()? {
-                let b = word.BoundingRect()?;
-                let r = Rect::new(b.X, b.Y, b.Width, b.Height);
-                bounds = Some(if let Some(a) = bounds {
-                    let x = a.x.min(r.x);
-                    let y = a.y.min(r.y);
-                    Rect::new(
-                        x,
-                        y,
-                        a.right().max(r.right()) - x,
-                        a.bottom().max(r.bottom()) - y,
-                    )
-                } else {
-                    r
-                });
-                words.push(OcrWord {
-                    text: word.Text()?.to_string(),
-                    bounds: r,
-                    confidence: None,
-                });
-            }
-            lines.push(OcrLine {
-                text: ocr_line_text(&line.Text()?.to_string()),
-                bounds: bounds.unwrap_or_default(),
-                words,
-                confidence: None,
-                language: Some(engine.RecognizerLanguage()?.LanguageTag()?.to_string()),
-            });
-        }
-        Ok(OcrResult { lines })
+        anyhow::ensure!(!cancel.cancelled(), "识别已取消");
+        let result = recognize_with_rapidocr(image.clone(), RapidOptions::default())?;
+        anyhow::ensure!(!cancel.cancelled(), "识别已取消");
+        Ok(result)
     }
+}
+
+pub fn recognize_with_rapidocr(image: RgbaImage, options: RapidOptions) -> Result<OcrResult> {
+    use rapidocr_core::{
+        RapidOcr,
+        config::{LimitType, PipelineConfig},
+        model::{ModelCache, PPOCRV5_CH_MOBILE},
+    };
+    let dir = tempfile::tempdir().context("无法创建本地 OCR 模型目录")?;
+    macro_rules! model {
+        ($name:literal) => {
+            std::fs::write(
+                dir.path().join($name),
+                include_bytes!(concat!("../../../assets/rapidocr/", $name)),
+            )?
+        };
+    }
+    model!("ch_PP-OCRv5_det_mobile.onnx");
+    model!("ch_PP-OCRv5_rec_mobile.onnx");
+    model!("ppocrv5_dict.txt");
+    if options.orientation {
+        model!("ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx");
+    }
+    let mut config = ModelCache::new(dir.path())
+        .config_for(&PPOCRV5_CH_MOBILE)
+        .with_pipeline(PipelineConfig::new(true, options.orientation, true));
+    config.max_side_len = options.max_side;
+    config.text_score = options.text_score;
+    config.inference.intra_threads = options.threads;
+    config.inference.inter_threads = 1;
+    if let Some(det) = &mut config.det {
+        det.thresh = options.detection_threshold;
+        det.box_thresh = options.box_score;
+        det.unclip_ratio = options.unclip_ratio;
+        det.limit_side_len = options.max_side;
+        // The profile is an upper bound. Min would enlarge the short edge
+        // and turn a thin text snippet into a much larger inference tensor.
+        det.limit_type = LimitType::Max;
+    }
+    let rgb = image::RgbImage::from_fn(image.width(), image.height(), |x, y| {
+        let p = image.get_pixel(x, y);
+        let a = u16::from(p[3]);
+        image::Rgb(std::array::from_fn(|c| {
+            ((u16::from(p[c]) * a + 255 * (255 - a)) / 255) as u8
+        }))
+    });
+    let mut engine = RapidOcr::from_config(config).context("无法初始化 RapidOCR")?;
+    let output = engine.run_image(&rgb).context("RapidOCR 推理失败")?;
+    let lines = output
+        .lines
+        .into_iter()
+        .map(|line| {
+            let [left, top, right, bottom] = line.bbox.points.iter().fold(
+                [f32::INFINITY, f32::INFINITY, 0., 0.],
+                |[left, top, right, bottom], &[x, y]| {
+                    [left.min(x), top.min(y), right.max(x), bottom.max(y)]
+                },
+            );
+            // The result panel is selectable text. A line rectangle is sufficient for TSV layout.
+            let bounds = Rect::new(left, top, right - left, bottom - top);
+            let words = vec![OcrWord {
+                text: line.text.clone(),
+                bounds,
+                confidence: Some(line.score),
+            }];
+            OcrLine {
+                text: line.text,
+                bounds,
+                words,
+                confidence: Some(line.score),
+                language: None,
+            }
+        })
+        .collect();
+    Ok(OcrResult { lines })
 }
 
 pub fn inspect_window(handle: RawWindowHandle) -> Result<(bool, bool, f32)> {
@@ -539,19 +527,6 @@ mod tests {
                 DestroyWindow(self.0).unwrap();
             }
         }
-    }
-
-    #[test]
-    fn windows_ocr_joins_han_without_removing_latin_or_intentional_spaces() {
-        assert_eq!(
-            super::ocr_line_text("Offline 2026 测 试 文 字"),
-            "Offline 2026 测试文字"
-        );
-        assert_eq!(
-            super::ocr_line_text("hello world 中 文 text"),
-            "hello world 中文 text"
-        );
-        assert_eq!(super::ocr_line_text("测  试\n测\t试"), "测  试\n测\t试");
     }
 
     #[test]

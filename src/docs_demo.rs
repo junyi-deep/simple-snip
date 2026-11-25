@@ -241,6 +241,7 @@ fn make_page(width: u32, height: u32) -> anyhow::Result<Arc<RgbaImage>> {
             color,
             width: (font - 12.) / 6.,
             text: value.into(),
+            watermark: Default::default(),
             arrow_style: Default::default(),
         });
     };

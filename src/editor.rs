@@ -4,7 +4,7 @@ use gpui_kit::{
     component::{
         button::*,
         color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
-        input::{Input, InputEvent, InputState},
+        input::{Input, InputEvent, InputState, Textarea, TextareaState},
         menu::*,
         *,
     },
@@ -158,6 +158,7 @@ pub struct EditorView {
     capture_context: Option<(CapturedDisplay, Rect)>,
     text_index: Option<usize>,
     text_tool: Tool,
+    watermark: snip_core::annotation::WatermarkStyle,
     _text_subscription: Subscription,
     last_wheel: Option<std::time::Instant>,
     draft: Option<Annotation>,
@@ -180,7 +181,8 @@ pub struct EditorView {
     dirty: bool,
     ocr: Option<Arc<OcrResult>>,
     ocr_text: SharedString,
-    ocr_scroll: ScrollHandle,
+    ocr_field: Entity<TextareaState>,
+    ocr_mode: Option<usize>,
     ocr_size: gpui_kit::Size<Pixels>,
     ocr_resize: Option<(Point<Pixels>, gpui_kit::Size<Pixels>)>,
     ocr_request: u64,
@@ -209,7 +211,12 @@ impl EditorView {
             cx.set_global(PreferencesStore::default());
         }
         let preferences = cx.global::<PreferencesStore>().value.clone();
-        let style = preferences.style(preferences.tool);
+        let initial_tool = if matches!(host, EditorHost::Pin(_)) {
+            Tool::Select
+        } else {
+            preferences.tool
+        };
+        let style = preferences.style(initial_tool);
         let focus = cx.focus_handle();
         focus.focus(w, cx);
         let text = cx.new(|cx| InputState::new(w, cx));
@@ -273,8 +280,7 @@ impl EditorView {
             .filter_map(|a| a.text.parse::<u32>().ok())
             .max()
             .unwrap_or(0)
-            .saturating_add(1)
-            .max(preferences.next_number);
+            .saturating_add(1);
         Self {
             preferences: preferences.clone(),
             toolbar_rows: [0.; 2],
@@ -287,7 +293,7 @@ impl EditorView {
             host,
             rendered: initial.clone(),
             texture: app::texture(&initial),
-            tool: preferences.tool,
+            tool: initial_tool,
             color: style.color,
             color_picker,
             _color_subscription: color_subscription,
@@ -301,6 +307,10 @@ impl EditorView {
             text_anchor: None,
             text_index: None,
             text_tool: Tool::Text,
+            watermark: snip_core::annotation::WatermarkStyle {
+                density: snip_core::annotation::WatermarkDensity::Medium,
+                bold: false,
+            },
             _text_subscription: text_subscription,
             last_wheel: None,
             draft: None,
@@ -326,8 +336,9 @@ impl EditorView {
             dirty: false,
             ocr: None,
             ocr_text: SharedString::default(),
-            ocr_scroll: ScrollHandle::default(),
-            ocr_size: size(px(340.), px(124.)),
+            ocr_field: cx.new(|cx| TextareaState::new(w, cx).soft_wrap(false)),
+            ocr_mode: None,
+            ocr_size: size(px(0.), px(124.)),
             ocr_resize: None,
             ocr_request: 0,
             ocr_busy: false,
@@ -349,7 +360,6 @@ impl EditorView {
         if self.tool.is_line() {
             self.preferences.line = self.tool;
         }
-        self.preferences.next_number = self.next_number;
         let mut style = self.preferences.style(tool);
         if fields & 1 != 0 {
             style.width = self.width;
@@ -621,6 +631,7 @@ impl EditorView {
             width: self.width,
             text: String::new(),
             arrow_style: self.arrow_style,
+            watermark: Default::default(),
         };
         if checkpoint {
             self.doc.add(a);
@@ -700,6 +711,9 @@ impl EditorView {
         let value = existing.map_or_else(String::new, |a| {
             self.width = a.width;
             self.color = a.color;
+            if a.tool == Tool::Watermark {
+                self.watermark = a.watermark;
+            }
             a.text
         });
         self.text.update(cx, |input, cx| {
@@ -740,6 +754,20 @@ impl EditorView {
         point
     }
 
+    fn apply_watermark_style(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self.selected.filter(|i| {
+            self.doc
+                .objects
+                .get(*i)
+                .is_some_and(|a| a.tool == Tool::Watermark)
+        }) {
+            self.doc.checkpoint();
+            self.doc.objects[index].watermark = self.watermark;
+            self.refresh(cx);
+        }
+        cx.notify();
+    }
+
     fn commit_text(&mut self, cx: &mut Context<Self>) {
         let Some(anchor) = self.text_anchor.take() else {
             return;
@@ -770,6 +798,7 @@ impl EditorView {
                 width: self.width,
                 text,
                 arrow_style: ArrowStyle::default(),
+                watermark: self.watermark,
             };
             self.pending_annotations
                 .push((a.clone(), self.generation + 1));
@@ -911,7 +940,6 @@ impl EditorView {
         self.ocr = None;
         self.ocr_scanning = false;
         self.ocr_text = SharedString::default();
-        self.ocr_scroll = ScrollHandle::default();
         self.ocr_resize = None;
         self.ocr_request = self.ocr_request.wrapping_add(1);
     }
@@ -1079,6 +1107,12 @@ impl EditorView {
         let document = self.doc.render_snapshot();
         let transform = self.transform;
         let generation = self.generation;
+        let modes = &cx.global::<Runtime>().config.ocr;
+        let profile = modes.profiles[self
+            .ocr_mode
+            .filter(|i| *i < modes.profiles.len())
+            .unwrap_or(modes.active)]
+        .clone();
         self.message.clear();
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || -> anyhow::Result<OcrResult> {
@@ -1088,11 +1122,11 @@ impl EditorView {
                 let (_, image) = render_document(document, transform)?;
                 #[cfg(target_os = "windows")]
                 {
-                    crate::windows_ocr::recognize(&image, &cancel)
+                    crate::windows_ocr::recognize(&image, &profile.rapid, &cancel)
                 }
                 #[cfg(target_os = "macos")]
                 {
-                    snip_core::ocr::OcrEngine::recognize(&snip_platform::NativeOcr, &image, &cancel)
+                    snip_platform::recognize_with_vision(&image, &profile.vision, &cancel)
                 }
             })
             .await;
@@ -1235,6 +1269,7 @@ impl EditorView {
                         width: self.width,
                         text: String::new(),
                         arrow_style: self.arrow_style,
+                        watermark: Default::default(),
                     });
                 }
             }
@@ -1250,6 +1285,7 @@ impl EditorView {
                         width: self.width,
                         text: number.to_string(),
                         arrow_style: ArrowStyle::default(),
+                        watermark: Default::default(),
                     },
                     cx,
                 );
@@ -1263,6 +1299,7 @@ impl EditorView {
                     width: self.width,
                     text: String::new(),
                     arrow_style: self.arrow_style,
+                    watermark: Default::default(),
                 })
             }
         }
@@ -1371,9 +1408,19 @@ impl EditorView {
         };
         base.max(options) + 10.
     }
+    fn ocr_width(&self) -> Pixels {
+        if self.ocr_size.width > px(0.) {
+            self.ocr_size.width
+        } else {
+            px(self.tools_width())
+        }
+    }
+    pub fn has_ocr_result(&self) -> bool {
+        self.ocr.is_some()
+    }
     fn toolbar_width(&self) -> f32 {
         if self.ocr.is_some() {
-            self.tools_width().max(f32::from(self.ocr_size.width))
+            self.tools_width().max(f32::from(self.ocr_width()))
         } else {
             self.tools_width()
         }
@@ -1396,7 +1443,7 @@ impl EditorView {
             0.
         }
     }
-    fn toolbar(&mut self, w: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn toolbar(&mut self, w: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let row_measure = |index: usize| {
             let weak = cx.entity().downgrade();
             move |bounds: Vec<Bounds<Pixels>>, _: &mut Window, cx: &mut App| {
@@ -1437,10 +1484,16 @@ impl EditorView {
             ("荧光笔", Tool::Highlight),
             ("文字", Tool::Text),
             ("标号", Tool::Number),
-            ("马赛克", Tool::Mosaic),
-            ("高斯模糊", Tool::Blur),
+            (
+                "模糊 / 马赛克",
+                if self.tool == Tool::Mosaic {
+                    Tool::Mosaic
+                } else {
+                    Tool::Blur
+                },
+            ),
             ("橡皮擦", Tool::Eraser),
-            ("文字水印", Tool::Watermark),
+            ("图片水印", Tool::Watermark),
         ];
         let mut strip = div()
             .on_children_prepainted(row_measure(0))
@@ -1455,12 +1508,21 @@ impl EditorView {
             strip = strip.child(capture_mode_button(display, rect));
             strip = strip.child(design::divider(cx));
         }
-        let shortcuts = [
-            "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "B", "E", "W",
-        ];
+        let modes = cx
+            .try_global::<Runtime>()
+            .map(|runtime| runtime.config.ocr.clone())
+            .unwrap_or_default();
+        let mode = self
+            .ocr_mode
+            .filter(|index| *index < modes.profiles.len())
+            .unwrap_or(modes.active);
+        let shortcuts = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "B", "E", "W"];
         for (i, (label, tool)) in tools.into_iter().enumerate() {
             let shortcut = shortcuts[i];
-            if matches!(tool, Tool::Rectangle | Tool::Pen | Tool::Mosaic) {
+            if matches!(
+                tool,
+                Tool::Rectangle | Tool::Pen | Tool::Blur | Tool::Mosaic
+            ) {
                 strip = strip.child(design::divider(cx));
             }
             strip = strip.child(
@@ -1539,6 +1601,45 @@ impl EditorView {
             }
             if name == "ocr" || name == "save" {
                 strip = strip.child(design::divider(cx));
+            }
+            if name == "ocr" {
+                let editor = cx.entity().downgrade();
+                let observer = editor.clone();
+                let profiles = modes.profiles.clone();
+                strip = strip.child(
+                    Button::new("ocr-mode")
+                        .xsmall()
+                        .ghost()
+                        .flex_shrink_0()
+                        .label(profiles[mode].name.clone())
+                        .accessibility_label("选择 OCR 模式")
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for (index, profile) in profiles.iter().enumerate() {
+                                let editor = editor.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(profile.name.clone())
+                                        .checked(index == mode)
+                                        .on_click(move |_, _, cx| {
+                                            let _ = editor.update(cx, |v, cx| {
+                                                v.ocr_mode = Some(index);
+                                                cx.notify();
+                                            });
+                                        }),
+                                );
+                            }
+                            menu.max_h(px(320.)).scrollable(true)
+                        })
+                        .on_open_change(move |open, _, cx| {
+                            let editor = observer.clone();
+                            let open = *open;
+                            cx.defer(move |cx| {
+                                let _ = editor.update(cx, |v, cx| {
+                                    v.popup_open = open;
+                                    cx.notify();
+                                });
+                            });
+                        }),
+                );
             }
             strip = strip.child(
                 Button::new(("action", i))
@@ -1641,6 +1742,49 @@ impl EditorView {
                     !self.color_picker.read(cx).is_open() && !self.popup_open,
                     |d| d.overflow_x_scroll(),
                 );
+            if matches!(self.tool, Tool::Blur | Tool::Mosaic) {
+                for (tool, label) in [(Tool::Blur, "高斯模糊"), (Tool::Mosaic, "马赛克")] {
+                    options = options.child(
+                        Button::new(label)
+                            .xsmall()
+                            .label(label)
+                            .selected(self.tool == tool)
+                            .flex_shrink_0()
+                            .on_click(cx.listener(move |v, _, w, cx| v.choose_tool(tool, w, cx))),
+                    );
+                }
+            }
+            if self.option_tool() == Tool::Watermark {
+                use snip_core::annotation::WatermarkDensity;
+                for (label, density) in [
+                    ("单个", WatermarkDensity::Single),
+                    ("疏", WatermarkDensity::Sparse),
+                    ("中", WatermarkDensity::Medium),
+                    ("密", WatermarkDensity::Dense),
+                ] {
+                    options = options.child(
+                        Button::new(("watermark-density", density as usize))
+                            .xsmall()
+                            .label(label)
+                            .selected(self.watermark.density == density)
+                            .tooltip(format!("水印密度 · {label}"))
+                            .on_click(cx.listener(move |v, _, _, cx| {
+                                v.watermark.density = density;
+                                v.apply_watermark_style(cx);
+                            })),
+                    );
+                }
+                options = options.child(
+                    Button::new("watermark-bold")
+                        .xsmall()
+                        .label("加粗")
+                        .selected(self.watermark.bold)
+                        .on_click(cx.listener(|v, _, _, cx| {
+                            v.watermark.bold = !v.watermark.bold;
+                            v.apply_watermark_style(cx);
+                        })),
+                );
+            }
             if self.tool == Tool::Number {
                 options = options
                     .child(
@@ -1793,7 +1937,7 @@ impl EditorView {
             .items_end()
             .child(panel)
             .when(self.ocr.is_some(), |d| {
-                d.child(self.ocr_panel(result_height, cx))
+                d.child(self.ocr_panel(result_height, w, cx))
             })
             .when(self.ocr_resize.is_some(), |d| {
                 let moving = cx.entity().downgrade();
@@ -1825,12 +1969,26 @@ impl EditorView {
             })
             .children(toast)
     }
-    fn ocr_panel(&self, height: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
+    fn ocr_panel(
+        &self,
+        height: Pixels,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let empty = self.ocr_text.trim().is_empty();
+        let text = if empty {
+            "未识别到文字"
+        } else {
+            self.ocr_text.as_ref()
+        };
+        if self.ocr_field.read(cx).value().as_ref() != text {
+            self.ocr_field
+                .update(cx, |field, cx| field.set_value(text.to_owned(), w, cx));
+        }
         design::panel(cx)
             .id("ocr-result")
             .relative()
-            .w(self.ocr_size.width)
+            .w(self.ocr_width())
             .max_w_full()
             .h(height)
             .v_flex()
@@ -1882,55 +2040,15 @@ impl EditorView {
                     ),
             )
             .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .mt_1()
-                    .mb(px(2.))
-                    .child(
-                        div()
-                            .id(("ocr-result-scroll", self.ocr_request as usize))
-                            .size_full()
-                            .flex()
-                            .items_start()
-                            .overflow_scroll()
-                            .track_scroll(&self.ocr_scroll)
-                            .child(
-                                div()
-                                    .v_flex()
-                                    .flex_none()
-                                    .min_w_full()
-                                    .px_2()
-                                    .pr_3()
-                                    .when(empty, |d| d.text_color(cx.theme().muted_foreground))
-                                    .children(
-                                        (if empty {
-                                            "未识别到文字"
-                                        } else {
-                                            self.ocr_text.as_ref()
-                                        })
-                                        .lines()
-                                        .map(|line| {
-                                            div()
-                                                .whitespace_nowrap()
-                                                .flex_shrink_0()
-                                                .h(px(18.))
-                                                .line_height(px(18.))
-                                                .text_size(px(12.))
-                                                .child(SharedString::from(
-                                                    if line.is_empty() { " " } else { line }
-                                                        .to_owned(),
-                                                ))
-                                        }),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        gpui_kit::base::Scrollbar::new(&self.ocr_scroll)
-                            .mode(gpui_kit::base::ScrollbarMode::Always),
-                    ),
+                div().flex_1().min_h_0().px_2().child(
+                    Textarea::new(&self.ocr_field)
+                        .h((height - px(34.)).max(px(22.)))
+                        .readonly(true)
+                        .bordered(false)
+                        .appearance(false)
+                        .aria_label("识别结果，可选择复制")
+                        .text_size(px(12.)),
+                ),
             )
             .child(div().h(px(14.)).flex_shrink_0())
             .child(
@@ -1950,7 +2068,10 @@ impl EditorView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|v, e: &MouseDownEvent, w, cx| {
-                            v.ocr_resize = Some((e.position + w.bounds().origin, v.ocr_size));
+                            v.ocr_resize = Some((
+                                e.position + w.bounds().origin,
+                                size(v.ocr_width(), v.ocr_size.height),
+                            ));
                             cx.notify();
                             cx.stop_propagation();
                         }),
@@ -2026,7 +2147,6 @@ impl Render for EditorView {
             .selected
             .filter(|_| self.text_anchor.is_none())
             .and_then(|i| self.doc.objects.get(i));
-        let selected_bounds = selected.map(Annotation::bounds);
         let selected_handles = selected.map_or_else(Vec::new, geometry_handles);
         let canvas = canvas(
             move |bounds, _, cx| {
@@ -2128,22 +2248,7 @@ impl Render for EditorView {
                         }
                     }
                 }
-                if let Some(r) = selected_bounds {
-                    let corners = [
-                        map(ImagePoint::new(r.x, r.y)),
-                        map(ImagePoint::new(r.right(), r.y)),
-                        map(ImagePoint::new(r.right(), r.bottom())),
-                        map(ImagePoint::new(r.x, r.bottom())),
-                    ];
-                    let mut border = PathBuilder::stroke(px(1.));
-                    border.move_to(corners[0]);
-                    for p in corners.iter().skip(1) {
-                        border.line_to(*p);
-                    }
-                    border.line_to(corners[0]);
-                    if let Ok(path) = border.build() {
-                        window.paint_path(path, rgb(design::IMAGE_FOCUS));
-                    }
+                if !selected_handles.is_empty() {
                     for &(_, p) in &selected_handles {
                         let p = map(p);
                         window.paint_quad(
@@ -2185,7 +2290,7 @@ impl Render for EditorView {
                     _ => CursorStyle::Crosshair,
                 }
             })
-            .on_hover(cx.listener(|v, inside, _, cx| {
+            .on_hover(cx.listener(|v, inside: &bool, _, cx| {
                 if !inside {
                     v.pointer = None;
                     cx.notify();
@@ -2508,6 +2613,7 @@ fn arrow_preview(style: ArrowStyle, ink: Hsla) -> impl IntoElement {
         width: 2.6,
         text: String::new(),
         arrow_style: style,
+        watermark: Default::default(),
     };
     let (shaft, head, filled) = sample.arrow_parts();
     canvas(
@@ -3029,6 +3135,7 @@ mod tests {
                         v.set_size(7., cx);
                         v.choose_tool(super::Tool::Text, w, cx);
                         v.set_size(42., cx);
+                        v.next_number = 9;
                     })
                 })
                 .unwrap()
@@ -3038,7 +3145,9 @@ mod tests {
             window
                 .update(cx, |_, w, cx| {
                     next.update(cx, |v, cx| {
-                        assert_eq!(v.tool, super::Tool::Text);
+                        assert_eq!(v.tool, super::Tool::Select);
+                        assert_eq!(v.next_number, 1);
+                        v.choose_tool(super::Tool::Text, w, cx);
                         assert_eq!(v.display_size(), 42.);
                         assert_eq!(v.preferences.shape, super::Tool::Diamond);
                         v.choose_tool(v.preferences.shape, w, cx);
@@ -3106,6 +3215,7 @@ mod tests {
                     width: 6.,
                     text: String::new(),
                     arrow_style: Default::default(),
+                    watermark: Default::default(),
                 })
             });
             crate::app::read_clipboard_command(crate::app::Command::Paste, cx, || {
@@ -3175,6 +3285,7 @@ mod tests {
                             width: 9.,
                             text: String::new(),
                             arrow_style: v.arrow_style,
+                            watermark: Default::default(),
                         });
                         v.selected = Some(0);
                         v.color_picker.update(cx, |picker, cx| {
@@ -3239,6 +3350,7 @@ mod tests {
             width: 4.,
             text: "Simple Snip".into(),
             arrow_style: Default::default(),
+            watermark: Default::default(),
         });
         let (mut doc, output) = super::render_document(doc, super::identity(&source)).unwrap();
         assert!(output.pixels().any(|p| p[3] > 80));
@@ -3258,6 +3370,7 @@ mod tests {
                 v.host = EditorHost::Capture;
                 v.ocr = Some(Arc::new(super::OcrResult::default()));
                 v.ocr_text = format!("{}\ntwo\nthree\nfour\nfive", "wide text ".repeat(15)).into();
+                v.ocr_size.width = px(500.);
                 cx.notify();
             });
             let _ = w.draw(cx);
@@ -3265,8 +3378,7 @@ mod tests {
             let _ = w.draw(cx);
         });
         cx.update(|cx| {
-            let overflow = editor.read(cx).ocr_scroll.max_offset();
-            assert!(overflow.x > px(0.) && overflow.y > px(0.), "{overflow:?}");
+            assert_eq!(editor.read(cx).ocr_width(), px(500.));
         });
         let grip = visual
             .debug_bounds("ocr-resize-grip")
@@ -3281,7 +3393,7 @@ mod tests {
         visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
         cx.update(|cx| {
             let v = editor.read(cx);
-            assert_eq!(v.ocr_size, size(px(420.), px(162.)));
+            assert_eq!(v.ocr_size, size(px(580.), px(162.)));
             assert!(v.ocr_resize.is_none());
         });
     }
@@ -3322,6 +3434,31 @@ mod tests {
                 Some("Hello world".into())
             );
         });
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    let field = editor.read(cx).ocr_field.clone();
+                    field.update(cx, |v, cx| v.focus(w, cx));
+                    let _ = w.draw(cx);
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("before".into()));
+                })
+                .unwrap();
+        });
+        cx.simulate_keystrokes(
+            window,
+            if cfg!(target_os = "macos") {
+                "cmd-a cmd-c"
+            } else {
+                "ctrl-a ctrl-c"
+            },
+        );
+        cx.update(|cx| {
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("Hello world".into())
+            );
+            assert!(editor.read(cx).has_ocr_result());
+        });
     }
 
     #[gpui_kit::test]
@@ -3340,6 +3477,7 @@ mod tests {
                             color: [255, 0, 0, 255],
                             text: String::new(),
                             arrow_style: Default::default(),
+                            watermark: Default::default(),
                         });
                         v.finish_path(cx);
                         assert!(v.draft.is_none());
@@ -3517,6 +3655,7 @@ mod tests {
                             width: v.width,
                             text: String::new(),
                             arrow_style: v.arrow_style,
+                            watermark: Default::default(),
                         });
                         v.focus.focus(w, cx);
                     })
@@ -3932,6 +4071,7 @@ mod tests {
                     width: 3.,
                     text: String::new(),
                     arrow_style: super::ArrowStyle::HeadWide,
+                    watermark: Default::default(),
                 });
                 v.selected = Some(0);
                 v.resize_selected(1., cx);

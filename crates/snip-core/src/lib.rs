@@ -3,6 +3,7 @@ pub mod config;
 pub mod editor_preferences;
 pub mod geometry;
 pub mod ocr;
+pub mod ocr_config;
 pub mod stitch;
 pub mod trail;
 

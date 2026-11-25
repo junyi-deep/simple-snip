@@ -21,6 +21,7 @@ pub struct Config {
     pub trail: TrailConfig,
     pub updates: UpdateConfig,
     pub pin: PinConfig,
+    pub ocr: crate::ocr_config::OcrConfig,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -197,6 +198,7 @@ impl Default for Config {
             trail: TrailConfig::default(),
             updates: UpdateConfig::default(),
             pin: PinConfig::default(),
+            ocr: Default::default(),
         }
     }
 }
@@ -208,6 +210,7 @@ impl Config {
             .join("config.toml")
     }
     pub fn validate(&self) -> Result<()> {
+        self.ocr.validate()?;
         self.pin.color()?;
         ensure!(
             self.pin.border_width.is_finite() && (0.0..=8.0).contains(&self.pin.border_width),

@@ -1,8 +1,11 @@
-//! Run the Windows OCR engine outside the desktop process. A fatal WinRT
+//! Run RapidOCR outside the desktop process. A fatal inference runtime
 //! failure leaves the editor alive with its current annotations.
 use anyhow::{Context, Result, bail, ensure};
 use image::RgbaImage;
-use snip_core::ocr::{Cancellation, OcrEngine, OcrResult};
+use snip_core::{
+    ocr::{Cancellation, OcrResult},
+    ocr_config::RapidOptions,
+};
 use std::{
     io::{self, Read, Seek, Write},
     process::{Command, Stdio},
@@ -22,12 +25,19 @@ fn image_byte_count(width: u32, height: u32) -> Result<usize> {
     Ok(length as usize)
 }
 
-pub fn recognize(image: &RgbaImage, cancel: &Cancellation) -> Result<OcrResult> {
+pub fn recognize(
+    image: &RgbaImage,
+    options: &RapidOptions,
+    cancel: &Cancellation,
+) -> Result<OcrResult> {
     ensure!(!cancel.cancelled(), "识别已取消");
     image_byte_count(image.width(), image.height())?;
     let mut input = tempfile::tempfile().context("无法创建 OCR 输入")?;
     input.write_all(&image.width().to_le_bytes())?;
     input.write_all(&image.height().to_le_bytes())?;
+    let config = serde_json::to_vec(options)?;
+    input.write_all(&(config.len() as u32).to_le_bytes())?;
+    input.write_all(&config)?;
     input.write_all(image.as_raw())?;
     input.rewind()?;
     let mut output = tempfile::tempfile().context("无法创建 OCR 输出")?;
@@ -79,9 +89,16 @@ fn recognize_input(mut input: impl Read) -> Result<OcrResult> {
     input.read_exact(&mut bytes)?;
     let height = u32::from_le_bytes(bytes);
     let mut pixels = vec![0; image_byte_count(width, height)?];
+    input.read_exact(&mut bytes)?;
+    let config_size = u32::from_le_bytes(bytes) as usize;
+    ensure!(config_size <= 4096, "OCR 模式配置过大");
+    let mut config = vec![0; config_size];
+    input.read_exact(&mut config)?;
+    let options: RapidOptions = serde_json::from_slice(&config)?;
+    options.validate()?;
     input.read_exact(&mut pixels)?;
     let image = RgbaImage::from_raw(width, height, pixels).context("无效的 OCR 图片")?;
-    snip_platform::NativeOcr.recognize(&image, &Cancellation::default())
+    snip_platform::recognize_with_rapidocr(image, options)
 }
 
 pub fn run_from_stdio() -> Result<()> {

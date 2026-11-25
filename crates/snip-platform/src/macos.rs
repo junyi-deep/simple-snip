@@ -319,92 +319,123 @@ pub fn scroll_at(point: Point) -> Result<()> {
 pub struct NativeOcr;
 impl OcrEngine for NativeOcr {
     fn recognize(&self, image: &RgbaImage, cancel: &Cancellation) -> Result<OcrResult> {
-        objc2::rc::autoreleasepool(|_| {
-            ensure!(!cancel.cancelled(), "识别已取消");
-            let mut png = std::io::Cursor::new(Vec::new());
-            image.write_to(&mut png, image::ImageFormat::Png)?;
-            let request = VNRecognizeTextRequest::new();
-            request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
-            let supported = unsafe { request.supportedRecognitionLanguagesAndReturnError() }
-                .map_err(|e| anyhow::anyhow!("Vision 语言检测失败: {e}"))?;
-            let langs: Vec<_> = ["zh-Hans", "zh-Hant", "en-US"]
-                .into_iter()
-                .filter(|s| supported.iter().any(|l| l.to_string() == *s))
-                .map(NSString::from_str)
-                .collect();
-            ensure!(!langs.is_empty(), "Vision 没有可用的中英文识别语言");
+        recognize_with_vision(image, &Default::default(), cancel)
+    }
+}
+
+pub fn recognize_with_vision(
+    image: &RgbaImage,
+    options: &snip_core::ocr_config::VisionOptions,
+    cancel: &Cancellation,
+) -> Result<OcrResult> {
+    objc2::rc::autoreleasepool(|_| {
+        ensure!(!cancel.cancelled(), "识别已取消");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png)?;
+        let request = VNRecognizeTextRequest::new();
+        request.setRecognitionLevel(if options.accurate {
+            VNRequestTextRecognitionLevel::Accurate
+        } else {
+            VNRequestTextRecognitionLevel::Fast
+        });
+        request.setUsesLanguageCorrection(options.correction);
+        request.setAutomaticallyDetectsLanguage(options.auto_language);
+        request.setMinimumTextHeight(options.min_height);
+        let words: Vec<_> = options
+            .custom_words
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(NSString::from_str)
+            .collect();
+        request.setCustomWords(&NSArray::from_retained_slice(&words));
+        let supported = unsafe { request.supportedRecognitionLanguagesAndReturnError() }
+            .map_err(|e| anyhow::anyhow!("Vision 语言检测失败: {e}"))?;
+        let langs: Vec<_> = options
+            .languages
+            .split(',')
+            .map(str::trim)
+            .filter(|s| supported.iter().any(|l| l.to_string() == *s))
+            .map(NSString::from_str)
+            .collect();
+        if !langs.is_empty() {
             request.setRecognitionLanguages(&NSArray::from_retained_slice(&langs));
-            let data = NSData::with_bytes(png.get_ref());
-            let handler = VNImageRequestHandler::initWithData_options(
-                VNImageRequestHandler::alloc(),
-                &data,
-                &NSDictionary::new(),
+        } else {
+            ensure!(
+                options.auto_language || options.languages.trim().is_empty(),
+                "当前 Vision 模式不支持所选语言"
             );
-            let requests = NSArray::from_slice(&[&*request as &VNRequest]);
-            handler
-                .performRequests_error(&requests)
-                .map_err(|e| anyhow::anyhow!("Vision OCR 失败: {e}"))?;
-            ensure!(!cancel.cancelled(), "识别已取消");
-            let mut lines = vec![];
-            let convert = |r: objc2_core_foundation::CGRect| {
-                Rect::new(
-                    r.origin.x as f32 * image.width() as f32,
-                    (1. - r.origin.y - r.size.height) as f32 * image.height() as f32,
-                    r.size.width as f32 * image.width() as f32,
-                    r.size.height as f32 * image.height() as f32,
-                )
-            };
-            if let Some(results) = request.results() {
-                for observation in results.iter() {
-                    let candidates = observation.topCandidates(1);
-                    let Some(text) = candidates.firstObject() else {
-                        continue;
-                    };
-                    let full = text.string().to_string();
-                    let bounds = convert(unsafe { observation.boundingBox() });
-                    let mut words = vec![];
-                    let mut offset = 0;
-                    // Use actual Vision boxes for each Unicode scalar (UTF-16 ranges),
-                    // including CJK. Never invent equal-width OCR hit targets.
-                    for ch in full.chars() {
-                        let len = ch.len_utf16();
-                        if !ch.is_whitespace()
-                            && let Ok(boxed) =
-                                unsafe { text.boundingBoxForRange_error(NSRange::new(offset, len)) }
-                        {
-                            words.push(OcrWord {
-                                text: ch.to_string(),
-                                bounds: convert(unsafe { boxed.boundingBox() }),
-                                confidence: Some(text.confidence()),
-                            });
-                        }
-                        offset += len;
-                    }
-                    if words.is_empty() {
+        }
+        let data = NSData::with_bytes(png.get_ref());
+        let handler = VNImageRequestHandler::initWithData_options(
+            VNImageRequestHandler::alloc(),
+            &data,
+            &NSDictionary::new(),
+        );
+        let requests = NSArray::from_slice(&[&*request as &VNRequest]);
+        handler
+            .performRequests_error(&requests)
+            .map_err(|e| anyhow::anyhow!("Vision OCR 失败: {e}"))?;
+        ensure!(!cancel.cancelled(), "识别已取消");
+        let mut lines = vec![];
+        let convert = |r: objc2_core_foundation::CGRect| {
+            Rect::new(
+                r.origin.x as f32 * image.width() as f32,
+                (1. - r.origin.y - r.size.height) as f32 * image.height() as f32,
+                r.size.width as f32 * image.width() as f32,
+                r.size.height as f32 * image.height() as f32,
+            )
+        };
+        if let Some(results) = request.results() {
+            for observation in results.iter() {
+                let candidates = observation.topCandidates(1);
+                let Some(text) = candidates.firstObject() else {
+                    continue;
+                };
+                let full = text.string().to_string();
+                let bounds = convert(unsafe { observation.boundingBox() });
+                let mut words = vec![];
+                let mut offset = 0;
+                // Use actual Vision boxes for each Unicode scalar (UTF-16 ranges),
+                // including CJK. Never invent equal-width OCR hit targets.
+                for ch in full.chars() {
+                    let len = ch.len_utf16();
+                    if !ch.is_whitespace()
+                        && let Ok(boxed) =
+                            unsafe { text.boundingBoxForRange_error(NSRange::new(offset, len)) }
+                    {
                         words.push(OcrWord {
-                            text: full.clone(),
-                            bounds,
+                            text: ch.to_string(),
+                            bounds: convert(unsafe { boxed.boundingBox() }),
                             confidence: Some(text.confidence()),
                         });
                     }
-                    lines.push(OcrLine {
-                        text: full,
+                    offset += len;
+                }
+                if words.is_empty() {
+                    words.push(OcrWord {
+                        text: full.clone(),
                         bounds,
-                        words,
                         confidence: Some(text.confidence()),
-                        language: None,
                     });
                 }
+                lines.push(OcrLine {
+                    text: full,
+                    bounds,
+                    words,
+                    confidence: Some(text.confidence()),
+                    language: None,
+                });
             }
-            lines.sort_by(|a, b| {
-                a.bounds
-                    .y
-                    .total_cmp(&b.bounds.y)
-                    .then(a.bounds.x.total_cmp(&b.bounds.x))
-            });
-            Ok(OcrResult { lines })
-        })
-    }
+        }
+        lines.sort_by(|a, b| {
+            a.bounds
+                .y
+                .total_cmp(&b.bounds.y)
+                .then(a.bounds.x.total_cmp(&b.bounds.x))
+        });
+        Ok(OcrResult { lines })
+    })
 }
 
 pub fn annotation_font() -> Result<Vec<u8>> {

@@ -175,6 +175,7 @@ impl PinView {
         let app::PreparedImage {
             pixels: image,
             texture,
+            original_size,
         } = prepared;
         let scale = (680. / image.width() as f32)
             .min(500. / image.height() as f32)
@@ -295,7 +296,7 @@ impl PinView {
                         border_visible: true,
                         shadow_override: None,
                         animation: None,
-                        display_scale: 0.,
+                        display_scale: if original_size { 1. } else { 0. },
                         display_revision: 0,
                         highlighted: false,
                         highlight_task: None,
@@ -303,6 +304,35 @@ impl PinView {
                 })
             },
         )?;
+        if original_size && placement.is_none() {
+            handle.update(cx, |_, w, cx| {
+                view.update(cx, |v, cx| {
+                    // A source pixel maps to one physical display pixel at
+                    // opening, including on HiDPI and Retina displays.
+                    v.scale = 1. / w.scale_factor();
+                    let dimensions = size(
+                        px(image.width() as f32 * v.scale + margin * 2.),
+                        px(image.height() as f32 * v.scale + margin * 2.),
+                    );
+                    let initial = w.bounds();
+                    let screen = w.display(cx).map(|d| d.bounds()).unwrap_or(initial);
+                    let x =
+                        screen.origin.x + ((screen.size.width - dimensions.width) / 2.).max(px(0.));
+                    let y = screen.origin.y
+                        + ((screen.size.height - dimensions.height) / 2.).max(px(0.));
+                    if let Ok(raw) = app::raw(w) {
+                        let _ = snip_platform::move_window(
+                            raw,
+                            f32::from(x),
+                            f32::from(y),
+                            w.scale_factor(),
+                        );
+                    }
+                    app::resize_pin(w, dimensions, cx);
+                    cx.notify();
+                });
+            })?;
+        }
         if edit {
             let _ = handle.update(cx, |_, w, cx| {
                 view.update(cx, |v, cx| v.open_toolbar(w, cx))
@@ -544,7 +574,12 @@ impl PinView {
         cx.notify();
     }
     fn finish_if_inactive(&mut self, cx: &mut Context<Self>) {
-        if self.owns_focus(cx) {
+        if self.owns_focus(cx)
+            || self
+                .editor
+                .as_ref()
+                .is_some_and(|e| e.read(cx).has_ocr_result())
+        {
             return;
         }
         if self.editor.is_some() && self.toolbar.is_some() {
@@ -1145,6 +1180,21 @@ mod tests {
             assert!(view.read(cx).editor.is_none());
             assert!(cx.global::<Runtime>().pins.contains_key(&1));
             assert!(view.read(cx).doc.objects.is_empty());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn open_ocr_result_keeps_the_toolbar_when_the_pin_loses_focus(cx: &mut TestAppContext) {
+        let rx = setup(cx);
+        let (_, view) = pin(cx, 1, true);
+        let (other, _) = pin(cx, 2, false);
+        cx.update(|cx| {
+            let editor = view.read(cx).editor.clone().unwrap();
+            editor.update(cx, |editor, cx| editor.fixture_ocr_result(cx));
+            other.update(cx, |_, w, _| w.activate_window()).unwrap();
+            view.update(cx, |v, cx| v.finish_if_inactive(cx));
+            assert!(view.read(cx).toolbar.is_some());
+            assert!(rx.try_recv().is_err());
         });
     }
 

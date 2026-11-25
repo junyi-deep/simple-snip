@@ -21,5 +21,8 @@ for package in sorted(data['packages'],key=lambda p:(p['name'],p['version'])):
     if package.get('license_file'):candidates.add(directory/package['license_file'])
     for file in sorted(candidates):
         if file.is_file():parts.append('\n'+file.name+'\n'+file.read_text(encoding='utf-8',errors='replace'))
+if args.target == 'x86_64-pc-windows-msvc':
+    for name in ('README.md', 'LICENSE-RapidOCR', 'LICENSE-ONNXRuntime', 'NOTICE-ONNXRuntime'):
+        parts.append('\n' + Path('assets/rapidocr', name).read_text(encoding='utf-8'))
 Path('dist').mkdir(exist_ok=True);Path('dist/THIRD_PARTY_NOTICES.txt').write_text('\n'.join(parts),encoding='utf-8')
 print('Wrote notices for',len(reachable),'resolved packages')

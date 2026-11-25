@@ -1,0 +1,2 @@
+*.onnx -text
+ppocrv5_dict.txt -text

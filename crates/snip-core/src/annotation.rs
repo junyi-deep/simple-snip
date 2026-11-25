@@ -40,6 +40,22 @@ pub enum ArrowStyle {
     DiamondHollow,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WatermarkDensity {
+    #[default]
+    Single,
+    Sparse,
+    Medium,
+    Dense,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WatermarkStyle {
+    pub density: WatermarkDensity,
+    pub bold: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Annotation {
     pub tool: Tool,
@@ -49,6 +65,8 @@ pub struct Annotation {
     pub text: String,
     #[serde(default)]
     pub arrow_style: ArrowStyle,
+    #[serde(default)]
+    pub watermark: WatermarkStyle,
 }
 impl Tool {
     pub fn is_text(self) -> bool {
@@ -560,6 +578,7 @@ mod reframe_tests {
                 width: 3.,
                 text: String::new(),
                 arrow_style: ArrowStyle::default(),
+                watermark: Default::default(),
             };
             let path = a.path_points();
             assert!(path.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
@@ -599,6 +618,7 @@ mod reframe_tests {
                 width: 3.,
                 text: String::new(),
                 arrow_style: style,
+                watermark: Default::default(),
             };
             let (shaft, head, filled) = a.arrow_parts();
             assert!(!shaft.is_empty() && !head.is_empty());
@@ -622,6 +642,7 @@ mod reframe_tests {
             width: 3.,
             text: String::new(),
             arrow_style: ArrowStyle::default(),
+            watermark: Default::default(),
         });
         let mut snapshot = doc.render_snapshot();
         assert_eq!(snapshot.flatten(), doc.flatten());
@@ -641,6 +662,7 @@ mod reframe_tests {
             width: 2.,
             text: String::new(),
             arrow_style: ArrowStyle::default(),
+            watermark: Default::default(),
         });
         doc.checkpoint();
         doc.objects[0].translate(10., 0.);
@@ -655,6 +677,48 @@ mod reframe_tests {
     }
 }
 fn draw_text(image: &mut RgbaImage, font: &fontdue::Font, a: &Annotation) {
+    let spacing = match a.watermark.density {
+        WatermarkDensity::Single => 0.,
+        WatermarkDensity::Sparse => 8.,
+        WatermarkDensity::Medium => 4.,
+        WatermarkDensity::Dense => 2.,
+    };
+    if a.tool == Tool::Watermark && spacing > 0. {
+        let font_px = a.width * 6. + 12.;
+        let tile_width = (a.text.chars().count() as f32 * font_px * 1.3 + 4.).ceil() as u32;
+        let tile_height = (font_px * 1.6 + 4.).ceil() as u32;
+        let mut tile = RgbaImage::new(
+            tile_width.clamp(1, image.width().max(1)),
+            tile_height.clamp(1, image.height().max(1)),
+        );
+        let mut stamp = a.clone();
+        stamp.points[0] = Point::new(0., 0.);
+        stamp.watermark.density = WatermarkDensity::Single;
+        draw_text(&mut tile, font, &stamp);
+        let ink_width = tile
+            .enumerate_pixels()
+            .filter(|(_, _, p)| p[3] > 0)
+            .map(|(x, _, _)| x + 1)
+            .max()
+            .unwrap_or(0);
+        if ink_width == 0 {
+            return;
+        }
+        let tile = imageops::crop_imm(&tile, 0, 0, ink_width, tile.height()).to_image();
+        let step_x = (tile.width() + (font_px * spacing).ceil() as u32).max(24);
+        let step_y = (tile.height() + (font_px * spacing * 0.6).ceil() as u32).max(24);
+        for (row, y) in (0..image.height()).step_by(step_y as usize).enumerate() {
+            let shift = if row % 2 == 0 {
+                0
+            } else {
+                i64::from(step_x / 2)
+            };
+            for x in (0..image.width()).step_by(step_x as usize) {
+                imageops::overlay(image, &tile, i64::from(x) - shift, i64::from(y));
+            }
+        }
+        return;
+    }
     use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
     let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
     layout.reset(&LayoutSettings {
@@ -703,14 +767,23 @@ fn draw_text(image: &mut RgbaImage, font: &fontdue::Font, a: &Annotation) {
     };
     for glyph in layout.glyphs() {
         let (metrics, bitmap) = font.rasterize_config(glyph.key);
+        let bold = if a.tool == Tool::Watermark && a.watermark.bold {
+            ((a.width * 6. + 12.) / 22.).round().clamp(1., 8.) as usize
+        } else {
+            0
+        };
         for y in 0..metrics.height {
-            for x in 0..metrics.width {
+            for x in 0..metrics.width + bold {
                 let px = (glyph.x + offset.x) as i32 + x as i32;
                 let py = (glyph.y + offset.y) as i32 + y as i32;
                 if px < 0 || py < 0 || px >= image.width() as i32 || py >= image.height() as i32 {
                     continue;
                 }
-                let alpha = bitmap[y * metrics.width + x] as f32 / 255. * ink[3] as f32 / 255.;
+                let coverage = (x.saturating_sub(bold)..=x.min(metrics.width.saturating_sub(1)))
+                    .map(|sample| bitmap[y * metrics.width + sample])
+                    .max()
+                    .unwrap_or(0);
+                let alpha = coverage as f32 / 255. * ink[3] as f32 / 255.;
                 if alpha == 0. {
                     continue;
                 }
@@ -741,6 +814,7 @@ mod tests {
             width: 3.,
             text: String::new(),
             arrow_style: ArrowStyle::default(),
+            watermark: Default::default(),
         });
         assert_ne!(d.flatten(), *source);
         assert_eq!(source.get_pixel(5, 5).0, [255; 4]);
@@ -759,6 +833,7 @@ mod tests {
             width: 4.,
             text: String::new(),
             arrow_style: ArrowStyle::default(),
+            watermark: Default::default(),
         });
         assert_eq!(d.flatten().dimensions(), (20, 20));
     }
@@ -775,6 +850,7 @@ mod new_tool_tests {
             width: 8.,
             text: String::new(),
             arrow_style: style,
+            watermark: Default::default(),
         }
     }
     #[test]
@@ -815,6 +891,7 @@ mod new_tool_tests {
             color: [200, 0, 0, 255],
             text: "12".into(),
             arrow_style: ArrowStyle::default(),
+            watermark: Default::default(),
         });
         assert_eq!(doc.hit(Point::new(50., 60.)), Some(0));
         assert_ne!(doc.flatten(), *source);

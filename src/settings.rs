@@ -36,6 +36,14 @@ fn picker_hex(picker: &Entity<ColorPickerState>, cx: &App) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+enum OcrModeAction {
+    Save,
+    Default,
+    Reset,
+    Duplicate,
+}
+
 enum DownloadEvent {
     Progress(u64, u64),
     Installing,
@@ -116,6 +124,8 @@ pub struct Settings {
     last_update_notice: Option<String>,
     page_transition: usize,
     optional: Vec<(String, Entity<InputState>)>,
+    ocr_edit: usize,
+    ocr_fields: Vec<Entity<InputState>>,
 }
 impl Settings {
     pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
@@ -155,6 +165,10 @@ impl Settings {
                     },
                 );
                 let config = cx.global::<Runtime>().config.clone();
+                let ocr_fields = Self::ocr_values(&config.ocr.profiles[config.ocr.active])
+                    .into_iter()
+                    .map(|value| cx.new(|cx| InputState::new(w, cx).default_value(value)))
+                    .collect();
                 let mut input =
                     |value: String| cx.new(|cx| InputState::new(w, cx).default_value(value));
                 let screenshot_key = input(
@@ -306,6 +320,8 @@ impl Settings {
                         last_update_notice: None,
                         page_transition: 0,
                         optional,
+                        ocr_edit: config.ocr.active,
+                        ocr_fields,
                     }
                 })
             },
@@ -641,6 +657,218 @@ impl Settings {
         }
         cx.notify();
     }
+    fn ocr_values(profile: &snip_core::ocr_config::OcrProfile) -> Vec<String> {
+        let yes = |value: bool| {
+            if value {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
+        };
+        let mut values = vec![profile.name.clone()];
+        #[cfg(target_os = "windows")]
+        {
+            let p = &profile.rapid;
+            values.extend([
+                p.max_side.to_string(),
+                p.threads.to_string(),
+                yes(p.orientation),
+                p.detection_threshold.to_string(),
+                p.box_score.to_string(),
+                p.text_score.to_string(),
+                p.unclip_ratio.to_string(),
+            ]);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let p = &profile.vision;
+            values.extend([
+                yes(p.accurate),
+                yes(p.correction),
+                yes(p.auto_language),
+                p.languages.clone(),
+                p.min_height.to_string(),
+                p.custom_words.clone(),
+            ]);
+        }
+        values
+    }
+
+    fn load_ocr_fields(&mut self, index: usize, w: &mut Window, cx: &mut Context<Self>) {
+        self.ocr_edit = index;
+        let values = Self::ocr_values(&cx.global::<Runtime>().config.ocr.profiles[index]);
+        for (field, value) in self.ocr_fields.iter().zip(values) {
+            field.update(cx, |input, cx| input.set_value(value, w, cx));
+        }
+        cx.notify();
+    }
+
+    fn read_ocr_fields(&self, cx: &App) -> anyhow::Result<snip_core::ocr_config::OcrProfile> {
+        let mut profile = cx.global::<Runtime>().config.ocr.profiles[self.ocr_edit].clone();
+        let values: Vec<_> = self
+            .ocr_fields
+            .iter()
+            .map(|field| field.read(cx).value())
+            .collect();
+        let value = |index: usize| values[index].trim();
+        let boolean = |index| match value(index) {
+            "1" => Ok(true),
+            "0" => Ok(false),
+            _ => anyhow::bail!("开关参数须为 0 或 1"),
+        };
+        profile.name = value(0).into();
+        #[cfg(target_os = "windows")]
+        {
+            let p = &mut profile.rapid;
+            p.max_side = value(1).parse().context("最大边长须为整数")?;
+            p.threads = value(2).parse().context("线程数须为整数")?;
+            p.orientation = boolean(3)?;
+            p.detection_threshold = value(4).parse().context("检测阈值无效")?;
+            p.box_score = value(5).parse().context("框置信度无效")?;
+            p.text_score = value(6).parse().context("识别置信度无效")?;
+            p.unclip_ratio = value(7).parse().context("扩框系数无效")?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let p = &mut profile.vision;
+            p.accurate = boolean(1)?;
+            p.correction = boolean(2)?;
+            p.auto_language = boolean(3)?;
+            p.languages = value(4).into();
+            p.min_height = value(5).parse().context("最小文字高度无效")?;
+            p.custom_words = value(6).into();
+        }
+        Ok(profile)
+    }
+
+    fn change_ocr_config(
+        &mut self,
+        operation: OcrModeAction,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = (|| -> anyhow::Result<usize> {
+            let mut config = cx.global::<Runtime>().config.clone();
+            let mut index = self.ocr_edit;
+            match operation {
+                OcrModeAction::Save => config.ocr.profiles[index] = self.read_ocr_fields(cx)?,
+                OcrModeAction::Default => config.ocr.active = index,
+                OcrModeAction::Reset => {
+                    config.ocr.profiles[index] = snip_core::ocr_config::OcrConfig::preset(index)
+                }
+                OcrModeAction::Duplicate => {
+                    let mut profile = self.read_ocr_fields(cx)?;
+                    profile.name =
+                        format!("{} 副本", profile.name.chars().take(28).collect::<String>());
+                    index = config.ocr.profiles.len();
+                    config.ocr.profiles.push(profile);
+                }
+            }
+            config.ocr.validate()?;
+            config.save(&self.config_path)?;
+            self.baseline.ocr = config.ocr.clone();
+            cx.global_mut::<Runtime>().config = config;
+            Ok(index)
+        })();
+        match result {
+            Ok(index) => {
+                self.load_ocr_fields(index, w, cx);
+                crate::ui::notify(w, "OCR 模式已保存", false, cx);
+            }
+            Err(error) => crate::ui::notify(w, format!("无法保存 OCR 模式：{error}"), true, cx),
+        }
+    }
+
+    fn ocr_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use menu::{DropdownMenu, PopupMenuItem};
+        let modes = cx.global::<Runtime>().config.ocr.clone();
+        let active = modes.active;
+        let weak = cx.entity().downgrade();
+        let name = modes.profiles[self.ocr_edit].name.clone();
+        let selector = Button::new("ocr-mode-settings")
+            .small()
+            .label(name)
+            .accessibility_label("选择要编辑的 OCR 模式")
+            .dropdown_menu(move |mut menu, _, _| {
+                for (index, profile) in modes.profiles.iter().enumerate() {
+                    let weak = weak.clone();
+                    let name = if index == active {
+                        format!("{} · 默认", profile.name)
+                    } else {
+                        profile.name.clone()
+                    };
+                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, w, cx| {
+                        let _ = weak.update(cx, |v, cx| v.load_ocr_fields(index, w, cx));
+                    }));
+                }
+                menu
+            });
+        #[cfg(target_os = "windows")]
+        let labels = [
+            ("模式名称", "1–32 个字符"),
+            ("最大边长", "320–3200 像素"),
+            ("CPU 线程", "1–16"),
+            ("方向校正", "1 开启，0 关闭"),
+            ("检测阈值", "0.01–0.99"),
+            ("框置信度", "0.01–0.99"),
+            ("识别置信度", "0.01–0.99"),
+            ("扩框系数", "1–4"),
+        ];
+        #[cfg(target_os = "macos")]
+        let labels = [
+            ("模式名称", "1–32 个字符"),
+            ("优先准确度", "1 精确，0 快速"),
+            ("语言纠正", "1 开启，0 关闭"),
+            ("自动检测语言", "1 开启，0 关闭"),
+            ("识别语言", "逗号分隔的语言代码，如 zh-Hans, en-US"),
+            ("最小文字高度", "相对图片高度的比例，0–0.25"),
+            ("自定义词汇", "逗号分隔，开启语言纠正后生效"),
+        ];
+        let engine = if cfg!(target_os = "windows") {
+            "RapidOCR · 本地识别"
+        } else {
+            "Apple Vision · 本地识别"
+        };
+        div()
+            .v_flex()
+            .gap_2()
+            .child(row("识别模式", engine, selector).icon("scan-text"))
+            .children(
+                labels
+                    .into_iter()
+                    .zip(&self.ocr_fields)
+                    .map(|((label, help), field)| {
+                        row(
+                            label,
+                            help,
+                            div()
+                                .w(px(190.))
+                                .child(Input::new(field).small().aria_label(label)),
+                        )
+                    }),
+            )
+            .child(
+                div().flex().flex_wrap().gap_2().children(
+                    [
+                        ("保存模式", OcrModeAction::Save, true),
+                        ("设为默认", OcrModeAction::Default, self.ocr_edit != active),
+                        ("还原预设", OcrModeAction::Reset, self.ocr_edit < 3),
+                        ("复制为自定义", OcrModeAction::Duplicate, true),
+                    ]
+                    .into_iter()
+                    .map(|(label, action, enabled)| {
+                        Button::new(label)
+                            .small()
+                            .label(label)
+                            .disabled(!enabled)
+                            .on_click(
+                                cx.listener(move |v, _, w, cx| v.change_ocr_config(action, w, cx)),
+                            )
+                    }),
+                ),
+            )
+    }
+
     fn proxy_config(&self, cx: &App) -> UpdateConfig {
         UpdateConfig {
             auto_check: self.auto_check,
@@ -1299,6 +1527,7 @@ impl Render for Settings {
                             "在标注中识别",
                             cx,
                         )));
+                content = content.child(self.ocr_settings(cx));
             }
             6 => {
                 content = content

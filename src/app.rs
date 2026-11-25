@@ -105,6 +105,7 @@ impl Global for CaptureNavigation {}
 pub struct PreparedImage {
     pub pixels: Arc<image::RgbaImage>,
     pub texture: Arc<RenderImage>,
+    pub original_size: bool,
 }
 impl PreparedImage {
     pub fn new(pixels: Arc<image::RgbaImage>) -> Self {
@@ -123,7 +124,19 @@ impl PreparedImage {
         } else {
             texture(&pixels)
         };
-        Self { pixels, texture }
+        Self {
+            pixels,
+            texture,
+            original_size: false,
+        }
+    }
+    fn from_clipboard(pixels: Arc<image::RgbaImage>) -> Self {
+        let texture = texture(&pixels);
+        Self {
+            pixels,
+            texture,
+            original_size: true,
+        }
     }
 }
 pub fn texture_scaled(image: &image::RgbaImage, scale: f32) -> Arc<RenderImage> {
@@ -482,6 +495,7 @@ pub fn start(cx: &mut App, smoke_test: bool) {
         .icon(icon)
         .tooltip("Simple Snip — F1 截图 / F3 贴图")
         .menu(menu)
+        .on_activate(Preferences)
         .build(cx)
     {
         Ok(tray) => {
@@ -612,7 +626,7 @@ pub(crate) fn read_clipboard_command(
     std::thread::spawn(move || {
         let event = match read() {
             Ok(image) if matches!(cmd, Command::Paste) => {
-                Event::Pin(PreparedImage::new(image), None)
+                Event::Pin(PreparedImage::from_clipboard(image), None)
             }
             Ok(image) => Event::Recognize(image),
             Err(error) => Event::Status(format!("读取剪贴板失败：{error}")),
