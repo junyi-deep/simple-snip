@@ -1,5 +1,13 @@
 # 实际测试记录
 
+## v0.0.28 发布与本机安装
+
+[标签流水线](https://github.com/junyi-deep/simple-snip/actions/runs/46016713804) 在 Windows AMD64 和 macOS ARM64 原生运行器通过格式化、编译检查、Clippy、测试、发布构建和打包。Windows 144 项、macOS 142 项 Rust 自动测试通过，分别有 3 项和 4 项需真实桌面的测试默认跳过。macOS 的 6 项分发流程测试通过。发布标签指向 `b4af6f649e8f2d4360bcf98d8b5422bf94244aa8`。
+
+[公开发行版](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.28) 的三个安装包已下载，SHA-256 同时匹配校验文件和 GitHub 资产摘要。ZIP 完整性、Windows AMD64 GUI、macOS ARM64 和双版本号、DMG 校验及 macOS 临时签名完整性均通过。
+
+本机使用已核验的公开 ZIP 和标签中的更新助手替换了 `/Applications/Simple Snip.app`。签名身份比较确认旧要求不兼容，系统返回录屏授权重置成功。已核对主程序与发布包逐字节一致，并确认 v0.0.28 从安装路径启动，收到清理成功的参数，当前只运行一个实例。复查时 Mac 处于锁屏状态，尚未完成用户重新授权后的截图验收。
+
 ## 2026-11-27 · macOS 应用内升级与录屏权限
 
 使用两个签名不同的临时测试应用，在本机 Apple Silicon 验证升级助手等待旧进程退出、替换应用并启动新版。隔离应用位于用户应用程序目录，没有使用 Simple Snip 的录屏授权。真实 `tccutil` 返回重置成功，新版收到成功提示参数。在临时目录试跑时，Launch Services 未找到测试应用的 Bundle ID，重置失败后新版仍启动并收到失败提示参数。测试没有操作已安装的 Simple Snip，也没有验收在系统设置授予新版权限后的实际截图。
