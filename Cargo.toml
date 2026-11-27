@@ -5,7 +5,7 @@ exclude = ["vendor/gpui-tray"]
 
 [package]
 name = "simple-snip"
-version = "0.0.26"
+version = "0.0.27"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"

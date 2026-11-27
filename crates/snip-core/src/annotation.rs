@@ -54,6 +54,7 @@ pub enum WatermarkDensity {
 pub struct WatermarkStyle {
     pub density: WatermarkDensity,
     pub bold: bool,
+    pub angle: i16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,6 +312,13 @@ impl Annotation {
         }
         r.width = (right - r.x).max(1.);
         r.height = (bottom - r.y).max(1.);
+        if self.tool == Tool::Watermark && self.watermark.angle != 0 {
+            let (width, height) = rotated_size(r.width, r.height, self.watermark.angle);
+            r.x += (r.width - width) / 2.;
+            r.y += (r.height - height) / 2.;
+            r.width = width;
+            r.height = height;
+        }
         r
     }
     pub fn translate(&mut self, dx: f32, dy: f32) {
@@ -676,6 +684,58 @@ mod reframe_tests {
         assert!(doc.original.pixels().all(|p| p.0 == [0, 0, 0, 0]));
     }
 }
+fn rotated_size(width: f32, height: f32, angle: i16) -> (f32, f32) {
+    let (sin, cos) = f32::from(angle).to_radians().sin_cos();
+    (
+        width * cos.abs() + height * sin.abs(),
+        width * sin.abs() + height * cos.abs(),
+    )
+}
+
+fn rotate_watermark(tile: &RgbaImage, angle: i16) -> Option<RgbaImage> {
+    use tiny_skia::{FilterQuality, PixmapPaint};
+    let mut source = Pixmap::new(tile.width(), tile.height())?;
+    for (pixel, rgba) in source
+        .data_mut()
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(tile.pixels())
+    {
+        let [red, green, blue, alpha] = rgba.0;
+        let premultiply = |value: u8| ((u16::from(value) * u16::from(alpha) + 127) / 255) as u8;
+        pixel.copy_from_slice(&[
+            premultiply(red),
+            premultiply(green),
+            premultiply(blue),
+            alpha,
+        ]);
+    }
+    let (width, height) = (tile.width() as f32, tile.height() as f32);
+    let (rotated_width, rotated_height) = rotated_size(width, height, angle);
+    let mut rotated = Pixmap::new(rotated_width.ceil() as u32, rotated_height.ceil() as u32)?;
+    let transform = Transform::from_translate(-width / 2., -height / 2.)
+        .post_rotate(f32::from(angle))
+        .post_translate(rotated.width() as f32 / 2., rotated.height() as f32 / 2.);
+    rotated.draw_pixmap(
+        0,
+        0,
+        source.as_ref(),
+        &PixmapPaint {
+            quality: FilterQuality::Bilinear,
+            ..Default::default()
+        },
+        transform,
+        None,
+    );
+    let mut tile = RgbaImage::new(rotated.width(), rotated.height());
+    for (pixel, rgba) in tile.pixels_mut().zip(rotated.pixels()) {
+        let color = rgba.demultiply();
+        pixel.0 = [color.red(), color.green(), color.blue(), color.alpha()];
+    }
+    Some(tile)
+}
+
 fn draw_text(image: &mut RgbaImage, font: &fontdue::Font, a: &Annotation) {
     let spacing = match a.watermark.density {
         WatermarkDensity::Single => 0.,
@@ -683,7 +743,7 @@ fn draw_text(image: &mut RgbaImage, font: &fontdue::Font, a: &Annotation) {
         WatermarkDensity::Medium => 4.,
         WatermarkDensity::Dense => 2.,
     };
-    if a.tool == Tool::Watermark && spacing > 0. {
+    if a.tool == Tool::Watermark && (spacing > 0. || a.watermark.angle != 0) {
         let font_px = a.width * 6. + 12.;
         let tile_width = (a.text.chars().count() as f32 * font_px * 1.3 + 4.).ceil() as u32;
         let tile_height = (font_px * 1.6 + 4.).ceil() as u32;
@@ -694,6 +754,7 @@ fn draw_text(image: &mut RgbaImage, font: &fontdue::Font, a: &Annotation) {
         let mut stamp = a.clone();
         stamp.points[0] = Point::new(0., 0.);
         stamp.watermark.density = WatermarkDensity::Single;
+        stamp.watermark.angle = 0;
         draw_text(&mut tile, font, &stamp);
         let ink_width = tile
             .enumerate_pixels()
@@ -705,6 +766,18 @@ fn draw_text(image: &mut RgbaImage, font: &fontdue::Font, a: &Annotation) {
             return;
         }
         let tile = imageops::crop_imm(&tile, 0, 0, ink_width, tile.height()).to_image();
+        let size = tile.dimensions();
+        let tile = if a.watermark.angle != 0 {
+            rotate_watermark(&tile, a.watermark.angle).unwrap_or(tile)
+        } else {
+            tile
+        };
+        if spacing == 0. {
+            let x = a.points[0].x + (size.0 as f32 - tile.width() as f32) / 2.;
+            let y = a.points[0].y + (size.1 as f32 - tile.height() as f32) / 2.;
+            imageops::overlay(image, &tile, x.round() as i64, y.round() as i64);
+            return;
+        }
         let step_x = (tile.width() + (font_px * spacing).ceil() as u32).max(24);
         let step_y = (tile.height() + (font_px * spacing * 0.6).ceil() as u32).max(24);
         for (row, y) in (0..image.height()).step_by(step_y as usize).enumerate() {

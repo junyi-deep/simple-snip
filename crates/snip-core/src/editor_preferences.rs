@@ -36,7 +36,7 @@ pub struct EditorPreferences {
     pub ocr_language: OcrLanguage,
     pub ocr_line_numbers: bool,
     pub ocr_wrap: bool,
-    pub watermark_text: String,
+    pub watermark_angle: i16,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,7 +69,7 @@ impl Default for EditorPreferences {
             ocr_language: OcrLanguage::Auto,
             ocr_line_numbers: false,
             ocr_wrap: true,
-            watermark_text: String::new(),
+            watermark_angle: 0,
         }
     }
 }
@@ -98,6 +98,7 @@ impl EditorPreferences {
         }
         prefs.toast_delay_ms = prefs.toast_delay_ms.clamp(500, 10000);
         prefs.next_number = prefs.next_number.max(1);
+        prefs.watermark_angle = prefs.watermark_angle.clamp(-180, 180);
         prefs.styles.retain(|tool, style| {
             let (min, max) = if tool.is_typographic() {
                 (1. / 6., 500. / 6.)
@@ -130,6 +131,7 @@ mod tests {
             last_ocr_mode: Some(2),
             ocr_language: OcrLanguage::Json,
             ocr_line_numbers: false,
+            watermark_angle: -35,
             ..Default::default()
         };
         prefs.styles.insert(

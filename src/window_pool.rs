@@ -208,7 +208,7 @@ pub fn transparent_root(w: &mut Window, cx: &mut App) {
 }
 
 #[cfg(target_os = "windows")]
-fn present(
+pub(crate) fn present(
     handle: AnyWindowHandle,
     requested_bounds: Option<WindowBounds>,
     focus: bool,

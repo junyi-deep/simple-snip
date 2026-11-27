@@ -7,6 +7,7 @@ use gpui_kit::{
         color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
         input::{Editor, EditorState, Input, InputEvent, InputState},
         menu::*,
+        slider::{Slider, SliderEvent, SliderState, SliderValue},
         *,
     },
     prelude::*,
@@ -175,6 +176,7 @@ pub struct EditorView {
     pub doc: Document,
     preferences: snip_core::editor_preferences::EditorPreferences,
     toolbar_rows: [f32; 2],
+    toolbar_panel_heights: [f32; 2],
     transform: ImageTransform,
     host: EditorHost,
     rendered: Arc<RgbaImage>,
@@ -200,6 +202,9 @@ pub struct EditorView {
     watermark: snip_core::annotation::WatermarkStyle,
     watermark_input: Entity<InputState>,
     _watermark_subscription: Subscription,
+    watermark_angle: Entity<SliderState>,
+    _watermark_angle_subscription: Subscription,
+    rotating_watermark: bool,
     _text_subscription: Subscription,
     last_wheel: Option<std::time::Instant>,
     draft: Option<Annotation>,
@@ -266,26 +271,27 @@ impl EditorView {
         let focus = cx.focus_handle();
         focus.focus(w, cx);
         let text = cx.new(|cx| InputState::new(w, cx));
-        let watermark_input = cx.new(|cx| {
-            InputState::new(w, cx)
-                .placeholder("水印内容")
-                .default_value(preferences.watermark_text.clone())
-        });
+        let watermark_input = cx.new(|cx| InputState::new(w, cx).placeholder("水印内容"));
         let watermark_subscription = cx.subscribe(&watermark_input, |v, field, event, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
-                let text = field.read(cx).value().to_string();
-                cx.global_mut::<PreferencesStore>()
-                    .modify(|p| p.watermark_text = text.clone());
-                if let Some(index) = v.selected.filter(|&i| {
-                    v.doc.objects.get(i).is_some_and(|a| {
-                        a.tool == Tool::Watermark && a.text != text && !text.trim().is_empty()
-                    })
-                }) {
-                    let p = v.doc.objects[index].points[0];
-                    v.commit_text_at(p, Some(index), Tool::Watermark, text, cx);
-                }
+                v.submit_watermark(field.read(cx).value().to_string(), cx);
             }
         });
+        let watermark_angle = cx.new(|_| {
+            SliderState::new()
+                .min(-180.)
+                .max(180.)
+                .step(1.)
+                .default_value(f32::from(preferences.watermark_angle))
+        });
+        let watermark_angle_subscription =
+            cx.subscribe(&watermark_angle, |v, _, event, cx| match *event {
+                SliderEvent::Change(SliderValue::Single(degrees)) => {
+                    v.rotate_watermark(degrees.round().clamp(-180., 180.) as i16, cx);
+                }
+                SliderEvent::Release(_) => v.rotating_watermark = false,
+                _ => {}
+            });
         let window_handle = w.window_handle();
         let text_focus = focus.clone();
         let text_subscription = cx.subscribe(&text, move |v, _, event: &InputEvent, cx| {
@@ -362,6 +368,7 @@ impl EditorView {
         Self {
             preferences: preferences.clone(),
             toolbar_rows: [0.; 2],
+            toolbar_panel_heights: [0.; 2],
             size_input,
             _size_subscription: size_subscription,
             capture_context: None,
@@ -388,9 +395,13 @@ impl EditorView {
             watermark: snip_core::annotation::WatermarkStyle {
                 density: snip_core::annotation::WatermarkDensity::Medium,
                 bold: false,
+                angle: preferences.watermark_angle,
             },
             watermark_input,
             _watermark_subscription: watermark_subscription,
+            watermark_angle,
+            _watermark_angle_subscription: watermark_angle_subscription,
+            rotating_watermark: false,
             _text_subscription: text_subscription,
             last_wheel: None,
             draft: None,
@@ -470,6 +481,7 @@ impl EditorView {
         self.preferences = cx.global::<PreferencesStore>().value.clone();
         self.tool = tool;
         self.selected = None;
+        self.rotating_watermark = false;
         self.geometry_drag = None;
         self.last = None;
         self.last_wheel = None;
@@ -477,6 +489,12 @@ impl EditorView {
         self.width = style.width;
         self.color = style.color;
         self.arrow_style = style.arrow;
+        if tool == Tool::Watermark {
+            self.watermark.angle = self.preferences.watermark_angle;
+            self.watermark_angle.update(cx, |slider, cx| {
+                slider.set_value(f32::from(self.watermark.angle), w, cx)
+            });
+        }
         self.color_picker.update(cx, |v, cx| {
             v.set_value(rgba(u32::from_be_bytes(style.color)), w, cx)
         });
@@ -829,11 +847,15 @@ impl EditorView {
         let annotation = &self.doc.objects[index];
         self.selected = Some(index);
         self.watermark = annotation.watermark;
+        self.rotating_watermark = false;
         self.width = annotation.width;
         self.color = annotation.color;
         let text = annotation.text.clone();
         self.watermark_input
             .update(cx, |field, cx| field.set_value(text, w, cx));
+        self.watermark_angle.update(cx, |slider, cx| {
+            slider.set_value(f32::from(self.watermark.angle), w, cx)
+        });
         self.color_picker.update(cx, |picker, cx| {
             picker.set_value(rgba(u32::from_be_bytes(self.color)), w, cx)
         });
@@ -849,10 +871,53 @@ impl EditorView {
             cx.notify();
             return;
         }
-        cx.global_mut::<PreferencesStore>()
-            .modify(|p| p.watermark_text = text.clone());
         let point = self.transform.inverse(self.text_top_left(anchor));
         self.commit_text_at(point, None, Tool::Watermark, text, cx);
+    }
+    fn selected_watermark(&self) -> Option<usize> {
+        self.selected.filter(|&i| {
+            self.doc
+                .objects
+                .get(i)
+                .is_some_and(|a| a.tool == Tool::Watermark)
+        })
+    }
+
+    fn submit_watermark(&mut self, text: String, cx: &mut Context<Self>) {
+        if text.trim().is_empty() || self.option_tool() != Tool::Watermark {
+            return;
+        }
+        if let Some(index) = self.selected_watermark() {
+            let a = &self.doc.objects[index];
+            if a.text != text {
+                self.commit_text_at(a.points[0], Some(index), Tool::Watermark, text, cx);
+            }
+        } else {
+            let font = self.width * 6. + 12.;
+            let point = ImagePoint::new(
+                ((self.doc.original.width() as f32 - text_width(&text, font)) / 2.).max(0.),
+                ((self.doc.original.height() as f32 - font * 1.3) / 2.).max(0.),
+            );
+            self.commit_text_at(point, None, Tool::Watermark, text, cx);
+        }
+    }
+
+    fn rotate_watermark(&mut self, angle: i16, cx: &mut Context<Self>) {
+        if self.watermark.angle == angle {
+            return;
+        }
+        self.watermark.angle = angle;
+        cx.global_mut::<PreferencesStore>()
+            .modify(|p| p.watermark_angle = angle);
+        if let Some(index) = self.selected_watermark() {
+            if !self.rotating_watermark {
+                self.doc.checkpoint();
+                self.rotating_watermark = true;
+            }
+            self.doc.objects[index].watermark.angle = angle;
+            self.refresh(cx);
+        }
+        cx.notify();
     }
     fn text_top_left(&self, anchor: ImagePoint) -> ImagePoint {
         let mut point = self.transform.forward(anchor);
@@ -865,12 +930,7 @@ impl EditorView {
     }
 
     fn apply_watermark_style(&mut self, cx: &mut Context<Self>) {
-        if let Some(index) = self.selected.filter(|i| {
-            self.doc
-                .objects
-                .get(*i)
-                .is_some_and(|a| a.tool == Tool::Watermark)
-        }) {
+        if let Some(index) = self.selected_watermark() {
             self.doc.checkpoint();
             self.doc.objects[index].watermark = self.watermark;
             self.refresh(cx);
@@ -906,14 +966,7 @@ impl EditorView {
                 tool,
                 points: vec![
                     p,
-                    ImagePoint::new(
-                        p.x + text
-                            .chars()
-                            .map(|c| if c.is_ascii() { 0.7 } else { 1.0 })
-                            .sum::<f32>()
-                            * font,
-                        p.y + font * 1.3,
-                    ),
+                    ImagePoint::new(p.x + text_width(&text, font), p.y + font * 1.3),
                 ],
                 color: self.color,
                 width: self.width,
@@ -1743,14 +1796,24 @@ impl EditorView {
                 0.
             }
     }
-    fn toolbar_height(&self) -> f32 {
-        36. + if self.ocr.is_some() {
-            4. + f32::from(self.ocr_size.height)
-        } else if self.tool != Tool::Select || self.selected.is_some() {
-            38.
+    fn toolbar_panel_height(&self) -> f32 {
+        let has_options =
+            self.ocr.is_none() && (self.tool != Tool::Select || self.selected.is_some());
+        let measured = self.toolbar_panel_heights[usize::from(has_options)];
+        if measured > 0. {
+            measured
+        } else if has_options {
+            74.
         } else {
-            0.
+            36.
         }
+    }
+    fn toolbar_height(&self) -> f32 {
+        self.toolbar_panel_height()
+            + self
+                .ocr
+                .as_ref()
+                .map_or(0., |_| 4. + f32::from(self.ocr_size.height))
     }
     fn toolbar(&mut self, w: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let row_measure = |index: usize| {
@@ -1862,7 +1925,7 @@ impl EditorView {
                     .tooltip(if tool == Tool::Number {
                         format!("{label} [{shortcut}] · 下一个 {}", self.next_number)
                     } else if tool == Tool::Watermark {
-                        format!("{label} [{shortcut}] · 输入内容后点击图片放置")
+                        format!("{label} [{shortcut}] · 回车居中放置，或点击图片定位")
                     } else {
                         format!("{label} [{shortcut}]")
                     })
@@ -2036,6 +2099,7 @@ impl EditorView {
         let global_y = placement.y;
         let mut panel = design::panel(cx)
             .id("floating-annotation-toolbar")
+            .debug_selector(|| "annotation-tools-panel".to_string())
             .w(px(self.tools_width()))
             .max_w_full()
             .v_flex()
@@ -2176,13 +2240,33 @@ impl EditorView {
                     cx.stop_propagation();
                 }));
             if self.option_tool() == Tool::Watermark {
-                options = options.child(
-                    div().w(px(165.)).flex_shrink_0().child(
-                        Input::new(&self.watermark_input)
-                            .xsmall()
-                            .aria_label("水印内容"),
-                    ),
-                );
+                options = options
+                    .child(
+                        div().w(px(165.)).flex_shrink_0().child(
+                            Input::new(&self.watermark_input)
+                                .xsmall()
+                                .aria_label("水印内容"),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .child(
+                                Slider::new(&self.watermark_angle)
+                                    .w(px(90.))
+                                    .accessibility_label("水印角度"),
+                            )
+                            .child(
+                                div()
+                                    .w(px(37.))
+                                    .text_xs()
+                                    .text_right()
+                                    .child(format!("{}°", self.watermark.angle)),
+                            ),
+                    );
             }
             if self.tool.is_shape() || self.tool.is_line() {
                 let variants = if self.tool.is_shape() {
@@ -2223,7 +2307,9 @@ impl EditorView {
             panel = panel.child(options);
         }
         let result_height = if matches!(self.host, EditorHost::Capture) {
-            self.ocr_size.height.min(px((height - 40.).max(32.)))
+            self.ocr_size
+                .height
+                .min(px((height - self.toolbar_panel_height() - 4.).max(32.)))
         } else {
             self.ocr_size.height
         };
@@ -2246,7 +2332,30 @@ impl EditorView {
                 .shadow_sm()
                 .child(design::detail(cx).child(self.message.clone()))
         });
+        let editor = cx.entity().downgrade();
         div()
+            .on_children_prepainted(move |children, _, cx| {
+                let Some(panel) = children.first() else {
+                    return;
+                };
+                let height = f32::from(panel.size.height).ceil();
+                let index = usize::from(has_options);
+                if height > 0.
+                    && editor
+                        .upgrade()
+                        .is_some_and(|v| v.read(cx).toolbar_panel_heights[index] != height)
+                {
+                    let editor = editor.clone();
+                    cx.defer(move |cx| {
+                        let _ = editor.update(cx, |v, cx| {
+                            if v.toolbar_panel_heights[index] != height {
+                                v.toolbar_panel_heights[index] = height;
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
+            })
             .id("annotation-anchor")
             .when(matches!(self.host, EditorHost::Capture), |d| {
                 d.absolute()
@@ -2318,6 +2427,7 @@ impl EditorView {
         let observer = editor.clone();
         design::panel(cx)
             .id("ocr-result")
+            .debug_selector(|| "annotation-ocr-panel".to_string())
             .relative()
             .w(self.ocr_width())
             .max_w_full()
@@ -2914,6 +3024,13 @@ fn annotation_font_family() -> &'static str {
         "Arial Unicode MS"
     }
 }
+fn text_width(text: &str, font: f32) -> f32 {
+    text.chars()
+        .map(|c| if c.is_ascii() { 0.7 } else { 1. })
+        .sum::<f32>()
+        * font
+}
+
 fn text_frame_bounds(input: &InputState) -> Option<Bounds<Pixels>> {
     let content = input.input_bounds();
     let caret = input.cursor_layout()?.0;
@@ -3207,9 +3324,33 @@ impl Render for FloatingToolbar {
             .min(self.screen.bottom() - bounds.height - 6.);
         if bounds != self.last {
             self.last = bounds;
-            w.resize(size(px(bounds.width), px(bounds.height)));
-            if let Ok(raw) = app::raw(w) {
-                let _ = snip_platform::move_window(raw, bounds.x, bounds.y, w.scale_factor());
+            #[cfg(target_os = "windows")]
+            {
+                // GPUI retains its original Win32 non-client insets when resizing.
+                // Keep the native popup sized to the measured contents instead.
+                let handle = w.window_handle();
+                let toolbar = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    if toolbar.upgrade().is_some_and(|v| {
+                        let view = v.read(cx);
+                        view.editor.is_some() && view.last == bounds
+                    }) {
+                        crate::window_pool::present(
+                            handle,
+                            Some(annotation_window_bounds(bounds)),
+                            false,
+                            false,
+                            cx,
+                        );
+                    }
+                });
+            }
+            #[cfg(target_os = "macos")]
+            {
+                w.resize(size(px(bounds.width), px(bounds.height)));
+                if let Ok(raw) = app::raw(w) {
+                    let _ = snip_platform::move_window(raw, bounds.x, bounds.y, w.scale_factor());
+                }
             }
         }
         let tools = editor.update(cx, |editor, cx| editor.toolbar(w, cx));
@@ -3266,6 +3407,13 @@ impl Render for FloatingToolbar {
             }))
     }
 }
+fn annotation_window_bounds(bounds: Rect) -> WindowBounds {
+    WindowBounds::Windowed(Bounds::new(
+        point(px(bounds.x), px(bounds.y)),
+        size(px(bounds.width), px(bounds.height)),
+    ))
+}
+
 pub fn open_toolbar(
     editor: Entity<EditorView>,
     pin_window: &Window,
@@ -3308,6 +3456,15 @@ pub fn open_toolbar(
             v.last = Rect::new(0., 0., 0., 0.);
             cx.notify();
         });
+        #[cfg(target_os = "windows")]
+        crate::window_pool::present(
+            handle,
+            Some(annotation_window_bounds(bounds)),
+            false,
+            true,
+            cx,
+        );
+        #[cfg(target_os = "macos")]
         let _ = handle.update(cx, |_, w, _| {
             if let Ok(raw) = app::raw(w) {
                 let _ = snip_platform::show_window(raw, true);
@@ -3317,10 +3474,7 @@ pub fn open_toolbar(
     }
     let (handle, view) = gpui_kit::open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                point(px(bounds.x), px(bounds.y)),
-                size(px(bounds.width), px(bounds.height)),
-            ))),
+            window_bounds: Some(annotation_window_bounds(bounds)),
             titlebar: None,
             kind: WindowKind::PopUp,
             focus: false,
@@ -3333,6 +3487,10 @@ pub fn open_toolbar(
         },
         cx,
         |w, cx| {
+            #[cfg(target_os = "windows")]
+            if let Ok(raw) = app::raw(w) {
+                let _ = snip_platform::show_window(raw, false);
+            }
             app::apply_style(w, snip_platform::WindowStyle::default());
             cx.new(|cx| {
                 let subscription = cx.observe(&editor, |_, _, cx| cx.notify());
@@ -3358,6 +3516,14 @@ pub fn open_toolbar(
         },
     )?;
     let _ = handle.update(cx, |_, w, cx| crate::window_pool::transparent_root(w, cx));
+    #[cfg(target_os = "windows")]
+    crate::window_pool::present(
+        handle,
+        Some(annotation_window_bounds(bounds)),
+        false,
+        true,
+        cx,
+    );
     cx.global_mut::<app::Runtime>().annotation_toolbar = Some((handle, view));
     Ok(handle)
 }
@@ -3777,11 +3943,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn exported_watermark_preserves_transparency_and_undo() {
-        let source = Arc::new(image::RgbaImage::new(250, 100));
+        let source = Arc::new(image::RgbaImage::new(320, 250));
         let mut doc = snip_core::annotation::Document::new(source.clone());
         doc.add(snip_core::annotation::Annotation {
             tool: super::Tool::Watermark,
-            points: vec![ImagePoint::new(8., 8.), ImagePoint::new(200., 60.)],
+            points: vec![ImagePoint::new(60., 106.), ImagePoint::new(250., 154.)],
             color: [170, 40, 21, 255],
             width: 4.,
             text: "Simple Snip".into(),
@@ -3792,8 +3958,100 @@ mod tests {
         assert!(output.pixels().any(|p| p[3] > 80));
         assert!(output.pixels().all(|p| p[3] <= 107));
         assert_eq!(doc.original.as_ref(), source.as_ref());
+        doc.checkpoint();
+        doc.objects[0].watermark.angle = 90;
+        let rotated = doc.flatten();
+        let ink = rotated.enumerate_pixels().filter(|(_, _, p)| p[3] != 0);
+        let horizontal = ink.clone().map(|(x, _, _)| x).max().unwrap()
+            - ink.clone().map(|(x, _, _)| x).min().unwrap();
+        let vertical =
+            ink.clone().map(|(_, y, _)| y).max().unwrap() - ink.map(|(_, y, _)| y).min().unwrap();
+        assert!(vertical > horizontal * 3, "watermark must render rotated");
+        doc.undo();
+        assert_eq!(doc.flatten(), *output);
         doc.undo();
         assert_eq!(doc.flatten(), *source);
+    }
+
+    #[gpui_kit::test]
+    fn capture_watermark_enter_places_a_new_stamp(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.host = EditorHost::Capture;
+                        v.choose_tool(super::Tool::Watermark, w, cx);
+                        v.watermark_input
+                            .update(cx, |field, cx| field.set_value("审批稿", w, cx));
+                    });
+                    let _ = w.draw(cx);
+                    let field = editor.read(cx).watermark_input.clone();
+                    field.update(cx, |field, cx| field.focus(w, cx));
+                    let _ = w.draw(cx);
+                })
+                .unwrap();
+        });
+        cx.simulate_keystrokes(window, "enter");
+        cx.update(|cx| {
+            let view = editor.read(cx);
+            assert_eq!(
+                view.doc.objects.len(),
+                1,
+                "Enter should place the watermark immediately"
+            );
+            assert_eq!(view.doc.objects[0].text, "审批稿");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn watermark_angle_is_undoable_and_new_editor_keeps_angle_without_text(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.choose_tool(super::Tool::Watermark, w, cx);
+                        v.watermark_input
+                            .update(cx, |field, cx| field.set_value("内部稿", w, cx));
+                        v.place_watermark(ImagePoint::new(40., 50.), cx);
+                        v.watermark_angle.update(cx, |_, cx| {
+                            for degrees in [20., 45.] {
+                                cx.emit(super::SliderEvent::Change(degrees.into()));
+                            }
+                            cx.emit(super::SliderEvent::Release(45_f32.into()));
+                        });
+                    });
+                })
+                .unwrap();
+        });
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, _| {
+                        assert_eq!(v.doc.objects[0].watermark.angle, 45);
+                        v.doc.undo();
+                        assert_eq!(v.doc.objects[0].watermark.angle, 0);
+                    });
+                    let image = Arc::new(RgbaImage::new(120, 80));
+                    let new = cx.new(|cx| {
+                        EditorView::new(
+                            Document::new(image.clone()),
+                            identity(&image),
+                            EditorHost::Capture,
+                            image,
+                            Bounds::new(point(px(0.), px(0.)), size(px(120.), px(80.))),
+                            w,
+                            cx,
+                        )
+                    });
+                    assert_eq!(new.read(cx).watermark.angle, 45);
+                    assert!(new.read(cx).watermark_input.read(cx).value().is_empty());
+                })
+                .unwrap();
+        });
     }
 
     #[gpui_kit::test]
@@ -3854,8 +4112,23 @@ mod tests {
             w.simulate_next_frame(cx);
             let _ = w.draw(cx);
         });
+        cx.run_until_parked();
+        visual.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
         cx.update(|cx| {
             assert_eq!(editor.read(cx).ocr_width(), px(500.));
+        });
+        let tools = visual.debug_bounds("annotation-tools-panel").unwrap();
+        let result = visual.debug_bounds("annotation-ocr-panel").unwrap();
+        cx.update(|cx| {
+            let actual = f32::from(result.bottom() - tools.top());
+            assert!(
+                (editor.read(cx).toolbar_height() - actual).abs() <= 1.,
+                "predicted {}, measured {actual}; tools {tools:?}, OCR {result:?}",
+                editor.read(cx).toolbar_height(),
+            );
+            assert!((f32::from(result.top() - tools.bottom()) - 4.).abs() <= 1.);
         });
         let grip = visual
             .debug_bounds("ocr-resize-grip")

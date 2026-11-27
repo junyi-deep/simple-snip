@@ -146,7 +146,12 @@ pub fn exclude_capture_controls(handle: RawWindowHandle) -> Result<u32> {
 /// ScreenCaptureKit filters remove the toolbar even when placement must fall
 /// inside a full-screen selection. Objective-C objects stay in their callbacks;
 /// only owned RGBA bytes cross the channel back to the capture worker.
-pub fn capture_region_excluding(display_id: u32, rect: Rect, excluded: u32) -> Result<RgbaImage> {
+pub fn capture_region_excluding(
+    display_id: u32,
+    rect: Rect,
+    excluded: u32,
+    show_cursor: bool,
+) -> Result<RgbaImage> {
     use objc2_screen_capture_kit::{
         SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
     };
@@ -204,7 +209,7 @@ pub fn capture_region_excluding(display_id: u32, rect: Rect, excluded: u32) -> R
                             height as f64 / scale,
                         ),
                     ));
-                    config.setShowsCursor(false);
+                    config.setShowsCursor(show_cursor);
                     config.setScalesToFit(false);
                 }
                 let tx_image = tx.clone();

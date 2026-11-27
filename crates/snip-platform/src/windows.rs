@@ -9,10 +9,16 @@ use snip_core::{
 };
 use windows::Win32::{
     Foundation::{COLORREF, GetLastError, HWND, LPARAM, POINT, RECT, SetLastError, WIN32_ERROR},
-    Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
+    Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
+        DwmSetWindowAttribute,
+    },
     Graphics::Gdi::ScreenToClient,
     UI::WindowsAndMessaging::*,
 };
+
+#[path = "windows/cursor.rs"]
+mod cursor;
 
 /// Only geometry is needed for snapping. Avoid retrieving titles/process names
 /// and querying the same DWM bounds four times through xcap's accessors.
@@ -102,8 +108,17 @@ pub fn set_capture_excluded(handle: RawWindowHandle, excluded: bool) -> Result<(
     }
     Ok(())
 }
-pub fn capture_region_excluding(display: u32, rect: Rect, _: u32) -> Result<RgbaImage> {
-    crate::capture_region(display, rect)
+pub fn capture_region_excluding(
+    display: u32,
+    rect: Rect,
+    _: u32,
+    show_cursor: bool,
+) -> Result<RgbaImage> {
+    let (mut image, monitor, (x, y)) = crate::capture_region_pixels(display, rect)?;
+    if show_cursor {
+        cursor::composite(&mut image, monitor.x()? + x as i32, monitor.y()? + y as i32)?;
+    }
+    Ok(image)
 }
 fn hwnd(handle: RawWindowHandle) -> Result<HWND> {
     let RawWindowHandle::Win32(h) = handle else {
@@ -217,14 +232,27 @@ pub fn raise_overlay(handle: RawWindowHandle) -> Result<()> {
 pub fn configure_borderless(handle: RawWindowHandle, bounds: Rect, scale: f32) -> Result<()> {
     let hwnd = hwnd(handle)?;
     unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-        let style = (style
+        let current_style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let style = (current_style
             & !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0)
             | WS_POPUP.0;
-        SetLastError(WIN32_ERROR(0));
-        if SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize) == 0 && GetLastError().0 != 0 {
-            anyhow::bail!("设置无边框窗口失败: {:?}", GetLastError());
+        let mut flags = SWP_NOACTIVATE | SWP_NOZORDER;
+        if style != current_style {
+            SetLastError(WIN32_ERROR(0));
+            if SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize) == 0 && GetLastError().0 != 0 {
+                anyhow::bail!("设置无边框窗口失败: {:?}", GetLastError());
+            }
+            flags |= SWP_FRAMECHANGED;
         }
+        // Windows 11 can draw a DWM outline even around a transparent popup.
+        // The attribute is optional on Windows 10, where the style above removes the frame.
+        const NO_BORDER: u32 = 0xffff_fffe;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            (&NO_BORDER as *const u32).cast(),
+            size_of::<u32>() as u32,
+        );
         SetWindowPos(
             hwnd,
             None,
@@ -232,7 +260,7 @@ pub fn configure_borderless(handle: RawWindowHandle, bounds: Rect, scale: f32) -
             (bounds.y * scale).round() as i32,
             (bounds.width * scale).round() as i32,
             (bounds.height * scale).round() as i32,
-            SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            flags,
         )?;
     }
     Ok(())
@@ -577,6 +605,9 @@ mod tests {
             inspect_borderless_rect(window.raw()).unwrap(),
             Rect::new(-500., 100., 480., 260.)
         );
+        let compact = Rect::new(-510., 110., 360., 32.);
+        configure_borderless(window.raw(), compact, 1.).unwrap();
+        assert_eq!(inspect_borderless_rect(window.raw()).unwrap(), compact);
         assert!(!window_has_system_buttons(window.raw()).unwrap());
     }
 

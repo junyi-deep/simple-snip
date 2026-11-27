@@ -86,6 +86,7 @@ pub struct GifConfig {
     pub max_width: u32,
     pub countdown: u32,
     pub repeat: u16,
+    pub show_cursor: bool,
 }
 impl Default for GifConfig {
     fn default() -> Self {
@@ -95,6 +96,7 @@ impl Default for GifConfig {
             max_width: 1280,
             countdown: 3,
             repeat: 0,
+            show_cursor: true,
         }
     }
 }
@@ -298,6 +300,16 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gif_cursor_defaults_on_for_legacy_settings_and_preserves_opt_out() {
+        let mut config: Config = toml::from_str("[gif]\nfps = 10\n").unwrap();
+        assert!(config.gif.show_cursor);
+        config.gif.show_cursor = false;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        config.save(&path).unwrap();
+        assert!(!Config::load(&path).0.gif.show_cursor);
+    }
     #[test]
     fn trail_styles_and_rgba_palettes_roundtrip_without_changing_legacy_defaults() {
         let mut c: Config =

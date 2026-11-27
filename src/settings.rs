@@ -68,6 +68,7 @@ fn merge_settings(mut current: Config, baseline: &Config, draft: &Config) -> Con
         gif.fps,
         gif.max_seconds,
         gif.max_width,
+        gif.show_cursor,
         trail.width,
         trail.show_in_capture,
         trail.lifetime_ms,
@@ -91,6 +92,7 @@ pub struct Settings {
     config_path: std::path::PathBuf,
     show_on_start: bool,
     gif_fps: u32,
+    gif_show_cursor: bool,
     theme: String,
     format: String,
     save_status: String,
@@ -274,6 +276,7 @@ impl Settings {
                         config_path: Config::path(),
                         show_on_start: config.show_settings_on_start,
                         gif_fps: config.gif.fps,
+                        gif_show_cursor: config.gif.show_cursor,
                         theme: config.theme.clone(),
                         format: config.format.clone(),
                         save_status: "修改后自动保存".into(),
@@ -463,6 +466,7 @@ impl Settings {
             let mut c = self.baseline.clone();
             c.show_settings_on_start = self.show_on_start;
             c.gif.fps = self.gif_fps;
+            c.gif.show_cursor = self.gif_show_cursor;
             c.theme = self.theme.clone();
             c.format = self.format.clone();
             c.save_directory = self.save_path.read(cx).value().to_string().into();
@@ -1489,6 +1493,17 @@ impl Render for Settings {
                 }
                 content = content
                     .child(row("采集帧率", "帧 / 秒，默认 15", rates))
+                    .child(row(
+                        "显示鼠标指针",
+                        "",
+                        Switch::new("gif-show-cursor")
+                            .accessibility_label("在 GIF 中显示鼠标指针")
+                            .checked(self.gif_show_cursor)
+                            .on_click(cx.listener(|v, checked, _, cx| {
+                                v.gif_show_cursor = *checked;
+                                v.save(cx);
+                            })),
+                    ))
                     .child(row(
                         "最长录制（秒）",
                         "1–600，达到上限后自动完成",

@@ -96,6 +96,13 @@ pub fn window_rectangles() -> Vec<Rect> {
         .collect()
 }
 pub fn capture_region(display: u32, rect: Rect) -> Result<RgbaImage> {
+    capture_region_pixels(display, rect).map(|(image, _, _)| image)
+}
+
+fn capture_region_pixels(
+    display: u32,
+    rect: Rect,
+) -> Result<(RgbaImage, xcap::Monitor, (u32, u32))> {
     verify_screen_permission()?;
     let monitor = xcap::Monitor::all()?
         .into_iter()
@@ -117,7 +124,8 @@ pub fn capture_region(display: u32, rect: Rect) -> Result<RgbaImage> {
         local_x + w <= region.width() && local_y + h <= region.height(),
         "显示器缩放在采集期间发生变化，请重新选择区域"
     );
-    Ok(image::imageops::crop_imm(&region, local_x, local_y, w, h).to_image())
+    let image = image::imageops::crop_imm(&region, local_x, local_y, w, h).to_image();
+    Ok((image, monitor, (x, y)))
 }
 
 pub trait ClipboardProvider {

@@ -180,12 +180,17 @@ fn build(
     Ok((handle, view))
 }
 
-fn capture_frame(display: u32, rect: Rect, excluded: u32) -> anyhow::Result<RgbaImage> {
+fn capture_frame(
+    display: u32,
+    rect: Rect,
+    excluded: u32,
+    show_cursor: bool,
+) -> anyhow::Result<RgbaImage> {
     #[cfg(debug_assertions)]
     if crate::is_docs_demo() {
         return Ok(crate::docs_demo::capture(rect));
     }
-    snip_platform::capture_region_excluding(display, rect, excluded)
+    snip_platform::capture_region_excluding(display, rect, excluded, show_cursor)
 }
 
 fn toolbar_placement(selected: Rect, screen: Rect, gif: bool) -> Rect {
@@ -461,11 +466,12 @@ impl TaskToolbar {
                     v.message = "录制中；控制栏不会进入画面".into();
                     cx.notify();
                 });
+                let show_cursor = config.gif.show_cursor;
                 record_gif(
                     config.gif,
                     path,
                     control,
-                    move || capture_frame(display, rect, excluded),
+                    move || capture_frame(display, rect, excluded, show_cursor),
                     move |result| {
                         let _ = tx.send_blocking(result);
                     },
@@ -508,7 +514,7 @@ impl TaskToolbar {
         let worker = cx.background_executor().spawn(async move {
             let result = (|| -> anyhow::Result<bool> {
                 anyhow::ensure!(!cancel.cancelled(), "任务已取消");
-                let image = capture_frame(display, rect, excluded)?;
+                let image = capture_frame(display, rect, excluded, false)?;
                 anyhow::ensure!(!cancel.cancelled(), "任务已取消");
                 if let Some(s) = &mut stitch {
                     s.append(&image)
