@@ -6,32 +6,6 @@ use snip_core::{
 use snip_platform::{NativeCapture, ScreenCapture};
 use std::sync::Arc;
 
-#[cfg(target_os = "macos")]
-#[test]
-fn vision_recognizes_the_bundled_fixture_with_each_preset() {
-    let source =
-        image::load_from_memory(include_bytes!("../../../tests/fixtures/ocr-bilingual.png"))
-            .unwrap()
-            .into_rgba8();
-    for mode in 0..3 {
-        let profile = snip_core::ocr_config::OcrConfig::preset(mode);
-        let result = snip_platform::recognize_with_vision(
-            &source,
-            &profile.vision,
-            &Cancellation::default(),
-        )
-        .unwrap();
-        let text = result.text();
-        assert!(
-            text.to_lowercase().contains("offline") && text.contains("2026"),
-            "Vision preset {mode}: {text}"
-        );
-        if mode > 0 {
-            assert!(text.contains("测试"), "Vision preset {mode}: {text}");
-        }
-    }
-}
-
 #[test]
 #[ignore = "Requires an unlocked desktop and Screen Recording permission"]
 fn native_capture_three_times() {

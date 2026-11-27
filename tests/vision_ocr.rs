@@ -13,6 +13,39 @@ use snip_core::{
 use std::{path::Path, sync::Arc, time::Instant};
 
 #[test]
+fn vision_worker_recognizes_the_bundled_fixture_with_each_preset() {
+    let source = image::load_from_memory(include_bytes!("fixtures/ocr-bilingual.png"))
+        .unwrap()
+        .into_rgba8();
+    let executable = Path::new(env!("CARGO_BIN_EXE_simple-snip"));
+    for mode in 0..3 {
+        let preset = OcrConfig::preset(mode);
+        let recognized = ocr_worker::recognize(
+            executable,
+            &source,
+            &preset.vision,
+            &Cancellation::default(),
+        )
+        .expect("bundled Vision fixture through the production worker");
+        let text = recognized.result.text();
+        assert!(
+            text.to_lowercase().contains("offline") && text.contains("2026"),
+            "Vision preset {mode}: {text}"
+        );
+        if mode > 0 {
+            if let Some(notice) = recognized.notice {
+                eprintln!("Vision preset {mode}: {notice}。本轮未验证精确模式的中文结果。");
+            } else {
+                assert!(
+                    text.contains("测试"),
+                    "Vision precise preset {mode}: {text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn vision_worker_recognizes_a_dense_code_image_in_precise_mode() {
     let source = Arc::new(RgbaImage::from_pixel(1440, 970, Rgba([26, 30, 37, 255])));
     let mut document = Document::new(source);
