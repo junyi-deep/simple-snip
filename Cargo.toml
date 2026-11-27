@@ -5,7 +5,7 @@ exclude = ["vendor/gpui-tray"]
 
 [package]
 name = "simple-snip"
-version = "0.0.24"
+version = "0.0.25"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
@@ -18,7 +18,11 @@ serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 
 [dependencies]
-gpui-kit = "=0.8.0"
+gpui-kit = { version = "=0.8.0", features = [
+  "tree-sitter", "tree-sitter-javascript", "tree-sitter-typescript",
+  "tree-sitter-python", "tree-sitter-rust", "tree-sitter-yaml", "tree-sitter-go", "tree-sitter-java",
+] }
+tree-sitter = "0.26"
 gpui-tray = { version = "=0.3.0", default-features = false, features = ["gpui-kit", "menu-state"] }
 snip-core = { path = "crates/snip-core" }
 snip-platform = { path = "crates/snip-platform" }
@@ -33,6 +37,8 @@ smol = "2"
 global-hotkey = "=0.9.0"
 raw-window-handle = "0.6"
 chrono = "0.4"
+serde.workspace = true
+serde_json = "1"
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
@@ -44,9 +50,6 @@ debug = 1
 lto = "thin"
 strip = true
 
-
-[target.'cfg(target_os = "windows")'.dependencies]
-serde_json = "1"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 embed-resource = "3"

@@ -8,6 +8,7 @@ gpui_kit::assets::icon_assets!(
     [
         ArrowUpRight,
         Bell,
+        Braces,
         Circle,
         Download,
         Diamond,
@@ -33,6 +34,7 @@ gpui_kit::assets::icon_assets!(
         Spline,
         Stamp,
         Sun,
+        TextWrap,
         Triangle,
         Type,
     ]
@@ -159,7 +161,6 @@ impl Palette {
             accent_foreground: color(self.text),
             list_hover: color(self.hover),
             list_active: color(self.selected),
-            selection: color(self.selected),
             progress_bar: color(self.primary),
             link: color(self.primary),
             link_hover: color(self.primary_hover),
@@ -199,11 +200,21 @@ pub fn apply_theme(preference: &str, cx: &mut App) {
         _ => None,
     };
     cx.set_window_appearance(appearance);
-    Theme::change(
-        appearance.unwrap_or_else(|| cx.window_appearance()),
-        None,
-        cx,
-    );
+    change_theme(appearance.unwrap_or_else(|| cx.window_appearance()), cx);
+}
+
+fn change_theme(mode: impl Into<ThemeMode>, cx: &mut App) {
+    Theme::change(mode, None, cx);
+    // Theme-file selection colors are capped at 30% by GPUI Kit. The solid
+    // text-selection token remains legible against highlighted code.
+    Theme::update(cx, |theme| {
+        theme.selection = rgb(if theme.mode.is_dark() {
+            0x2e65ae
+        } else {
+            0x98c1ff
+        })
+        .into();
+    });
 }
 
 pub fn watch_appearance(window: &Window) {
@@ -219,7 +230,7 @@ pub fn sync_system_theme(cx: &mut App) {
     {
         let mode = ThemeMode::from(cx.window_appearance());
         if mode != cx.theme().mode {
-            Theme::change(mode, None, cx);
+            change_theme(mode, cx);
         }
     }
 }

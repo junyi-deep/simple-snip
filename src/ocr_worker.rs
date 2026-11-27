@@ -1,13 +1,10 @@
-//! Run RapidOCR outside the desktop process. A fatal inference runtime
-//! failure leaves the editor alive with its current annotations.
+//! Isolate OCR so a stalled or crashed engine leaves the editor alive.
 use anyhow::{Context, Result, bail, ensure};
 use image::RgbaImage;
-use snip_core::{
-    ocr::{Cancellation, OcrResult},
-    ocr_config::RapidOptions,
-};
+use snip_core::ocr::{Cancellation, OcrResult};
 use std::{
     io::{self, Read, Seek, Write},
+    path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
@@ -15,6 +12,30 @@ use std::{
 const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RESULT_BYTES: u64 = 16 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "macos")]
+const PRECISE_TIMEOUT: Duration = Duration::from_secs(6);
+#[cfg(target_os = "macos")]
+type Options = snip_core::ocr_config::VisionOptions;
+#[cfg(target_os = "windows")]
+type Options = snip_core::ocr_config::RapidOptions;
+#[cfg(target_os = "macos")]
+const ENGINE: &str = "Vision OCR";
+#[cfg(target_os = "windows")]
+const ENGINE: &str = "Windows OCR";
+
+pub struct Recognition {
+    pub result: OcrResult,
+    pub notice: Option<&'static str>,
+}
+
+#[derive(Debug)]
+struct WorkerTimedOut;
+impl std::fmt::Display for WorkerTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{ENGINE} 超时，请裁剪图片或切换模式后重试")
+    }
+}
+impl std::error::Error for WorkerTimedOut {}
 
 fn image_byte_count(width: u32, height: u32) -> Result<usize> {
     let length = (u64::from(width) * u64::from(height)).saturating_mul(4);
@@ -26,9 +47,47 @@ fn image_byte_count(width: u32, height: u32) -> Result<usize> {
 }
 
 pub fn recognize(
+    executable: &Path,
     image: &RgbaImage,
-    options: &RapidOptions,
+    options: &Options,
     cancel: &Cancellation,
+) -> Result<Recognition> {
+    #[cfg(target_os = "macos")]
+    if options.accurate {
+        let notice = match recognize_once(executable, image, options, cancel, PRECISE_TIMEOUT) {
+            Ok(result) if !result.lines.is_empty() => {
+                return Ok(Recognition {
+                    result,
+                    notice: None,
+                });
+            }
+            Ok(_) => "精确模式未识别到文字，已尝试快速识别",
+            Err(error) if error.is::<WorkerTimedOut>() => "精确识别超时，已返回快速识别结果",
+            Err(error) => return Err(error),
+        };
+        let mut fallback = options.clone();
+        fallback.accurate = false;
+        fallback.auto_language = false;
+        fallback.correction = false;
+        let result = recognize_once(executable, image, &fallback, cancel, TIMEOUT)?;
+        return Ok(Recognition {
+            result,
+            notice: Some(notice),
+        });
+    }
+    let result = recognize_once(executable, image, options, cancel, TIMEOUT)?;
+    Ok(Recognition {
+        result,
+        notice: None,
+    })
+}
+
+fn recognize_once(
+    executable: &Path,
+    image: &RgbaImage,
+    options: &Options,
+    cancel: &Cancellation,
+    timeout: Duration,
 ) -> Result<OcrResult> {
     ensure!(!cancel.cancelled(), "识别已取消");
     image_byte_count(image.width(), image.height())?;
@@ -41,13 +100,13 @@ pub fn recognize(
     input.write_all(image.as_raw())?;
     input.rewind()?;
     let mut output = tempfile::tempfile().context("无法创建 OCR 输出")?;
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(executable);
     command
         .arg("--ocr-worker")
         .stdin(Stdio::from(input))
         .stdout(Stdio::from(output.try_clone()?))
         .stderr(Stdio::null());
-    run_worker(&mut command, cancel, TIMEOUT)?;
+    run_worker(&mut command, cancel, timeout)?;
     output.rewind()?;
     let mut result = Vec::new();
     output.take(MAX_RESULT_BYTES + 1).read_to_end(&mut result)?;
@@ -60,7 +119,9 @@ pub fn recognize(
 fn run_worker(command: &mut Command, cancel: &Cancellation, timeout: Duration) -> Result<()> {
     ensure!(!cancel.cancelled(), "识别已取消");
     let start = Instant::now();
-    let mut child = command.spawn().context("无法启动 Windows OCR")?;
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("无法启动 {ENGINE}"))?;
     let result = loop {
         if cancel.cancelled() {
             break Err(anyhow::anyhow!("识别已取消"));
@@ -68,13 +129,13 @@ fn run_worker(command: &mut Command, cancel: &Cancellation, timeout: Duration) -
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
-                bail!("Windows OCR 意外退出（{status}）。请重试或裁剪图片后再识别");
+                bail!("{ENGINE} 意外退出（{status}）。请重试或裁剪图片后再识别");
             }
             Ok(None) if start.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(25));
             }
-            Ok(None) => break Err(anyhow::anyhow!("Windows OCR 超时，请裁剪图片后重试")),
-            Err(error) => break Err(error).context("无法读取 Windows OCR 进程状态"),
+            Ok(None) => break Err(WorkerTimedOut.into()),
+            Err(error) => break Err(error).with_context(|| format!("无法读取 {ENGINE} 进程状态")),
         }
     };
     let _ = child.kill();
@@ -94,11 +155,18 @@ fn recognize_input(mut input: impl Read) -> Result<OcrResult> {
     ensure!(config_size <= 4096, "OCR 模式配置过大");
     let mut config = vec![0; config_size];
     input.read_exact(&mut config)?;
-    let options: RapidOptions = serde_json::from_slice(&config)?;
+    let options: Options = serde_json::from_slice(&config)?;
     options.validate()?;
     input.read_exact(&mut pixels)?;
     let image = RgbaImage::from_raw(width, height, pixels).context("无效的 OCR 图片")?;
-    snip_platform::recognize_with_rapidocr(image, options)
+    #[cfg(target_os = "windows")]
+    {
+        snip_platform::recognize_with_rapidocr(image, options)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        snip_platform::recognize_with_vision(&image, &options, &Cancellation::default())
+    }
 }
 
 pub fn run_from_stdio() -> Result<()> {
@@ -114,6 +182,7 @@ pub fn run_from_stdio() -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn failed_windows_worker_becomes_a_recoverable_error() {
         use std::os::windows::process::CommandExt;
@@ -129,5 +198,25 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("Windows OCR 意外退出"));
         assert!(error.to_string().contains("37"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stalled_worker_is_terminated_and_a_new_worker_can_run() {
+        let mut stalled = Command::new("/bin/sleep");
+        stalled.arg("10");
+        let error = run_worker(
+            &mut stalled,
+            &Cancellation::default(),
+            Duration::from_millis(40),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Vision OCR 超时"));
+        run_worker(
+            &mut Command::new("/usr/bin/true"),
+            &Cancellation::default(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
     }
 }

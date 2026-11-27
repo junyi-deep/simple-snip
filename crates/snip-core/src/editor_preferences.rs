@@ -30,6 +30,29 @@ pub struct EditorPreferences {
     #[serde(default)]
     pub arrow_style_version: u32,
     pub styles: BTreeMap<Tool, ToolStyle>,
+    /// None follows the default OCR profile in settings. Profiles are edited
+    /// in place and new profiles are appended.
+    pub last_ocr_mode: Option<usize>,
+    pub ocr_language: OcrLanguage,
+    pub ocr_line_numbers: bool,
+    pub ocr_wrap: bool,
+    pub watermark_text: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrLanguage {
+    #[default]
+    Auto,
+    PlainText,
+    Json,
+    JavaScript,
+    TypeScript,
+    Python,
+    Rust,
+    Yaml,
+    Go,
+    Java,
 }
 impl Default for EditorPreferences {
     fn default() -> Self {
@@ -42,6 +65,11 @@ impl Default for EditorPreferences {
             toast_delay_ms: 2000,
             arrow_style_version: 1,
             styles: BTreeMap::new(),
+            last_ocr_mode: None,
+            ocr_language: OcrLanguage::Auto,
+            ocr_line_numbers: false,
+            ocr_wrap: true,
+            watermark_text: String::new(),
         }
     }
 }
@@ -99,6 +127,9 @@ mod tests {
             next_number: 7,
             toast_enabled: false,
             toast_delay_ms: 5000,
+            last_ocr_mode: Some(2),
+            ocr_language: OcrLanguage::Json,
+            ocr_line_numbers: false,
             ..Default::default()
         };
         prefs.styles.insert(

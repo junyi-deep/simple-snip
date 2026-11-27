@@ -14,8 +14,8 @@ use windows::{
                 GetCursorPos, HICON, HMENU, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
                 MF_STRING, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
                 SetWindowLongPtrW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_CREATE, WM_LBUTTONDBLCLK,
-                WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_RBUTTONUP, WNDCLASSW,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_CREATE, WM_LBUTTONUP,
+                WM_NCCREATE, WM_NCDESTROY, WM_RBUTTONUP, WNDCLASSW,
             },
         },
     },
@@ -428,15 +428,15 @@ unsafe extern "system" fn window_proc(
         let state = unsafe { &mut *state };
         if message == CALLBACK_MESSAGE {
             let mouse_message = lparam.0 as u32;
-            if mouse_message == WM_LBUTTONDBLCLK {
+            if mouse_message == WM_LBUTTONUP {
                 if state.snapshot.activatable {
                     let _ = state
                         .events
                         .try_send(BackendEvent::Activated { token: None });
+                } else {
+                    state.show_menu();
                 }
-            } else if (mouse_message == WM_LBUTTONUP && !state.snapshot.activatable)
-                || matches!(mouse_message, WM_RBUTTONUP | WM_CONTEXTMENU)
-            {
+            } else if matches!(mouse_message, WM_RBUTTONUP | WM_CONTEXTMENU) {
                 state.show_menu();
             }
             return LRESULT(0);

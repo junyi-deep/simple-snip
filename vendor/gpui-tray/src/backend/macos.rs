@@ -2,9 +2,9 @@ use std::cell::{Cell, RefCell};
 
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_app_kit::{
-    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventMask, NSEventType,
-    NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusBarButton, NSStatusItem,
-    NSVariableStatusItemLength, NSView,
+    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventMask,
+    NSEventModifierFlags, NSEventType, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusBarButton,
+    NSStatusItem, NSVariableStatusItemLength, NSView,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 
@@ -37,14 +37,18 @@ define_class!(
         #[unsafe(method(trayActivated:))]
         fn tray_activated(&self, sender: &NSStatusBarButton) {
             let event = NSApplication::sharedApplication(self.mtm()).currentEvent();
-            if event.as_ref().is_some_and(|event| event.r#type() == NSEventType::LeftMouseUp && event.clickCount() == 2) {
+            let secondary = event.as_ref().is_some_and(|event| {
+                event.r#type() == NSEventType::RightMouseUp
+                    || (event.r#type() == NSEventType::LeftMouseUp
+                        && event.modifierFlags().contains(NSEventModifierFlags::Control))
+            });
+            if secondary {
+                let menu = self.ivars().menu.borrow().clone();
+                if let Some(menu) = menu {
+                    menu.popUpMenuPositioningItem_atLocation_inView(None, sender.bounds().origin, Some(sender));
+                }
+            } else {
                 let _ = self.ivars().events.try_send(BackendEvent::Activated { token: None });
-                return;
-            }
-            if event.as_ref().is_none_or(|event| event.r#type() != NSEventType::LeftMouseUp)
-                && let Some(menu) = self.ivars().menu.borrow().clone()
-            {
-                menu.popUpMenuPositioningItem_atLocation_inView(None, sender.bounds().origin, Some(sender));
             }
         }
 

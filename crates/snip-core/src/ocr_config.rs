@@ -106,13 +106,20 @@ impl OcrConfig {
                 "OCR 模式名称须为 1–32 个字符"
             );
             p.rapid.validate()?;
-            ensure!(
-                (0. ..=0.25).contains(&p.vision.min_height)
-                    && p.vision.languages.len() <= 256
-                    && p.vision.custom_words.len() <= 2048,
-                "Vision 参数超出范围"
-            );
+            p.vision.validate()?;
         }
+        Ok(())
+    }
+}
+
+impl VisionOptions {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            (0. ..=0.25).contains(&self.min_height)
+                && self.languages.len() <= 256
+                && self.custom_words.len() <= 2048,
+            "Vision 参数超出范围"
+        );
         Ok(())
     }
 }

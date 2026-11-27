@@ -14,6 +14,8 @@ bash packaging/macos/bundle.sh release
 
 本地包重建会改变 ad-hoc 代码身份，已有 TCC 录屏条目可能仍绑定旧程序；请移除旧条目并重新添加当前 `.app`。本机 `security find-identity -v -p codesigning` 返回 0 个有效身份，不能交付持久的正式签名。脚本支持通过 `SIMPLE_SNIP_SIGN_IDENTITY` 指定已有有效身份（hardened runtime / timestamp），不会生成证书或降低系统权限要求。
 
+如果安装在 `/Applications`，请从菜单栏退出 Simple Snip，在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」中用 `−` 移除旧条目，再用 `+` 添加 `/Applications/Simple Snip.app` 并开启。重新打开应用后按 F1，或在「偏好设置 → 关于」点击「重新验证」。关闭设置窗口后应用仍在菜单栏运行。
+
 正式分发流程已接入打包脚本和标签流水线：配置有效 Developer ID Application 身份与公证凭据后，自动签名、公证、staple 并校验应用和 DMG。详见 [macOS 签名与公证](MACOS_SIGNING.md)。当前未提供证书或公证凭据，未执行真实公证；未配置时仍为 `_unsigned` 测试包。下载后出现 Apple 无法验证提示的原因是分发签名 / 公证缺失，与录屏权限不同。
 
 ### 日常 Debug 与录屏授权
@@ -46,6 +48,8 @@ tccutil reset ScreenCapture dev.simplesnip.desktop
 ```
 
 随后启动当前包，在「隐私与安全 → 录屏与系统录音」重新添加当前 `.app` 并开启；文件选择框必须选中应用并点击「打开」，最后完成系统要求的退出 / 重开。系统触控 ID / 密码和最终授权由用户完成。不要重置所有应用权限，也不要在每次启动脚本中自动执行 reset。
+
+如果 `tccutil` 返回 `Failed to reset`，在系统日志中检查 TCC 的具体错误。2026-11-26 本机从 tty7 运行时，`tccd` 已找到应用 ID，但报 `Failed to create attribution chain from message`，旧录屏条目仍在。完全退出 Simple Snip 后，从 macOS 自带的「终端」重新执行上述定向命令，实际返回重置成功。
 
 固定 `.app` 路径不能让 ad-hoc 身份跨构建稳定。长期调试应使用同一有效 Apple Development 签名身份；机制见 [Apple TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)。现有证书分支会启用 hardened runtime，若需要 LLDB 附加还需调试专用的 `get-task-allow`，不能带入 Release。
 

@@ -177,7 +177,7 @@ impl TrayBuilder {
     }
 
     /// Dispatches a GPUI action when the tray icon is activated.
-    /// This fork uses a double-click on Windows and macOS. The attached menu
+    /// This fork uses a primary click on Windows and macOS. The attached menu
     /// opens from the secondary button when an activation action is configured.
     /// This replaces any callback configured with [`Self::on_activate_with`].
     pub fn on_activate(self, action: impl gpui::Action) -> Self {

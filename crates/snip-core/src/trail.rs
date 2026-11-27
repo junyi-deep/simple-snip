@@ -120,22 +120,31 @@ impl Trail {
         curves
     }
 }
-pub fn rainbow(h: f32) -> [u8; 3] {
-    let h = h.rem_euclid(1.) * 6.;
-    let x = 1. - (h % 2. - 1.).abs();
-    let (r, g, b) = match h as u32 {
-        0 => (1., x, 0.),
-        1 => (x, 1., 0.),
-        2 => (0., 1., x),
-        3 => (0., x, 1.),
-        4 => (x, 0., 1.),
-        _ => (1., 0., x),
-    };
-    [(r * 255.) as u8, (g * 255.) as u8, (b * 255.) as u8]
+pub fn rainbow(phase: f32) -> [u8; 3] {
+    const COLORS: [[u8; 3]; 5] = [
+        [56, 189, 248],
+        [76, 125, 250],
+        [140, 101, 246],
+        [217, 96, 226],
+        [255, 90, 138],
+    ];
+    let position = phase.clamp(0., 1.) * (COLORS.len() - 1) as f32;
+    let index = (position as usize).min(COLORS.len() - 2);
+    let progress = position - index as f32;
+    std::array::from_fn(|channel| {
+        let start = f32::from(COLORS[index][channel]);
+        let end = f32::from(COLORS[index + 1][channel]);
+        (start + (end - start) * progress).round() as u8
+    })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rainbow_starts_blue_and_fades_to_pink() {
+        assert_eq!(rainbow(0.), [56, 189, 248]);
+        assert_eq!(rainbow(1.), [255, 90, 138]);
+    }
     #[test]
     fn expires_and_bounds() {
         let mut t = Trail::new(0.5);

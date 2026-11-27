@@ -1360,16 +1360,25 @@ pub fn smoke_test(cx: &mut App) {
                     if let Some(settings)=cx.global::<Runtime>().settings {
                         settings.update(cx, |_, w, _| -> anyhow::Result<()> {
                             anyhow::ensure!(!snip_platform::inspect_window(raw(w)?)?.0, "settings must not stay topmost");
+                            #[cfg(target_os = "macos")]
+                            anyhow::ensure!(snip_platform::window_has_shadow(raw(w)?)?, "settings lost its native shadow on open");
                             Ok(())
                         })??;
                         settings.update(cx,|_,w,_| {snip_platform::show_window(raw(w)?,false)})??;
                         open_settings(cx);
-                        settings.update(cx,|_,w,_| -> anyhow::Result<()> {anyhow::ensure!(snip_platform::window_visible(raw(w)?)?,"hidden settings did not reappear with a pin present");Ok(())})??;
+                        settings.update(cx, |_, w, _| -> anyhow::Result<()> {
+                            anyhow::ensure!(snip_platform::window_visible(raw(w)?)?, "hidden settings did not reappear with a pin present");
+                            #[cfg(target_os = "macos")]
+                            anyhow::ensure!(snip_platform::window_has_shadow(raw(w)?)?, "settings lost its native shadow on reopen");
+                            Ok(())
+                        })??;
                     }
                     handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
                         let h = raw(window)?;
                         #[cfg(target_os = "windows")]
                         anyhow::ensure!(!snip_platform::window_has_system_buttons(h)?, "pin retained native system buttons");
+                        #[cfg(target_os = "macos")]
+                        anyhow::ensure!(!snip_platform::window_has_shadow(h)?, "pin gained an extra native shadow");
                         let (top, through, _) = snip_platform::inspect_window(h)?;
                         anyhow::ensure!(top && !through, "pin not interactive/topmost");
                         snip_platform::style_window(h, WindowStyle { click_through: true, opacity: 0.5, ..Default::default() })?;
@@ -1500,12 +1509,19 @@ fn screen_permission_dialog(cx: &mut App) {
     let Some(handle) = cx.global::<Runtime>().settings else {
         return;
     };
-    let executable = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let detail = format!(
-        "截图仅在本地处理。请在「隐私与安全性 → 屏幕与系统音频录制」中允许当前这份 Simple Snip。\n\n如果开关已开启仍失败，请移除旧条目，再添加当前应用包；测试包更新后 ad-hoc 签名会变化，单纯重启无法修复旧签名的授权。\n\n当前程序：{executable}"
-    );
+    let bundle = std::env::current_exe().ok().and_then(|executable| {
+        executable
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|ext| ext == "app"))
+            .map(|path| path.display().to_string())
+    });
+    let detail = if let Some(bundle) = bundle {
+        format!(
+            "截图仅在本地处理。请在「屏幕与系统音频录制」中启用下方应用。若开关已开启，先用 − 移除旧条目，再用 + 添加当前应用。授权后从菜单栏退出 Simple Snip，再重新打开。\n\n{bundle}"
+        )
+    } else {
+        "请先通过 Simple Snip.app 启动，再在「屏幕与系统音频录制」中添加该应用包。截图仅在本地处理。".into()
+    };
     if let Ok(receiver) = handle.update(cx, |_, w, cx| {
         w.prompt(
             PromptLevel::Warning,

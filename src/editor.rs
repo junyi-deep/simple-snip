@@ -1,10 +1,11 @@
 use crate::app::{self, Event, Runtime};
+use crate::ocr_text;
 use crate::ui as design;
 use gpui_kit::{
     component::{
         button::*,
         color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
-        input::{Input, InputEvent, InputState, Textarea, TextareaState},
+        input::{Editor, EditorState, Input, InputEvent, InputState},
         menu::*,
         *,
     },
@@ -14,8 +15,10 @@ use gpui_kit::{
 use image::RgbaImage;
 use snip_core::{
     annotation::{Annotation, ArrowStyle, Document, Tool},
+    editor_preferences::{EditorPreferences, OcrLanguage},
     geometry::{ImageTransform, Point as ImagePoint, Rect, SelectionHandle, resize_selection},
     ocr::{Cancellation, OcrResult},
+    ocr_config::OcrConfig,
 };
 use snip_platform::{CapturedDisplay, ClipboardProvider};
 use std::sync::Arc;
@@ -26,6 +29,42 @@ struct PreferencesStore {
     writer: Option<std::sync::mpsc::Sender<snip_core::editor_preferences::EditorPreferences>>,
 }
 impl Global for PreferencesStore {}
+impl PreferencesStore {
+    fn modify(&mut self, change: impl FnOnce(&mut EditorPreferences)) {
+        let before = self.value.clone();
+        change(&mut self.value);
+        if self.value != before
+            && let Some(writer) = &self.writer
+        {
+            let _ = writer.send(self.value.clone());
+        }
+    }
+}
+
+pub(crate) fn remembered_ocr_mode(cx: &App) -> Option<usize> {
+    cx.try_global::<PreferencesStore>()
+        .and_then(|s| s.value.last_ocr_mode)
+}
+
+fn effective_ocr_mode(modes: &OcrConfig, cx: &App) -> usize {
+    remembered_ocr_mode(cx)
+        .filter(|i| *i < modes.profiles.len())
+        .unwrap_or(modes.active)
+}
+
+fn remember_ocr_mode(index: usize, cx: &mut App) {
+    cx.global_mut::<PreferencesStore>()
+        .modify(|prefs| prefs.last_ocr_mode = Some(index));
+    cx.refresh_windows();
+}
+
+pub(crate) fn use_default_ocr_mode(cx: &mut App) {
+    if cx.try_global::<PreferencesStore>().is_some() {
+        cx.global_mut::<PreferencesStore>()
+            .modify(|prefs| prefs.last_ocr_mode = None);
+    }
+    cx.refresh_windows();
+}
 pub fn init_preferences(cx: &mut App) {
     if crate::is_docs_demo() {
         cx.set_global(PreferencesStore::default());
@@ -159,6 +198,8 @@ pub struct EditorView {
     text_index: Option<usize>,
     text_tool: Tool,
     watermark: snip_core::annotation::WatermarkStyle,
+    watermark_input: Entity<InputState>,
+    _watermark_subscription: Subscription,
     _text_subscription: Subscription,
     last_wheel: Option<std::time::Instant>,
     draft: Option<Annotation>,
@@ -181,12 +222,17 @@ pub struct EditorView {
     dirty: bool,
     ocr: Option<Arc<OcrResult>>,
     ocr_text: SharedString,
-    ocr_field: Entity<TextareaState>,
-    ocr_mode: Option<usize>,
+    ocr_field: Entity<EditorState>,
+    _ocr_subscription: Subscription,
+    ocr_language: OcrLanguage,
+    ocr_line_numbers: bool,
+    ocr_wrap: bool,
+    ocr_loaded: Option<u64>,
+    ocr_copied: Option<SharedString>,
+    ocr_confirming: bool,
     ocr_size: gpui_kit::Size<Pixels>,
     ocr_resize: Option<(Point<Pixels>, gpui_kit::Size<Pixels>)>,
     ocr_request: u64,
-    ocr_busy: bool,
     ocr_scanning: bool,
     cancel: Cancellation,
     session_cancel: Cancellation,
@@ -220,6 +266,26 @@ impl EditorView {
         let focus = cx.focus_handle();
         focus.focus(w, cx);
         let text = cx.new(|cx| InputState::new(w, cx));
+        let watermark_input = cx.new(|cx| {
+            InputState::new(w, cx)
+                .placeholder("水印内容")
+                .default_value(preferences.watermark_text.clone())
+        });
+        let watermark_subscription = cx.subscribe(&watermark_input, |v, field, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                let text = field.read(cx).value().to_string();
+                cx.global_mut::<PreferencesStore>()
+                    .modify(|p| p.watermark_text = text.clone());
+                if let Some(index) = v.selected.filter(|&i| {
+                    v.doc.objects.get(i).is_some_and(|a| {
+                        a.tool == Tool::Watermark && a.text != text && !text.trim().is_empty()
+                    })
+                }) {
+                    let p = v.doc.objects[index].points[0];
+                    v.commit_text_at(p, Some(index), Tool::Watermark, text, cx);
+                }
+            }
+        });
         let window_handle = w.window_handle();
         let text_focus = focus.clone();
         let text_subscription = cx.subscribe(&text, move |v, _, event: &InputEvent, cx| {
@@ -281,6 +347,18 @@ impl EditorView {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
+        let ocr_field = cx.new(|cx| {
+            EditorState::new(w, cx)
+                .soft_wrap(preferences.ocr_wrap)
+                .folding(false)
+                .auto_close(false)
+                .line_number(preferences.ocr_line_numbers)
+        });
+        let ocr_subscription = cx.subscribe(&ocr_field, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         Self {
             preferences: preferences.clone(),
             toolbar_rows: [0.; 2],
@@ -311,6 +389,8 @@ impl EditorView {
                 density: snip_core::annotation::WatermarkDensity::Medium,
                 bold: false,
             },
+            watermark_input,
+            _watermark_subscription: watermark_subscription,
             _text_subscription: text_subscription,
             last_wheel: None,
             draft: None,
@@ -336,12 +416,17 @@ impl EditorView {
             dirty: false,
             ocr: None,
             ocr_text: SharedString::default(),
-            ocr_field: cx.new(|cx| TextareaState::new(w, cx).soft_wrap(false)),
-            ocr_mode: None,
+            ocr_field,
+            _ocr_subscription: ocr_subscription,
+            ocr_language: preferences.ocr_language,
+            ocr_line_numbers: preferences.ocr_line_numbers,
+            ocr_wrap: preferences.ocr_wrap,
+            ocr_loaded: None,
+            ocr_copied: None,
+            ocr_confirming: false,
             ocr_size: size(px(0.), px(124.)),
             ocr_resize: None,
             ocr_request: 0,
-            ocr_busy: false,
             ocr_scanning: false,
             cancel: Cancellation::default(),
             session_cancel: Cancellation::default(),
@@ -408,6 +493,9 @@ impl EditorView {
         cx: &mut Context<Self>,
         require_canvas: bool,
     ) {
+        if self.ocr_focused(w, cx) || self.watermark_input.read(cx).focus_handle(cx).is_focused(w) {
+            return;
+        }
         if self.text_anchor.is_some() {
             if e.keystroke.key == "escape" {
                 self.text_anchor = None;
@@ -450,7 +538,7 @@ impl EditorView {
                 };
                 self.choose_tool(tool, w, cx);
             }
-            "o" if !modifier => self.recognize(cx),
+            "o" if !modifier => self.request_recognition(w, cx),
             "w" if !modifier => self.choose_tool(Tool::Watermark, w, cx),
             "p" if !modifier => self.export(2, cx),
             "enter" if self.tool == Tool::Polyline => self.finish_path(cx),
@@ -481,7 +569,7 @@ impl EditorView {
                 }
                 self.refresh(cx);
             }
-            "c" if modifier && self.ocr.is_none() && !self.ocr_busy => self.export(0, cx),
+            "c" if modifier && self.ocr.is_none() && !self.ocr_scanning => self.export(0, cx),
             "s" if modifier => self.export(1, cx),
             "backspace" | "delete" => {
                 if let Some(i) = self.selected.take().filter(|i| *i < self.doc.objects.len()) {
@@ -700,14 +788,7 @@ impl EditorView {
         let existing = index.and_then(|i| self.doc.objects.get(i)).cloned();
         self.text_anchor = Some(existing.as_ref().map_or(p, |a| a.points[0]));
         self.text_index = index;
-        self.text_tool = existing.as_ref().map_or(
-            if self.tool == Tool::Watermark {
-                Tool::Watermark
-            } else {
-                Tool::Text
-            },
-            |a| a.tool,
-        );
+        self.text_tool = existing.as_ref().map_or(Tool::Text, |a| a.tool);
         let value = existing.map_or_else(String::new, |a| {
             self.width = a.width;
             self.color = a.color;
@@ -738,11 +819,40 @@ impl EditorView {
     #[cfg(debug_assertions)]
     pub(crate) fn fixture_watermark(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         self.choose_tool(Tool::Watermark, w, cx);
-        self.begin_text(ImagePoint::new(290., 310.), None, w, cx);
         self.width = 4.;
-        self.text
+        self.watermark_input
             .update(cx, |t, cx| t.set_value("Simple Snip", w, cx));
-        self.commit_text(cx);
+        self.place_watermark(ImagePoint::new(290., 310.), cx);
+    }
+
+    fn select_watermark(&mut self, index: usize, w: &mut Window, cx: &mut Context<Self>) {
+        let annotation = &self.doc.objects[index];
+        self.selected = Some(index);
+        self.watermark = annotation.watermark;
+        self.width = annotation.width;
+        self.color = annotation.color;
+        let text = annotation.text.clone();
+        self.watermark_input
+            .update(cx, |field, cx| field.set_value(text, w, cx));
+        self.color_picker.update(cx, |picker, cx| {
+            picker.set_value(rgba(u32::from_be_bytes(self.color)), w, cx)
+        });
+        self.sync_size(w, cx);
+        cx.notify();
+    }
+
+    fn place_watermark(&mut self, anchor: ImagePoint, cx: &mut Context<Self>) {
+        let text = self.watermark_input.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            self.toast_last.clear();
+            self.message = "请先在工具栏输入水印内容".into();
+            cx.notify();
+            return;
+        }
+        cx.global_mut::<PreferencesStore>()
+            .modify(|p| p.watermark_text = text.clone());
+        let point = self.transform.inverse(self.text_top_left(anchor));
+        self.commit_text_at(point, None, Tool::Watermark, text, cx);
     }
     fn text_top_left(&self, anchor: ImagePoint) -> ImagePoint {
         let mut point = self.transform.forward(anchor);
@@ -779,10 +889,21 @@ impl EditorView {
         };
         let text = self.text.read(cx).value().to_string();
         let index = self.text_index.take();
+        self.commit_text_at(p, index, self.text_tool, text, cx);
+    }
+
+    fn commit_text_at(
+        &mut self,
+        p: ImagePoint,
+        index: Option<usize>,
+        tool: Tool,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
         if !text.trim().is_empty() {
             let font = self.width * 6. + 12.;
             let a = Annotation {
-                tool: self.text_tool,
+                tool,
                 points: vec![
                     p,
                     ImagePoint::new(
@@ -940,6 +1061,8 @@ impl EditorView {
         self.ocr = None;
         self.ocr_scanning = false;
         self.ocr_text = SharedString::default();
+        self.ocr_loaded = None;
+        self.ocr_copied = None;
         self.ocr_resize = None;
         self.ocr_request = self.ocr_request.wrapping_add(1);
     }
@@ -1095,71 +1218,162 @@ impl EditorView {
     }
     pub(crate) fn recognize(&mut self, cx: &mut Context<Self>) {
         self.commit_text(cx);
-        if self.ocr_busy {
+        let Some((request, cancel)) = self.begin_recognition() else {
             return;
-        }
-        self.clear_ocr();
-        self.ocr_busy = true;
-        self.ocr_scanning = true;
-        self.cancel = Cancellation::default();
-        let cancel = self.cancel.clone();
-        let request = self.ocr_request;
+        };
         let document = self.doc.render_snapshot();
         let transform = self.transform;
         let generation = self.generation;
         let modes = &cx.global::<Runtime>().config.ocr;
-        let profile = modes.profiles[self
-            .ocr_mode
-            .filter(|i| *i < modes.profiles.len())
-            .unwrap_or(modes.active)]
-        .clone();
+        let profile = &modes.profiles[effective_ocr_mode(modes, cx)];
+        #[cfg(target_os = "windows")]
+        let options = profile.rapid.clone();
+        #[cfg(target_os = "macos")]
+        let options = {
+            let mut options = profile.vision.clone();
+            if !matches!(
+                self.ocr_language,
+                OcrLanguage::Auto | OcrLanguage::PlainText
+            ) {
+                options.correction = false;
+                options.auto_language = false;
+            }
+            options
+        };
         self.message.clear();
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || -> anyhow::Result<OcrResult> {
-                if cancel.cancelled() {
-                    return Ok(OcrResult::default());
-                }
-                let (_, image) = render_document(document, transform)?;
-                #[cfg(target_os = "windows")]
-                {
-                    crate::windows_ocr::recognize(&image, &profile.rapid, &cancel)
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    snip_platform::recognize_with_vision(&image, &profile.vision, &cancel)
-                }
-            })
-            .await;
-            let _ = this.update(cx, |v, cx| {
-                v.ocr_busy = false;
-                v.ocr_scanning = false;
-                if v.ocr_request != request || v.generation != generation {
-                    cx.notify();
-                    return;
-                }
-                match result {
-                    Ok(result) => {
-                        tracing::debug!(lines = result.lines.len(), "OCR finished");
-                        v.ocr_text = result.text().into();
-                        v.ocr = Some(Arc::new(result));
-                        v.tool = Tool::Select;
-                        v.selected = None;
+            let result =
+                smol::unblock(move || -> anyhow::Result<crate::ocr_worker::Recognition> {
+                    if cancel.cancelled() {
+                        anyhow::bail!("识别已取消");
                     }
-                    Err(error) => v.message = format!("识别失败：{error}"),
-                }
-                cx.notify();
+                    let image = if document.objects.is_empty()
+                        && transform.quarter_turns.is_multiple_of(4)
+                        && !transform.flip_x
+                        && !transform.flip_y
+                    {
+                        document.original.clone()
+                    } else {
+                        render_document(document, transform)?.1
+                    };
+                    crate::ocr_worker::recognize(
+                        &std::env::current_exe()?,
+                        &image,
+                        &options,
+                        &cancel,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |v, cx| {
+                v.finish_recognition(request, generation, result, cx)
             });
         })
         .detach();
         cx.notify();
     }
+    fn begin_recognition(&mut self) -> Option<(u64, Cancellation)> {
+        if self.ocr_scanning {
+            return None;
+        }
+        self.clear_ocr();
+        self.ocr_scanning = true;
+        self.cancel = Cancellation::default();
+        Some((self.ocr_request, self.cancel.clone()))
+    }
+
+    fn finish_recognition(
+        &mut self,
+        request: u64,
+        generation: u64,
+        result: anyhow::Result<crate::ocr_worker::Recognition>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ocr_request != request {
+            return;
+        }
+        self.ocr_scanning = false;
+        if self.generation == generation {
+            match result {
+                Ok(crate::ocr_worker::Recognition { result, notice }) => {
+                    tracing::debug!(lines = result.lines.len(), "OCR finished");
+                    self.ocr_text = result.text().into();
+                    self.ocr = Some(Arc::new(result));
+                    self.tool = Tool::Select;
+                    self.selected = None;
+                    if let Some(notice) = notice {
+                        self.toast_last.clear();
+                        self.message = notice.into();
+                    }
+                }
+                Err(error) => self.message = format!("识别失败：{error}"),
+            }
+        }
+        cx.notify();
+    }
     #[cfg(debug_assertions)]
     pub(crate) fn fixture_ocr_result(&mut self, cx: &mut Context<Self>) {
+        self.fixture_ocr_text("Capture ideas. Keep your flow.\n本周待办\n完善截图与贴图交互\n自由框选 / 独立贴图 / 原位标注\n本地处理，专注当下。", cx);
+    }
+    #[cfg(debug_assertions)]
+    pub(crate) fn fixture_ocr_text(&mut self, text: &'static str, cx: &mut Context<Self>) {
+        self.clear_ocr();
         self.ocr = Some(Arc::new(OcrResult::default()));
-        self.ocr_text = "Capture ideas. Keep your flow.\n本周待办\n完善截图与贴图交互\n自由框选 / 独立贴图 / 原位标注\n本地处理，专注当下。".into();
+        self.ocr_text = text.into();
         self.tool = Tool::Select;
         self.selected = None;
         cx.notify();
+    }
+    fn ocr_focused(&self, w: &Window, cx: &App) -> bool {
+        self.ocr.is_some() && self.ocr_field.read(cx).focus_handle(cx).is_focused(w)
+    }
+    fn current_ocr_text(&self, cx: &App) -> SharedString {
+        if self.ocr_loaded == Some(self.ocr_request) {
+            self.ocr_field.read(cx).value()
+        } else {
+            self.ocr_text.clone()
+        }
+    }
+    fn ocr_has_uncopied_edits(&self, cx: &App) -> bool {
+        let edited = self.current_ocr_text(cx);
+        self.ocr.is_some() && edited != self.ocr_text && self.ocr_copied.as_ref() != Some(&edited)
+    }
+    fn request_recognition(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        if self.ocr_scanning {
+            self.clear_ocr();
+            self.toast_last.clear();
+            self.message = "已取消识别，可再次点击识别".into();
+            cx.notify();
+            return;
+        }
+        if self.ocr_confirming {
+            return;
+        }
+        if !self.ocr_has_uncopied_edits(cx) {
+            self.recognize(cx);
+            return;
+        }
+        self.ocr_confirming = true;
+        let request = self.ocr_request;
+        let answer = w.prompt(
+            PromptLevel::Warning,
+            "重新识别并替换文字？",
+            Some("当前结果有未复制的修改。重新识别会替换这个文本框。"),
+            &[
+                PromptButton::ok("重新识别"),
+                PromptButton::cancel("继续编辑"),
+            ],
+            cx,
+        );
+        cx.spawn(async move |editor, cx| {
+            let confirmed = answer.await.ok() == Some(0);
+            let _ = editor.update(cx, |view, cx| {
+                view.ocr_confirming = false;
+                if confirmed && view.ocr_request == request {
+                    view.recognize(cx);
+                }
+            });
+        })
+        .detach();
     }
     fn copy_ocr(&mut self, table: bool, cx: &mut Context<Self>) {
         let Some(result) = &self.ocr else {
@@ -1168,14 +1382,96 @@ impl EditorView {
         let text = if table {
             result.tsv().into()
         } else {
-            self.ocr_text.clone()
+            self.current_ocr_text(cx)
         };
         if !text.trim().is_empty() {
             self.toast_last.clear();
             cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+            if !table {
+                self.ocr_copied = Some(text);
+            }
             self.message = "文字已复制".into();
             cx.notify();
         }
+    }
+    fn set_ocr_language(&mut self, language: OcrLanguage, cx: &mut Context<Self>) {
+        self.ocr_language = language;
+        cx.global_mut::<PreferencesStore>()
+            .modify(|p| p.ocr_language = language);
+        let syntax = ocr_text::syntax(language, &self.current_ocr_text(cx));
+        self.ocr_field
+            .update(cx, |field, cx| field.set_highlighter(syntax, cx));
+        cx.notify();
+    }
+    fn toggle_ocr_line_numbers(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        let enabled = !self.ocr_line_numbers;
+        self.ocr_line_numbers = enabled;
+        cx.global_mut::<PreferencesStore>()
+            .modify(|p| p.ocr_line_numbers = enabled);
+        self.ocr_field
+            .update(cx, |field, cx| field.set_line_number(enabled, w, cx));
+        cx.notify();
+    }
+    fn toggle_ocr_wrap(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        self.ocr_wrap = !self.ocr_wrap;
+        cx.global_mut::<PreferencesStore>()
+            .modify(|p| p.ocr_wrap = self.ocr_wrap);
+        self.ocr_field
+            .update(cx, |field, cx| field.set_soft_wrap(self.ocr_wrap, w, cx));
+        cx.notify();
+    }
+
+    fn format_ocr(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        let text = self.current_ocr_text(cx);
+        let syntax = ocr_text::syntax(self.ocr_language, &text);
+        if self.ocr.is_none() || syntax == "plaintext" || text.trim().is_empty() {
+            return;
+        }
+        if syntax == "json" {
+            self.apply_ocr_format(ocr_text::format_json(&text), &text, w, cx);
+            return;
+        }
+        let window = w.window_handle();
+        let request = self.ocr_request;
+        let language = self.ocr_language;
+        let input = text.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { ocr_text::format(&input, syntax) });
+        cx.spawn(async move |editor, cx| {
+            let result = task.await;
+            let _ = window.update(cx, |_, w, cx| {
+                let _ = editor.update(cx, |v, cx| {
+                    if v.ocr_request == request
+                        && v.ocr_language == language
+                        && v.current_ocr_text(cx) == text
+                    {
+                        v.apply_ocr_format(result, &text, w, cx);
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn apply_ocr_format(
+        &mut self,
+        result: Result<String, ocr_text::FormatError>,
+        text: &str,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(formatted) if formatted != text => {
+                self.ocr_field
+                    .update(cx, |field, cx| field.replace_all(formatted, w, cx));
+                self.message.clear();
+            }
+            Ok(_) => self.message = "已按所选语言排版".into(),
+            Err(error) => self.message = error.to_string(),
+        }
+        self.toast_last.clear();
+        cx.notify();
     }
 
     fn down(&mut self, e: &MouseDownEvent, w: &mut Window, cx: &mut Context<Self>) {
@@ -1223,7 +1519,9 @@ impl EditorView {
                     self.color_picker.update(cx, |picker, cx| {
                         picker.set_value(rgba(u32::from_be_bytes(self.color)), w, cx)
                     });
-                    if e.click_count == 2 && self.doc.objects[i].tool.is_text() {
+                    if self.doc.objects[i].tool == Tool::Watermark {
+                        self.select_watermark(i, w, cx);
+                    } else if e.click_count == 2 && self.doc.objects[i].tool.is_text() {
                         self.begin_text(p, Some(i), w, cx);
                         return;
                     }
@@ -1238,12 +1536,23 @@ impl EditorView {
                 self.doc.remove_at_radius(p, self.width * 2. + 4.);
                 self.refresh(cx);
             }
-            Tool::Text | Tool::Watermark => {
+            Tool::Text => {
                 let index = self
                     .doc
                     .hit(p)
                     .filter(|i| self.doc.objects[*i].tool == self.tool);
                 self.begin_text(p, index, w, cx);
+            }
+            Tool::Watermark => {
+                if let Some(index) = self
+                    .doc
+                    .hit(p)
+                    .filter(|&i| self.doc.objects[i].tool == Tool::Watermark)
+                {
+                    self.select_watermark(index, w, cx);
+                } else {
+                    self.place_watermark(p, cx);
+                }
             }
             Tool::Mosaic | Tool::Blur => {
                 self.paint_filter(p, true, cx);
@@ -1512,10 +1821,8 @@ impl EditorView {
             .try_global::<Runtime>()
             .map(|runtime| runtime.config.ocr.clone())
             .unwrap_or_default();
-        let mode = self
-            .ocr_mode
-            .filter(|index| *index < modes.profiles.len())
-            .unwrap_or(modes.active);
+        let mode = effective_ocr_mode(&modes, cx);
+        let follows_default = remembered_ocr_mode(cx).is_none_or(|i| i >= modes.profiles.len());
         let shortcuts = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "B", "E", "W"];
         for (i, (label, tool)) in tools.into_iter().enumerate() {
             let shortcut = shortcuts[i];
@@ -1555,7 +1862,7 @@ impl EditorView {
                     .tooltip(if tool == Tool::Number {
                         format!("{label} [{shortcut}] · 下一个 {}", self.next_number)
                     } else if tool == Tool::Watermark {
-                        format!("{label} [{shortcut}] · 在图片上点击输入")
+                        format!("{label} [{shortcut}] · 输入内容后点击图片放置")
                     } else {
                         format!("{label} [{shortcut}]")
                     })
@@ -1603,8 +1910,7 @@ impl EditorView {
                 strip = strip.child(design::divider(cx));
             }
             if name == "ocr" {
-                let editor = cx.entity().downgrade();
-                let observer = editor.clone();
+                let observer = cx.entity().downgrade();
                 let profiles = modes.profiles.clone();
                 strip = strip.child(
                     Button::new("ocr-mode")
@@ -1615,19 +1921,22 @@ impl EditorView {
                         .accessibility_label("选择 OCR 模式")
                         .dropdown_menu(move |mut menu, _, _| {
                             for (index, profile) in profiles.iter().enumerate() {
-                                let editor = editor.clone();
                                 menu = menu.item(
                                     PopupMenuItem::new(profile.name.clone())
                                         .checked(index == mode)
                                         .on_click(move |_, _, cx| {
-                                            let _ = editor.update(cx, |v, cx| {
-                                                v.ocr_mode = Some(index);
-                                                cx.notify();
-                                            });
+                                            remember_ocr_mode(index, cx);
                                         }),
                                 );
                             }
-                            menu.max_h(px(320.)).scrollable(true)
+                            menu.separator()
+                                .item(
+                                    PopupMenuItem::new("跟随设置默认")
+                                        .checked(follows_default)
+                                        .on_click(|_, _, cx| use_default_ocr_mode(cx)),
+                                )
+                                .max_h(px(320.))
+                                .scrollable(true)
                         })
                         .on_open_change(move |open, _, cx| {
                             let editor = observer.clone();
@@ -1651,12 +1960,19 @@ impl EditorView {
                         |b| b.primary(),
                     )
                     .icon(action_icon(name))
-                    .disabled(name == "ocr" && self.ocr_busy)
-                    .selected(name == "ocr" && (self.ocr_busy || self.ocr.is_some()))
-                    .accessibility_label(label)
+                    .selected(name == "ocr" && (self.ocr_scanning || self.ocr.is_some()))
+                    .accessibility_label(if name == "ocr" && self.ocr_scanning {
+                        "取消识别"
+                    } else {
+                        label
+                    })
                     .tooltip(format!(
                         "{} ({})",
-                        label,
+                        if name == "ocr" && self.ocr_scanning {
+                            "取消识别"
+                        } else {
+                            label
+                        },
                         match name {
                             "undo" => design::shortcut("Z", "⌘Z"),
                             "redo" => design::shortcut("Shift+Z", "⇧⌘Z"),
@@ -1668,7 +1984,7 @@ impl EditorView {
                             _ => "P".into(),
                         }
                     ))
-                    .on_click(cx.listener(move |v, _, _, cx| {
+                    .on_click(cx.listener(move |v, _, w, cx| {
                         match name {
                             "undo" => {
                                 v.selected = None;
@@ -1682,7 +1998,7 @@ impl EditorView {
                                 v.doc.redo();
                                 v.refresh(cx);
                             }
-                            "ocr" => v.recognize(cx),
+                            "ocr" => v.request_recognition(w, cx),
                             "save" => v.export(1, cx),
                             "copy" => v.export(0, cx),
                             "pin" => v.export(2, cx),
@@ -1859,6 +2175,15 @@ impl EditorView {
                     v.sync_size(w, cx);
                     cx.stop_propagation();
                 }));
+            if self.option_tool() == Tool::Watermark {
+                options = options.child(
+                    div().w(px(165.)).flex_shrink_0().child(
+                        Input::new(&self.watermark_input)
+                            .xsmall()
+                            .aria_label("水印内容"),
+                    ),
+                );
+            }
             if self.tool.is_shape() || self.tool.is_line() {
                 let variants = if self.tool.is_shape() {
                     vec![
@@ -1970,21 +2295,27 @@ impl EditorView {
             .children(toast)
     }
     fn ocr_panel(
-        &self,
+        &mut self,
         height: Pixels,
         w: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let empty = self.ocr_text.trim().is_empty();
-        let text = if empty {
-            "未识别到文字"
-        } else {
-            self.ocr_text.as_ref()
-        };
-        if self.ocr_field.read(cx).value().as_ref() != text {
-            self.ocr_field
-                .update(cx, |field, cx| field.set_value(text.to_owned(), w, cx));
+        if self.ocr_loaded != Some(self.ocr_request) {
+            self.ocr_loaded = Some(self.ocr_request);
+            self.ocr_field.update(cx, |field, cx| {
+                field.set_value(self.ocr_text.clone(), w, cx)
+            });
         }
+        let text = self.current_ocr_text(cx);
+        let empty = text.trim().is_empty();
+        let syntax = ocr_text::syntax(self.ocr_language, &text);
+        if self.ocr_field.read(cx).language_name().as_ref() != syntax {
+            self.ocr_field
+                .update(cx, |field, cx| field.set_highlighter(syntax, cx));
+        }
+        let language = self.ocr_language;
+        let editor = cx.entity().downgrade();
+        let observer = editor.clone();
         design::panel(cx)
             .id("ocr-result")
             .relative()
@@ -1995,6 +2326,17 @@ impl EditorView {
             .overflow_hidden()
             .shadow_sm()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .capture_action(
+                cx.listener(|v, _: &gpui_kit::component::input::Copy, w, cx| {
+                    if v.ocr_focused(w, cx) {
+                        let field = v.ocr_field.read(cx);
+                        let selected = field.selected_range();
+                        if !selected.is_empty() && selected == (0..field.text().len()) {
+                            v.ocr_copied = Some(field.value());
+                        }
+                    }
+                }),
+            )
             .child(
                 div()
                     .h_flex()
@@ -2011,20 +2353,90 @@ impl EditorView {
                             .gap_2()
                             .items_center()
                             .child(action_icon("ocr").size(px(13.)))
-                            .child("识别结果"),
+                            .child(div().min_w_0().text_ellipsis().child("识别结果")),
                     )
                     .child(
                         div()
                             .h_flex()
                             .gap_1()
+                            .flex_shrink_0()
+                            .child(
+                                Button::new("ocr-language")
+                                    .xsmall()
+                                    .ghost()
+                                    .label(if language == OcrLanguage::Auto && syntax == "json" {
+                                        "自动 · JSON"
+                                    } else {
+                                        ocr_text::label(language)
+                                    })
+                                    .accessibility_label("代码高亮语言")
+                                    .tooltip("切换代码高亮语言")
+                                    .dropdown_menu(move |mut menu, _, _| {
+                                        for &(mode, label) in ocr_text::LANGUAGES {
+                                            let editor = editor.clone();
+                                            menu = menu.item(
+                                                PopupMenuItem::new(label)
+                                                    .checked(language == mode)
+                                                    .on_click(move |_, _, cx| {
+                                                        let _ = editor.update(cx, |v, cx| {
+                                                            v.set_ocr_language(mode, cx)
+                                                        });
+                                                    }),
+                                            );
+                                        }
+                                        menu
+                                    })
+                                    .on_open_change(move |open, _, cx| {
+                                        let editor = observer.clone();
+                                        let open = *open;
+                                        cx.defer(move |cx| {
+                                            let _ = editor.update(cx, |v, cx| {
+                                                v.popup_open = open;
+                                                cx.notify();
+                                            });
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new("ocr-line-numbers")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(Icon::new(gpui_kit::assets::IconName::ListOrdered))
+                                    .selected(self.ocr_line_numbers)
+                                    .accessibility_label("显示行号")
+                                    .tooltip("显示或隐藏行号")
+                                    .on_click(
+                                        cx.listener(|v, _, w, cx| v.toggle_ocr_line_numbers(w, cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("ocr-wrap")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(Icon::new(gpui_kit::assets::IconName::TextWrap))
+                                    .selected(self.ocr_wrap)
+                                    .accessibility_label("自动换行")
+                                    .tooltip("开启或关闭自动换行")
+                                    .on_click(cx.listener(|v, _, w, cx| v.toggle_ocr_wrap(w, cx))),
+                            )
+                            .child(
+                                Button::new("ocr-format")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(Icon::new(gpui_kit::assets::IconName::Braces))
+                                    .disabled(empty || syntax == "plaintext")
+                                    .accessibility_label("格式化代码")
+                                    .tooltip("按所选语言格式化")
+                                    .on_click(cx.listener(|v, _, w, cx| v.format_ocr(w, cx))),
+                            )
                             .child(
                                 Button::new("ocr-tsv")
                                     .xsmall()
                                     .ghost()
-                                    .disabled(empty)
+                                    .disabled(self.ocr_text.trim().is_empty())
                                     .icon(Icon::new(gpui_kit::assets::IconName::Grid2x2))
                                     .accessibility_label("复制表格 TSV")
-                                    .tooltip("复制表格 TSV")
+                                    .tooltip("从原始识别结果复制表格 TSV")
                                     .on_click(cx.listener(|v, _, _, cx| v.copy_ocr(true, cx))),
                             )
                             .child(
@@ -2040,15 +2452,32 @@ impl EditorView {
                     ),
             )
             .child(
-                div().flex_1().min_h_0().px_2().child(
-                    Textarea::new(&self.ocr_field)
-                        .h((height - px(34.)).max(px(22.)))
-                        .readonly(true)
-                        .bordered(false)
-                        .appearance(false)
-                        .aria_label("识别结果，可选择复制")
-                        .text_size(px(12.)),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .px_1()
+                    .child(
+                        Editor::new(&self.ocr_field)
+                            .h((height - px(46.)).max(px(16.)))
+                            .bordered(false)
+                            .appearance(false)
+                            .aria_label("识别结果，可编辑")
+                            .text_size(px(12.))
+                            .line_height(px(18.)),
+                    )
+                    .when(
+                        empty && self.ocr_text.trim().is_empty() && !self.ocr_focused(w, cx),
+                        |d| {
+                            d.child(
+                                design::detail(cx)
+                                    .absolute()
+                                    .top(px(4.))
+                                    .left(px(47.))
+                                    .child("未识别到文字"),
+                            )
+                        },
+                    ),
             )
             .child(div().h(px(14.)).flex_shrink_0())
             .child(
@@ -2286,7 +2715,7 @@ impl Render for EditorView {
             } else {
                 match self.tool {
                     Tool::Select => CursorStyle::Arrow,
-                    Tool::Text | Tool::Watermark => CursorStyle::IBeam,
+                    Tool::Text => CursorStyle::IBeam,
                     _ => CursorStyle::Crosshair,
                 }
             })
@@ -2466,8 +2895,11 @@ impl Render for EditorView {
                 v.sync_size(w, cx);
                 cx.stop_propagation();
             }))
-            .capture_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                if e.keystroke.key == "escape" {
+            .capture_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
+                if e.keystroke.key == "escape" && v.ocr_focused(w, cx) {
+                    v.focus.focus(w, cx);
+                    cx.stop_propagation();
+                } else if e.keystroke.key == "escape" {
                     v.cancel(cx);
                     cx.stop_propagation();
                 }
@@ -2799,10 +3231,14 @@ impl Render for FloatingToolbar {
                     }
                 }
             }))
-            .capture_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|v, e: &KeyDownEvent, w, cx| {
                 if e.keystroke.key == "escape" {
                     if let Some(editor) = &v.editor {
-                        editor.update(cx, |v, cx| v.cancel(cx));
+                        if editor.read(cx).ocr_focused(w, cx) {
+                            v.focus.focus(w, cx);
+                        } else {
+                            editor.update(cx, |v, cx| v.cancel(cx));
+                        }
                     }
                     cx.stop_propagation();
                 }
@@ -3361,6 +3797,47 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn watermark_uses_toolbar_text_for_placement_and_updates_selected_mark(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.choose_tool(super::Tool::Watermark, w, cx);
+                        v.watermark_input
+                            .update(cx, |field, cx| field.set_value("初稿", w, cx));
+                        let mouse = gpui_kit::MouseDownEvent {
+                            position: v.origin + point(px(45.), px(48.)),
+                            button: gpui_kit::MouseButton::Left,
+                            click_count: 1,
+                            ..Default::default()
+                        };
+                        v.down(&mouse, w, cx);
+                        assert!(v.text_anchor.is_none());
+                        assert_eq!(v.doc.objects[0].text, "初稿");
+                        v.watermark_input.update(cx, |field, cx| {
+                            field.set_value("审批稿", w, cx);
+                            cx.emit(super::InputEvent::PressEnter {
+                                secondary: false,
+                                shift: false,
+                            });
+                        });
+                    });
+                })
+                .unwrap();
+        });
+        cx.update(|cx| {
+            editor.update(cx, |v, _| {
+                assert_eq!(v.doc.objects[0].text, "审批稿");
+                v.doc.undo();
+                assert_eq!(v.doc.objects[0].text, "初稿");
+            });
+        });
+    }
+
+    #[gpui_kit::test]
     fn result_grip_resizes_the_ocr_box_independently(cx: &mut TestAppContext) {
         use gpui_kit::{MouseButton, VisualTestContext};
         let (window, editor) = editor(cx);
@@ -3395,6 +3872,159 @@ mod tests {
             let v = editor.read(cx);
             assert_eq!(v.ocr_size, size(px(580.), px(162.)));
             assert!(v.ocr_resize.is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn pin_editor_can_retry_after_leaving_pending_recognition(cx: &mut TestAppContext) {
+        let (window, editor) = editor(cx);
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        let (prior_request, pending) = v.begin_recognition().unwrap();
+                        v.choose_tool(super::Tool::Text, w, cx);
+                        assert!(pending.cancelled());
+                        assert!(!v.ocr_scanning);
+                        let (new_request, retry) = v.begin_recognition().expect("immediate retry");
+                        let stale_result = || crate::ocr_worker::Recognition {
+                            result: super::OcrResult::default(),
+                            notice: None,
+                        };
+                        v.finish_recognition(prior_request, v.generation, Ok(stale_result()), cx);
+                        assert!(v.ocr.is_none());
+                        assert!(
+                            v.ocr_scanning,
+                            "a cancelled scan must allow immediate retry"
+                        );
+                        v.request_recognition(w, cx);
+                        assert!(retry.cancelled());
+                        assert!(
+                            !v.ocr_scanning,
+                            "the active OCR button must cancel the scan"
+                        );
+                        v.finish_recognition(new_request, v.generation, Ok(stale_result()), cx);
+                        assert!(v.ocr.is_none());
+                    });
+                })
+                .unwrap();
+        });
+    }
+
+    #[gpui_kit::test]
+    fn ocr_language_format_and_copy_keep_text_edits_separate_from_annotations(
+        cx: &mut TestAppContext,
+    ) {
+        use snip_core::editor_preferences::OcrLanguage;
+        let (window, editor) = editor(cx);
+        let raw = r#"{"menu":"你好，{name}"}"#;
+        let changed = r#"{"menu":"欢迎，{name}"}"#;
+        let formatted = "{\n  \"menu\": \"欢迎，{name}\"\n}";
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.host = EditorHost::Capture;
+                        v.ocr = Some(Arc::new(super::OcrResult::default()));
+                        v.ocr_text = raw.into();
+                        cx.notify();
+                    });
+                    let _ = w.draw(cx);
+                    editor.update(cx, |v, cx| {
+                        assert_eq!(v.ocr_field.read(cx).language_name().as_ref(), "json");
+                        v.ocr_field
+                            .update(cx, |field, cx| field.replace_all(changed, w, cx));
+                        v.set_ocr_language(OcrLanguage::Python, cx);
+                        let original_numbers = v.ocr_line_numbers;
+                        v.toggle_ocr_line_numbers(w, cx);
+                        assert_ne!(original_numbers, v.ocr_line_numbers);
+                        assert_eq!(v.current_ocr_text(cx).as_ref(), changed);
+                        assert_eq!(v.ocr_field.read(cx).language_name().as_ref(), "python");
+                        v.set_ocr_language(OcrLanguage::Json, cx);
+                        v.format_ocr(w, cx);
+                        assert_eq!(v.current_ocr_text(cx).as_ref(), formatted);
+                        assert!(v.ocr_has_uncopied_edits(cx));
+                        v.request_recognition(w, cx);
+                    });
+                    let _ = w.draw(cx);
+                })
+                .unwrap();
+        });
+        assert_eq!(
+            cx.pending_prompt().map(|(title, _)| title).as_deref(),
+            Some("重新识别并替换文字？")
+        );
+        cx.simulate_prompt_answer("继续编辑");
+        cx.run_until_parked();
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    let field = editor.read(cx).ocr_field.clone();
+                    field.update(cx, |field, cx| field.focus(w, cx));
+                    let _ = w.draw(cx);
+                })
+                .unwrap();
+            assert!(!editor.read(cx).ocr_confirming);
+            assert_eq!(editor.read(cx).current_ocr_text(cx).as_ref(), formatted);
+        });
+        cx.simulate_keystrokes(
+            window,
+            if cfg!(target_os = "macos") {
+                "cmd-z"
+            } else {
+                "ctrl-z"
+            },
+        );
+        cx.update(|cx| assert_eq!(editor.read(cx).current_ocr_text(cx).as_ref(), changed));
+        cx.simulate_keystrokes(window, "w o");
+        cx.update(|cx| {
+            let view = editor.read(cx);
+            assert!(view.doc.objects.is_empty());
+            assert!(view.ocr.is_some() && !view.ocr_scanning);
+            assert_eq!(view.tool, super::Tool::Select);
+            assert_eq!(view.ocr_text.as_ref(), raw);
+        });
+        // Format again after the text edit's undo. Copy reads the buffer,
+        // without taking the original recognized string from the OCR model.
+        cx.update(|cx| {
+            window
+                .update(cx, |_, w, cx| {
+                    editor.update(cx, |v, cx| {
+                        v.ocr_field
+                            .update(cx, |field, cx| field.replace_all(changed, w, cx));
+                        v.format_ocr(w, cx);
+                        v.copy_ocr(false, cx);
+                        assert!(!v.ocr_has_uncopied_edits(cx));
+                        assert_eq!(
+                            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+                            Some(formatted)
+                        );
+                    });
+                })
+                .unwrap();
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_new_pin_editor_uses_the_remembered_ocr_mode_or_settings_default(cx: &mut TestAppContext) {
+        let (_, first) = editor(cx);
+        let modes = snip_core::ocr_config::OcrConfig::default();
+        cx.update(|cx| {
+            assert_eq!(super::effective_ocr_mode(&modes, cx), modes.active);
+            first.update(cx, |_, cx| super::remember_ocr_mode(2, cx));
+        });
+        drop(first);
+        let (_, next) = editor(cx);
+        cx.update(|cx| {
+            assert!(matches!(next.read(cx).host, EditorHost::Pin(_)));
+            assert_eq!(next.read(cx).preferences.last_ocr_mode, Some(2));
+            assert_eq!(super::effective_ocr_mode(&modes, cx), 2);
+            super::remember_ocr_mode(usize::MAX, cx);
+            assert_eq!(super::effective_ocr_mode(&modes, cx), modes.active);
+            super::remember_ocr_mode(0, cx);
+            super::use_default_ocr_mode(cx);
+            assert_eq!(super::remembered_ocr_mode(cx), None);
+            assert_eq!(super::effective_ocr_mode(&modes, cx), modes.active);
         });
     }
 

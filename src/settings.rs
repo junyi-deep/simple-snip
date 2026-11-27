@@ -772,6 +772,9 @@ impl Settings {
         })();
         match result {
             Ok(index) => {
+                if matches!(operation, OcrModeAction::Default) {
+                    crate::editor::use_default_ocr_mode(cx);
+                }
                 self.load_ocr_fields(index, w, cx);
                 crate::ui::notify(w, "OCR 模式已保存", false, cx);
             }
@@ -851,7 +854,12 @@ impl Settings {
                 div().flex().flex_wrap().gap_2().children(
                     [
                         ("保存模式", OcrModeAction::Save, true),
-                        ("设为默认", OcrModeAction::Default, self.ocr_edit != active),
+                        (
+                            "设为默认",
+                            OcrModeAction::Default,
+                            self.ocr_edit != active
+                                || crate::editor::remembered_ocr_mode(cx).is_some(),
+                        ),
                         ("还原预设", OcrModeAction::Reset, self.ocr_edit < 3),
                         ("复制为自定义", OcrModeAction::Duplicate, true),
                     ]
@@ -1888,13 +1896,6 @@ impl Render for Settings {
                                 .mt_3()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child("屏幕录制权限"),
-                        )
-                        .child(
-                            crate::ui::detail(cx).child(if snip_platform::screen_permission() {
-                                "已授权"
-                            } else {
-                                "尚未授权"
-                            }),
                         )
                         .child(
                             div()

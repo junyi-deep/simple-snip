@@ -138,8 +138,8 @@ impl Default for TrailConfig {
             fps: 60,
             animation: TrailAnimation::Ribbon,
             color_mode: TrailColorMode::Rainbow,
-            primary_color: "#FF5A8A".into(),
-            secondary_color: "#38BDF8".into(),
+            primary_color: "#38BDF8".into(),
+            secondary_color: "#FF5A8A".into(),
         }
     }
 }
@@ -160,7 +160,7 @@ impl TrailConfig {
         }
     }
     pub fn color_at(&self, phase: f32) -> [u8; 4] {
-        let first = || Self::parse_color(&self.primary_color).unwrap_or([255, 90, 138, 255]);
+        let first = || Self::parse_color(&self.primary_color).unwrap_or([56, 189, 248, 255]);
         match self.color_mode {
             TrailColorMode::Rainbow => {
                 let [r, g, b] = crate::trail::rainbow(phase);
@@ -170,7 +170,7 @@ impl TrailConfig {
             TrailColorMode::Gradient => {
                 let first = first();
                 let second =
-                    Self::parse_color(&self.secondary_color).unwrap_or([56, 189, 248, 255]);
+                    Self::parse_color(&self.secondary_color).unwrap_or([255, 90, 138, 255]);
                 let t = phase.clamp(0., 1.);
                 std::array::from_fn(|i| {
                     (first[i] as f32 + (second[i] as f32 - first[i] as f32) * t).round() as u8

@@ -121,7 +121,7 @@ impl Overlay {
                     && std::env::args().any(|a| {
                         matches!(
                             a.as_str(),
-                            "annotation" | "ocr-result" | "ocr-preview" | "watermark"
+                            "annotation" | "ocr-result" | "ocr-preview" | "ocr-code" | "watermark"
                         )
                     })))
         {
@@ -156,6 +156,22 @@ impl Overlay {
                                     && std::env::args().any(|a| a == "ocr-preview")
                                 {
                                     v.fixture_ocr_result(cx);
+                                }
+                                #[cfg(debug_assertions)]
+                                if crate::is_docs_demo()
+                                    && std::env::args().any(|a| a == "ocr-code")
+                                {
+                                    v.fixture_ocr_text(
+                                        concat!(
+                                            "{\n",
+                                            "  \"welcome\": \"你好，{name}\",\n",
+                                            "  \"items\": \"共 {{count}} 项\",\n",
+                                            "  \"locales\": [\"zh-CN\", \"en-US\"],\n",
+                                            "  \"enabled\": true\n",
+                                            "}",
+                                        ),
+                                        cx,
+                                    );
                                 }
                             });
                         }

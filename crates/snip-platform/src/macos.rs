@@ -10,7 +10,7 @@ use objc2_core_graphics::{
     CGEvent, CGEventTapLocation, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
     CGScrollEventUnit,
 };
-use objc2_foundation::{NSArray, NSData, NSDictionary, NSRange, NSString};
+use objc2_foundation::{NSArray, NSDictionary, NSRange, NSString};
 use objc2_vision::{
     VNImageRequestHandler, VNRecognizeTextRequest, VNRequest, VNRequestTextRecognitionLevel,
 };
@@ -111,7 +111,7 @@ pub fn native_style(handle: RawWindowHandle, style: WindowStyle) -> Result<()> {
     w.setLevel(if style.topmost { 25 } else { 0 });
     w.setIgnoresMouseEvents(style.click_through);
     w.setAlphaValue(style.opacity.clamp(0.1, 1.) as f64);
-    w.setHasShadow(false);
+    w.setHasShadow(style.app_window);
     w.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary,
@@ -134,6 +134,9 @@ pub fn native_show(handle: RawWindowHandle, show: bool) -> Result<()> {
         w.orderOut(None);
     }
     Ok(())
+}
+pub fn window_has_shadow(handle: RawWindowHandle) -> Result<bool> {
+    Ok(window(handle)?.hasShadow())
 }
 /// An owned top-level NSWindow id, used only to exclude our capture controls.
 pub fn exclude_capture_controls(handle: RawWindowHandle) -> Result<u32> {
@@ -328,10 +331,14 @@ pub fn recognize_with_vision(
     options: &snip_core::ocr_config::VisionOptions,
     cancel: &Cancellation,
 ) -> Result<OcrResult> {
+    use objc2_core_foundation::CFData;
+    use objc2_core_graphics::{
+        CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage,
+        CGImageAlphaInfo, CGImageByteOrderInfo,
+    };
     objc2::rc::autoreleasepool(|_| {
         ensure!(!cancel.cancelled(), "识别已取消");
-        let mut png = std::io::Cursor::new(Vec::new());
-        image.write_to(&mut png, image::ImageFormat::Png)?;
+        ensure!(image.width() > 0 && image.height() > 0, "OCR 图片为空");
         let request = VNRecognizeTextRequest::new();
         request.setRecognitionLevel(if options.accurate {
             VNRequestTextRecognitionLevel::Accurate
@@ -366,12 +373,34 @@ pub fn recognize_with_vision(
                 "当前 Vision 模式不支持所选语言"
             );
         }
-        let data = NSData::with_bytes(png.get_ref());
-        let handler = VNImageRequestHandler::initWithData_options(
-            VNImageRequestHandler::alloc(),
-            &data,
-            &NSDictionary::new(),
-        );
+        let data = CFData::from_bytes(image.as_raw());
+        let provider = CGDataProvider::with_cf_data(Some(&data)).context("无法读取 OCR 像素")?;
+        let space = CGColorSpace::new_device_rgb().context("无法创建 OCR 色彩空间")?;
+        // SAFETY: The provider owns the immutable RGBA bytes and no custom decode table is used.
+        let native = unsafe {
+            CGImage::new(
+                image.width() as usize,
+                image.height() as usize,
+                8,
+                32,
+                image.width() as usize * 4,
+                Some(&space),
+                CGBitmapInfo(CGImageAlphaInfo::Last.0 | CGImageByteOrderInfo::Order32Big.0),
+                Some(&provider),
+                std::ptr::null(),
+                false,
+                CGColorRenderingIntent::RenderingIntentDefault,
+            )
+        }
+        .context("无法创建 Vision OCR 图像")?;
+        // SAFETY: `native` is immutable and remains alive during the synchronous request.
+        let handler = unsafe {
+            VNImageRequestHandler::initWithCGImage_options(
+                VNImageRequestHandler::alloc(),
+                &native,
+                &NSDictionary::new(),
+            )
+        };
         let requests = NSArray::from_slice(&[&*request as &VNRequest]);
         handler
             .performRequests_error(&requests)
@@ -388,6 +417,7 @@ pub fn recognize_with_vision(
         };
         if let Some(results) = request.results() {
             for observation in results.iter() {
+                ensure!(!cancel.cancelled(), "识别已取消");
                 let candidates = observation.topCandidates(1);
                 let Some(text) = candidates.firstObject() else {
                     continue;
@@ -395,22 +425,24 @@ pub fn recognize_with_vision(
                 let full = text.string().to_string();
                 let bounds = convert(unsafe { observation.boundingBox() });
                 let mut words = vec![];
+                let mut remaining = full.as_str();
                 let mut offset = 0;
-                // Use actual Vision boxes for each Unicode scalar (UTF-16 ranges),
-                // including CJK. Never invent equal-width OCR hit targets.
-                for ch in full.chars() {
-                    let len = ch.len_utf16();
-                    if !ch.is_whitespace()
-                        && let Ok(boxed) =
-                            unsafe { text.boundingBoxForRange_error(NSRange::new(offset, len)) }
+                // The result editor uses text ranges. Only TSV needs on-image boxes.
+                for word in full.split_whitespace() {
+                    let spacing = remaining.len() - remaining.trim_start().len();
+                    offset += remaining[..spacing].encode_utf16().count();
+                    let len = word.encode_utf16().count();
+                    if let Ok(boxed) =
+                        unsafe { text.boundingBoxForRange_error(NSRange::new(offset, len)) }
                     {
                         words.push(OcrWord {
-                            text: ch.to_string(),
+                            text: word.to_owned(),
                             bounds: convert(unsafe { boxed.boundingBox() }),
                             confidence: Some(text.confidence()),
                         });
                     }
                     offset += len;
+                    remaining = &remaining[spacing + word.len()..];
                 }
                 if words.is_empty() {
                     words.push(OcrWord {

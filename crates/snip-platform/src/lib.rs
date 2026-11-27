@@ -176,7 +176,7 @@ pub struct WindowStyle {
     pub no_activate: bool,
     /// Full-display overlays must bypass macOS titled-window frame constraints.
     pub desktop_overlay: bool,
-    /// Normal settings windows participate in the Windows taskbar / Alt+Tab.
+    /// Regular app windows get a native macOS shadow and a Windows taskbar entry.
     pub app_window: bool,
 }
 impl Default for WindowStyle {

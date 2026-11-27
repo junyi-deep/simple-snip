@@ -141,8 +141,9 @@ These icon-theme methods are available only on Linux.
 
 ## Activation and lifecycle
 
-Use `.on_activate(action)` for primary tray activation. On macOS, an attached
-menu opens on the primary click; activation is dispatched when there is no menu.
+Use `.on_activate(action)` to handle a single primary click. On macOS and Windows,
+the secondary click opens the attached menu. Without an activation handler, the
+primary click also opens the menu.
 
 `Tray::close` removes the native item and is safe to call more than once.
 Dropping the last clone performs the same cleanup on a best-effort basis.

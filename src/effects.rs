@@ -2,7 +2,7 @@ use crate::app::{self, Runtime};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use snip_core::{
-    config::{TrailAnimation, TrailColorMode, TrailConfig},
+    config::{TrailAnimation, TrailConfig},
     geometry::Point as ImagePoint,
     trail::Trail,
 };
@@ -260,12 +260,7 @@ fn trail_canvas(trail: &Trail, time: f64, config: TrailConfig) -> impl IntoEleme
         move |bounds, _, window, _| {
             let color = |time_at: f64, opacity: f32| {
                 let fade = (1. - (time - time_at) / life).clamp(0., 1.) as f32;
-                let phase = if config.color_mode == TrailColorMode::Gradient {
-                    fade
-                } else {
-                    (time_at / life + time * 0.15).rem_euclid(1.) as f32
-                };
-                let [r, g, b, alpha] = config.color_at(phase);
+                let [r, g, b, alpha] = config.color_at(1. - fade);
                 rgba(
                     ((r as u32) << 24)
                         | ((g as u32) << 16)
