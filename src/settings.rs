@@ -312,7 +312,9 @@ impl Settings {
                         )
                         .as_deref()
                         {
-                            Ok("ok") => "上次升级安装完成；可检查新版本。".into(),
+                            Ok(
+                                "ok" | "ok-screen-capture-reset" | "ok-screen-capture-reset-failed",
+                            ) => "上次升级安装完成；可检查新版本。".into(),
                             Ok("failed") => {
                                 "上次升级失败，已尝试恢复原版本；请检查安装目录中的升级日志。"
                                     .into()
@@ -1842,9 +1844,14 @@ impl Render for Settings {
                             .on_click(cx.listener(|v, _, w, cx| v.check_updates(w, cx))),
                     ))
                     .when_some(release, |d, version| {
+                        let install_detail = if cfg!(target_os = "macos") {
+                            format!("{version} · 若签名身份变化，更新器将尝试清除旧录屏授权，安装后需重新允许。")
+                        } else {
+                            version
+                        };
                         d.child(row(
                             "可用版本",
-                            &version,
+                            &install_detail,
                             Button::new("download-update")
                                 .small()
                                 .primary()

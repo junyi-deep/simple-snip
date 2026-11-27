@@ -1501,6 +1501,20 @@ pub fn check_screen_permission(cx: &mut App) {
     });
 }
 fn screen_permission_dialog(cx: &mut App) {
+    show_screen_permission_prompt("", cx);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn screen_permission_after_update(reset: bool, cx: &mut App) {
+    let note = if reset {
+        "新版已安装，旧录屏授权已清除。请重新允许当前应用。\n\n"
+    } else {
+        "新版已安装，未能自动清除旧录屏授权。\n\n"
+    };
+    show_screen_permission_prompt(note, cx);
+}
+
+fn show_screen_permission_prompt(note: &str, cx: &mut App) {
     if cx.global::<Runtime>().permission_prompt {
         return;
     }
@@ -1517,7 +1531,7 @@ fn screen_permission_dialog(cx: &mut App) {
     });
     let detail = if let Some(bundle) = bundle {
         format!(
-            "截图仅在本地处理。请在「屏幕与系统音频录制」中启用下方应用。若开关已开启，先用 − 移除旧条目，再用 + 添加当前应用。授权后从菜单栏退出 Simple Snip，再重新打开。\n\n{bundle}"
+            "{note}截图仅在本地处理。请在「屏幕与系统音频录制」中启用下方应用。若列表中没有 Simple Snip，用 + 添加。若开关已开仍无法截图，先用 − 移除旧条目，再用 + 添加当前应用。授权后退出并重新打开 Simple Snip。\n\n{bundle}"
         )
     } else {
         "请先通过 Simple Snip.app 启动，再在「屏幕与系统音频录制」中添加该应用包。截图仅在本地处理。".into()

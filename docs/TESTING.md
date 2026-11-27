@@ -1,5 +1,13 @@
 # 实际测试记录
 
+## 2026-11-27 · macOS 应用内升级与录屏权限
+
+使用两个签名不同的临时测试应用，在本机 Apple Silicon 验证升级助手等待旧进程退出、替换应用并启动新版。隔离应用位于用户应用程序目录，没有使用 Simple Snip 的录屏授权。真实 `tccutil` 返回重置成功，新版收到成功提示参数。在临时目录试跑时，Launch Services 未找到测试应用的 Bundle ID，重置失败后新版仍启动并收到失败提示参数。测试没有操作已安装的 Simple Snip，也没有验收在系统设置授予新版权限后的实际截图。
+
+升级回归使用真实 `codesign` 比较签名要求，并覆盖签名兼容时保留授权、替换失败时跳过重置、重置失败时继续安装。重置失败走系统设置入口。
+
+本机 macOS workspace 142 项 Rust 测试通过，4 项需桌面的用例按既有条件跳过。workspace 格式检查、Clippy `-D warnings`、升级脚本语法检查和 Windows AMD64 的 `snip-update` 交叉编译检查通过。
+
 ## 2026-11-27 · v0.0.27 发布核验
 
 [发布流水线](https://github.com/junyi-deep/simple-snip/actions/runs/45990476926) 在 Windows AMD64 和 macOS ARM64 原生运行器上通过格式化、编译检查、Clippy、测试、Release 构建及打包。Windows 144 项、macOS 140 项 Rust 自动测试通过，分别有 3 项和 4 项需真实桌面的测试默认跳过。macOS 的 6 项签名与公证流程测试通过。

@@ -98,6 +98,17 @@ fn main() {
     application.run(move |cx| {
         gpui_kit::init(cx);
         app::start(cx, smoke_test || perf_test || docs_test);
+        #[cfg(target_os = "macos")]
+        if !smoke_test && !perf_test && !docs_test {
+            let reset = std::env::args().find_map(|arg| match arg.as_str() {
+                "--screen-capture-reset=done" => Some(true),
+                "--screen-capture-reset=failed" => Some(false),
+                _ => None,
+            });
+            if let Some(reset) = reset {
+                cx.defer(move |cx| app::screen_permission_after_update(reset, cx));
+            }
+        }
         if std::env::args().any(|arg| arg == "--permission-dialog-test") {
             app::send(cx, app::Event::ScreenPermissionDenied);
         }
