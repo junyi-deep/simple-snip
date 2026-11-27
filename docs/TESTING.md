@@ -1,5 +1,13 @@
 # 实际测试记录
 
+## 2026-11-27：v0.0.26 发布核验
+
+`v0.0.25` 标签的流水线已取消。当天本机复跑时，直接调用 Vision 的旧预设测试超过 60 秒仍未返回。`v0.0.26` 将该测试改为走应用的有界 OCR 子进程，正常返回的精确结果仍检查中文，回退时单独记录精确中文未验证。
+
+[发布流水线](https://github.com/junyi-deep/simple-snip/actions/runs/45928627099) 的 Windows AMD64、macOS ARM64 和发布任务均成功，标签指向 `06266554f641a56e52b725fe8cc8a06696eea1c7`。Windows 140 项、macOS 137 项 Rust 测试通过，各有 3 项需要桌面权限的测试默认跳过。macOS 的 6 项签名和公证流程命令替身测试通过。
+
+[公开发行版](https://github.com/junyi-deep/simple-snip/releases/tag/v0.0.26) 的三个安装包均已下载，SHA-256 与发布校验清单及 GitHub 资产摘要一致。ZIP 完整性、Windows AMD64 GUI、macOS ARM64 和双版本号、临时签名完整性及 DMG 校验通过。使用该发布 ZIP 替换了本机 `/Applications/Simple Snip.app`，已核对主程序字节、启动日志和 OCR 快速模式读出合成代码图的 32 行。此次安装尚未复测重新授权后的实际截图。
+
 ## 2026-11-26：OCR 结果代码编辑与模式记忆
 
 macOS ARM64 全 workspace 130 项通过、3 项按既有条件跳过；Clippy、格式检查和 Debug 构建通过。新增回归覆盖贴图编辑器重建后恢复识别模式、偏好持久化、代码语言切换、文字修改、格式化撤销、复制以及手动重新识别确认取消后的文本保留。JSON 用例检查国际化文本、占位符、重复键、键顺序和数值原样保留；原生 Apple Vision 三个识别预设仍通过。
